@@ -68,12 +68,12 @@ fn an_attempt_forwards_the_caller_body_unchanged() {
 }
 
 #[test]
-fn far_end_pieces_are_relayed_unchanged_and_the_count_read_over_the_whole_answer() {
+fn far_end_pieces_are_held_whole_and_the_count_read_over_the_whole_answer() {
     let mut reading = FarEndReading::new();
     let a = br#"{"request_id":"req_1","usage":{"un"#;
     let b = br#"its":42},"answers":{"decision":"approve"}}"#;
-    assert_eq!(reading.piece(a), &a[..]);
-    assert_eq!(reading.piece(b), &b[..]);
+    assert_eq!(reading.piece(a), Ok(()));
+    assert_eq!(reading.piece(b), Ok(()));
     assert_eq!(
         reading.units(),
         Some(Units {
@@ -87,7 +87,9 @@ fn far_end_pieces_are_relayed_unchanged_and_the_count_read_over_the_whole_answer
 #[test]
 fn an_error_answer_reports_no_units() {
     let mut reading = FarEndReading::new();
-    reading.piece(br#"{"error":{"code":"invalid_state"},"usage":{"units":3}}"#);
+    reading
+        .piece(br#"{"error":{"code":"invalid_state"},"usage":{"units":3}}"#)
+        .expect("under the backstop");
     assert_eq!(reading.units(), None);
 }
 
@@ -97,7 +99,9 @@ fn an_error_answer_reports_no_units() {
 #[test]
 fn the_count_is_read_as_decode_response_reads_it() {
     let mut reading = FarEndReading::new();
-    reading.piece(br#"{"usage":{"units":3}}"#);
+    reading
+        .piece(br#"{"usage":{"units":3}}"#)
+        .expect("under the backstop");
     assert_eq!(reading.units().map(|u| u.amount), Some(3));
     for (body, amount) in [
         (
@@ -111,7 +115,7 @@ fn the_count_is_read_as_decode_response_reads_it() {
         (format!(r#"{{"usage":{{"units":{}}}}}"#, u64::MAX), None),
     ] {
         let mut reading = FarEndReading::new();
-        reading.piece(body.as_bytes());
+        reading.piece(body.as_bytes()).expect("under the backstop");
         assert_eq!(reading.units().map(|u| u.amount), amount, "{body}");
     }
 }
@@ -125,7 +129,7 @@ fn a_count_that_is_not_a_whole_number_reports_no_units() {
         br#"{}"#,
     ] {
         let mut reading = FarEndReading::new();
-        reading.piece(body);
+        reading.piece(body).expect("under the backstop");
         assert_eq!(reading.units(), None, "{}", String::from_utf8_lossy(body));
     }
 }
@@ -133,7 +137,9 @@ fn a_count_that_is_not_a_whole_number_reports_no_units() {
 #[test]
 fn the_units_never_read_state_or_answers() {
     let mut reading = FarEndReading::new();
-    reading.piece(br#"{"usage":{"units":7},"state":{"units":999},"answers":{"units":888}}"#);
+    reading
+        .piece(br#"{"usage":{"units":7},"state":{"units":999},"answers":{"units":888}}"#)
+        .expect("under the backstop");
     assert_eq!(reading.units().map(|u| u.amount), Some(7));
 }
 
@@ -174,7 +180,8 @@ fn only_exactly_one_model_mounts_the_claim() {
 #[test]
 fn the_request_fee_is_counted_on_a_success_alone() {
     let mut ok = FarEndReading::new();
-    ok.piece(br#"{"usage":{"units":3}}"#);
+    ok.piece(br#"{"usage":{"units":3}}"#)
+        .expect("under the backstop");
     let fee = ok.fee(Some(200)).expect("a success owes its fee");
     assert_eq!(
         (fee.class, fee.amount, fee.reported),
@@ -185,7 +192,9 @@ fn the_request_fee_is_counted_on_a_success_alone() {
     assert_eq!(ok.fee(Some(500)), None);
     assert_eq!(ok.fee(None), None, "no status read, no fee");
     let mut failed = FarEndReading::new();
-    failed.piece(br#"{"error":{"code":"x","message":"y"}}"#);
+    failed
+        .piece(br#"{"error":{"code":"x","message":"y"}}"#)
+        .expect("under the backstop");
     assert_eq!(failed.fee(Some(200)), None, "an error answer owes none");
 }
 
@@ -212,4 +221,17 @@ fn every_caller_field_but_the_governed_set_is_relayed() {
         ]
     );
     assert!(relayed_fields(std::iter::empty()).is_empty());
+}
+
+/// THE ABUSE BACKSTOP (#41): an answer that would grow past the cap is refused and nothing of the
+/// piece is held; up to the cap is held whole, and taken out whole for the relay.
+#[test]
+fn an_answer_past_the_backstop_is_refused() {
+    let mut reading = FarEndReading::new();
+    assert_eq!(reading.piece_within(b"12345", 8), Ok(()));
+    assert_eq!(reading.piece_within(b"678", 8), Ok(()));
+    assert_eq!(reading.piece_within(b"9", 8), Err(OverBackstop));
+    assert_eq!(reading.take_answer(), b"12345678");
+    assert!(reading.take_answer().is_empty(), "taken, not copied");
+    assert_eq!(ANSWER_BACKSTOP, 256 * 1024 * 1024);
 }

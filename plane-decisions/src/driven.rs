@@ -9,11 +9,12 @@
 //! | `arrive` | [`arrive`]: the op class, the principal need and the dialect of a claimed request |
 //! | `on_piece`, from the caller | [`caller_piece`]: the caller's whole body arrives as one piece; the kernel keeps it |
 //! | `on_piece`, ATTEMPT (from the kernel) | [`attempt`]: the request bound for the far end, verb and target explicit |
-//! | `on_piece`, from the far end | [`FarEndReading`]: the bytes relayed unchanged, and the units the far end reported |
+//! | `on_piece`, from the far end | [`FarEndReading`]: the answer held to its last piece, then relayed unchanged with the units the far end reported |
 //! | `refusal` | [`refusal_body`]: the kernel's status and text, in this dialect's error shape |
 //!
 //! Every answer is plain data. Nothing here holds a byte across calls: [`FarEndReading`] is a value
-//! the caller owns for the length of one unit, and it is the only accumulating thing in the module.
+//! the caller owns for the length of one unit, bounded by [`ANSWER_BACKSTOP`], and it is the only
+//! accumulating thing in the module.
 //! Writing these answers into the host buffers of the plane ABI (`busbar_contract::abi::plane`) is
 //! the plane door's job, one generic adapter for every plane; it is not this plane's.
 //!
@@ -233,11 +234,22 @@ pub struct Units {
     pub amount: u64,
 }
 
-/// The far end's answer, read as it is relayed.
+/// THE ABUSE BACKSTOP on the one far-end answer a unit holds: past it the unit is refused, loudly,
+/// and counted, and no other unit is touched. Decision answers are unbounded (#41, "jev ~5 KB
+/// unbounded responses"), so this is no size policy: it is the backstop #41 allows, "a ceiling set
+/// absurdly high that only a runaway/attack could hit; on trip it cleanly refuses THAT ONE request".
+pub const ANSWER_BACKSTOP: usize = 256 * 1024 * 1024;
+
+/// A far-end answer grew past [`ANSWER_BACKSTOP`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OverBackstop;
+
+/// The far end's answer, HELD until its last piece.
 ///
-/// Every piece is relayed to the caller unchanged, as it arrives. The count lives inside the body
-/// (`/usage/units`), so the bytes are also kept until the last piece, and the count is read once,
-/// over the whole answer.
+/// The count lives inside the body (`/usage/units`), so the answer is held whole and read once, and
+/// only then relayed: an answer that cannot be billed is refused before a byte of it reaches the
+/// caller. The held bytes are the one copy: the relay pays out of them, never out of a second
+/// buffer (jev answers are not streamed, so holding them loses the caller nothing).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FarEndReading {
     body: Vec<u8>,
@@ -250,10 +262,27 @@ impl FarEndReading {
         Self::default()
     }
 
-    /// Take one far-end piece and return the bytes to relay to the caller: the piece itself.
-    pub fn piece<'p>(&mut self, bytes: &'p [u8]) -> &'p [u8] {
+    /// Hold one far-end piece.
+    ///
+    /// # Errors
+    ///
+    /// [`OverBackstop`] when the answer would grow past [`ANSWER_BACKSTOP`]; nothing is held.
+    pub fn piece(&mut self, bytes: &[u8]) -> Result<(), OverBackstop> {
+        self.piece_within(bytes, ANSWER_BACKSTOP)
+    }
+
+    /// [`Self::piece`] under the backstop `cap`.
+    pub(crate) fn piece_within(&mut self, bytes: &[u8], cap: usize) -> Result<(), OverBackstop> {
+        if self.body.len().saturating_add(bytes.len()) > cap {
+            return Err(OverBackstop);
+        }
         self.body.extend_from_slice(bytes);
-        bytes
+        Ok(())
+    }
+
+    /// The held answer, moved out whole for the relay (no copy).
+    pub fn take_answer(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.body)
     }
 
     /// The units the far end reported, read at the last piece, by the rule the plane's
