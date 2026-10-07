@@ -168,11 +168,93 @@ fn a_refusal_carries_the_kernel_text_in_the_dialect_shape() {
 }
 
 #[test]
-fn only_exactly_one_model_mounts_the_claim() {
+fn any_configured_model_mounts_the_claim() {
     assert!(served_claims(0).is_empty());
     assert_eq!(served_claims(1), tail::CLAIMS);
-    assert!(served_claims(2).is_empty());
-    assert!(served_claims(7).is_empty());
+    // RED (finding 1): several models used to mount nothing.
+    assert_eq!(served_claims(2), tail::CLAIMS);
+    assert_eq!(served_claims(7), tail::CLAIMS);
+}
+
+fn models(json: &str) -> Models {
+    Models::of(&crate::plane_door::read_settings(json.as_bytes()).expect("a section"))
+}
+
+/// MODEL RESOLUTION (DECISIONS D8b), every case a cell.
+#[test]
+fn a_request_routes_by_its_model() {
+    let one = models(r#"{"models":{"jev":{"provider":"typesafe"}}}"#);
+    let two = models(
+        r#"{"models":{"jev":{"provider":"typesafe","upstream_model":"jev-1.13.0"},"alt":{"provider":"typesafe","upstream_model":"alt"}}}"#,
+    );
+    // One configured, none named: the default, nothing to rewrite.
+    for body in [&br#"{"state":{}}"#[..], br#"{"model":null,"state":{}}"#] {
+        assert_eq!(
+            one.resolve(body),
+            Ok(Routed {
+                model: "jev",
+                upstream: None
+            })
+        );
+    }
+    // One configured, it named.
+    assert_eq!(
+        one.resolve(br#"{"model":"jev"}"#).map(|r| r.model),
+        Ok("jev")
+    );
+    // RED: one configured, an unknown one named, is 404 (predev routed it to the one).
+    assert_eq!(one.resolve(br#"{"model":"other"}"#), Err(Unrouted::Unknown));
+    assert_eq!(Unrouted::Unknown.status(), 404);
+    // RED: several configured, none named, is 400.
+    assert_eq!(two.resolve(br#"{"state":{}}"#), Err(Unrouted::NoneNamed));
+    assert_eq!(Unrouted::NoneNamed.status(), 400);
+    // Several configured, one named: it, with its differing upstream name.
+    assert_eq!(
+        two.resolve(br#"{"model":"jev"}"#),
+        Ok(Routed {
+            model: "jev",
+            upstream: Some("jev-1.13.0")
+        })
+    );
+    // An `upstream_model` equal to the key rewrites nothing.
+    assert_eq!(
+        two.resolve(br#"{"model":"alt"}"#),
+        Ok(Routed {
+            model: "alt",
+            upstream: None
+        })
+    );
+    // A `model` that is not a string is 400; the name is matched exactly, never inside `state`.
+    assert_eq!(two.resolve(br#"{"model":7}"#), Err(Unrouted::NotAName));
+    assert_eq!(Unrouted::NotAName.status(), 400);
+    assert_eq!(
+        two.resolve(br#"{"state":{"model":"jev"}}"#),
+        Err(Unrouted::NoneNamed)
+    );
+    // No model configured: nothing routes (the generation mounts no claim).
+    assert_eq!(
+        models(r#"{"models":{}}"#).resolve(br#"{}"#),
+        Err(Unrouted::Unknown)
+    );
+}
+
+/// THE `upstream_model` SPLICE (DECISIONS D8b): only the top-level `model` value changes, every
+/// other byte (spacing, order, a nested `model`) is kept; with no top-level `model` string there is
+/// nothing to splice.
+#[test]
+fn upstream_model_rewrites_only_the_top_level_model_value() {
+    let body = br#"{ "state" : {"model":"jev"},  "model" : "jev" ,"context":{}}"#;
+    assert_eq!(
+        splice_model(body, "jev-1.13.0").as_deref(),
+        Some(&br#"{ "state" : {"model":"jev"},  "model" : "jev-1.13.0" ,"context":{}}"#[..])
+    );
+    assert_eq!(
+        splice_model(br#"{"model":"a"}"#, "q\"x").as_deref(),
+        Some(&br#"{"model":"q\"x"}"#[..]),
+        "the name is written as a JSON string"
+    );
+    assert_eq!(splice_model(br#"{"state":{"model":"jev"}}"#, "x"), None);
+    assert_eq!(splice_model(br#"{"model":null}"#, "x"), None);
 }
 
 /// BILLABLE SUCCESS ONLY: the request fee is counted once for a far end's 2xx answer with no

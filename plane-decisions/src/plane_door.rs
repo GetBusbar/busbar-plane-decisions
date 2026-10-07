@@ -18,9 +18,11 @@
 //!   its one outbound need, and the tail [`TAIL`] (every list read off [`crate::driven::tail`]).
 //! * `validate`, `open`, `refresh`: the settings blob read as the `decisions:` section
 //!   ([`crate::config::DecisionsSection`]); a generation's snapshot claims
-//!   [`crate::driven::served_claims`] for its model count, and binds no audience (the operation
-//!   is served on the plain data plane to a keyed caller). `retire` drops a generation.
-//! * `arrive`: [`crate::driven::arrive`]; an unclaimed request is refused at 404.
+//!   [`crate::driven::served_claims`] for its model count, keeps its [`crate::driven::Models`],
+//!   and binds no audience (the operation is served on the plain data plane to a keyed caller).
+//!   `retire` drops a generation.
+//! * `arrive`: [`crate::driven::arrive`]; an unclaimed request is refused at 404; a claimed one
+//!   routes by its top-level `model` over the newest generation ([`crate::driven::Models::resolve`]).
 //! * `on_piece`: the ATTEMPT's request head ([`crate::driven::attempt_request`]), the caller's body to the
 //!   far end unchanged ([`crate::driven::caller_piece`]), and the far end's answer held to its last
 //!   piece, its count read, then relayed unchanged ([`crate::driven::FarEndReading`]).
@@ -63,7 +65,7 @@ use busbar_contract::plane::PlaneMeta;
 
 use crate::codec::{CONTENT_TYPE_JSON, FIELD_CONTENT_TYPE};
 use crate::config::DecisionsSection;
-use crate::driven::{self, tail, CallerAnswer, FarEndReading, PrincipalNeed};
+use crate::driven::{self, tail, CallerAnswer, FarEndReading, Models, PrincipalNeed, Unrouted};
 use crate::{claims, DecisionPlane};
 
 /// The version the Statement names: the crate's (a test pins the two equal).
@@ -82,6 +84,24 @@ pub const UNCLAIMED: u32 = 1;
 
 /// [`ArriveOut::refusal`]: the instance holds [`MAX_UNITS`] live units and takes no new one.
 pub const AT_CAPACITY: u32 = 2;
+
+/// [`ArriveOut::refusal`]: the request names no model and several are configured (400).
+pub const NO_MODEL_NAMED: u32 = 3;
+
+/// [`ArriveOut::refusal`]: the request's `model` is not a string (400).
+pub const MODEL_NOT_A_NAME: u32 = 4;
+
+/// [`ArriveOut::refusal`]: the request names a model this generation does not configure (404).
+pub const UNKNOWN_MODEL: u32 = 5;
+
+/// The refusal code of a request that routes nowhere.
+const fn unrouted_code(why: Unrouted) -> u32 {
+    match why {
+        Unrouted::NoneNamed => NO_MODEL_NAMED,
+        Unrouted::NotAName => MODEL_NOT_A_NAME,
+        Unrouted::Unknown => UNKNOWN_MODEL,
+    }
+}
 
 /// The status an unclaimed request is refused at.
 const STATUS_NOT_FOUND: u32 = 404;
@@ -322,18 +342,19 @@ struct Unit {
     content_type: Option<Vec<u8>>,
     /// The ticket the unit's pieces cross on: a `cancel` names the unit by it.
     ticket: Option<Ticket>,
+    /// The name the caller body's top-level `model` is spliced to ([`driven::splice_model`]):
+    /// the routed model's `upstream_model`, where the request named it and it differs.
+    upstream: Option<String>,
 }
 
 /// One instance: every live generation's snapshot, and the units in flight.
 #[derive(Debug)]
 pub struct DecisionsDoor {
-    generations: Generations<PlaneSnapshot>,
+    /// Every live generation's snapshot, with its models (a request routes over the newest).
+    generations: Generations<PlaneSnapshot, Models>,
     /// Every live unit's state, from its arrival to its end: its last piece, its refusal or its
     /// cancel, whichever comes first. Never more than [`MAX_UNITS`].
     units: Keyed<u64, Unit>,
-    /// The entry a claimed arrival routes over, directly: the one configured model of the latest
-    /// generation (none held when the section configures other than one, and nothing is claimed).
-    routed: Keyed<(), String>,
     /// How many units were refused, by why ([`Refused`]): the SDK's per-instance keyed state.
     refused: Keyed<Refused, u64>,
 }
@@ -353,7 +374,6 @@ impl DecisionsDoor {
         Self {
             generations: Generations::new(),
             units: Keyed::new(),
-            routed: Keyed::new(),
             refused: Keyed::new(),
         }
     }
@@ -380,24 +400,6 @@ impl DecisionsDoor {
     #[must_use]
     pub fn live_units(&self) -> usize {
         self.units.len()
-    }
-
-    /// Route claimed arrivals over `section`'s one model, or none.
-    fn route_over(&self, section: &DecisionsSection) {
-        match routed_model(section) {
-            Some(model) => self.routed.insert((), model),
-            None => self.routed.remove(&()),
-        };
-    }
-}
-
-/// The entry a claimed arrival routes over under `section`: its one model, when it configures
-/// exactly one ([`driven::served_claims`]' rule); `None` otherwise.
-fn routed_model(section: &DecisionsSection) -> Option<String> {
-    let mut models = section.models.keys();
-    match (models.next(), models.next()) {
-        (Some(one), None) => Some(one.clone()),
-        _ => None,
     }
 }
 
@@ -437,9 +439,9 @@ slot!(
             Err(words) => return open_failed(open, &mut out, |o| &o.open.err_len, &words),
         };
         let plane = DecisionsDoor::new();
-        plane.route_over(&section);
-        let spec = snapshot_spec(section.models.len());
-        out.publish(|o| &o.snapshot, &plane.generations, open.generation, &spec);
+        let models = Models::of(&section);
+        let spec = snapshot_spec(models.len());
+        out.publish_with(|o| &o.snapshot, &plane.generations, open.generation, &spec, models);
         instance.open(plane);
         Outcome::Ready
     }
@@ -455,9 +457,9 @@ slot!(
             Ok(section) => section,
             Err(words) => return out.fail(Refusal::refused(words)),
         };
-        let spec = snapshot_spec(section.models.len());
-        plane.route_over(&section);
-        out.publish(|o| &o.snapshot, &plane.generations, input.generation, &spec);
+        let models = Models::of(&section);
+        let spec = snapshot_spec(models.len());
+        out.publish_with(|o| &o.snapshot, &plane.generations, input.generation, &spec, models);
         Outcome::Ready
     }
 );
@@ -534,6 +536,17 @@ slot!(
             },
         );
         if let Some(plane) = instance.get() {
+            // THE ROUTE (DECISIONS D8b), over the newest generation's models, by the request's
+            // top-level `model`; refused here, before the unit holds any state.
+            let models = plane.generations.current().unwrap_or_default();
+            let (model, upstream) = match models.resolve(input.field(|i| &i.body).bytes()) {
+                Ok(routed) => (routed.model.to_owned(), routed.upstream.map(str::to_owned)),
+                Err(why) => {
+                    out.set(|o| &o.refusal, unrouted_code(why));
+                    out.set(|o| &o.refusal_status, why.status());
+                    return out.fail(Refusal::refused(why.words()));
+                }
+            };
             // The caller's head crosses here once: keep what the far end receives of it.
             let caller = driven::relayed_fields(input.fields().iter().map(|f| {
                 (
@@ -545,6 +558,7 @@ slot!(
             let held = plane.units.with_all(|units| match unit_of(units, unit) {
                 Some(state) => {
                     state.caller = caller;
+                    state.upstream = upstream;
                     true
                 }
                 None => false,
@@ -555,9 +569,7 @@ slot!(
                 out.set(|o| &o.refusal_status, STATUS_AT_CAPACITY);
                 return out.fail(Refusal::refused(WORDS_AT_CAPACITY));
             }
-            if let Some(model) = plane.routed.get(&()) {
-                out.route(ROUTE_DIRECT, &model);
-            }
+            out.route(ROUTE_DIRECT, &model);
         }
         Outcome::Ready
     }
@@ -678,6 +690,7 @@ fn attempt_piece(
         attempt: true,
         caller: std::mem::take(&mut unit.caller),
         ticket: unit.ticket,
+        upstream: unit.upstream.take(),
         ..Unit::default()
     };
     out.set(|o| &o.verb, verb);
@@ -794,7 +807,18 @@ slot!(
                     FROM_CALLER => match driven::caller_piece(bytes, given.flags & PIECE_LAST != 0) {
                         CallerAnswer::Empty => (Outcome::Refused, true),
                         CallerAnswer::Keep if unit.attempt => {
-                            owe(unit, bytes, EMIT_TO_FAR_END, input, &mut out);
+                            // `upstream_model`, spliced into the top-level `model` value alone;
+                            // a body with no `model` string passes through unchanged.
+                            match unit
+                                .upstream
+                                .as_deref()
+                                .and_then(|name| driven::splice_model(bytes, name))
+                            {
+                                Some(spliced) => {
+                                    owe_owned(unit, spliced, EMIT_TO_FAR_END, input, &mut out)
+                                }
+                                None => owe(unit, bytes, EMIT_TO_FAR_END, input, &mut out),
+                            };
                             (Outcome::Ready, false)
                         }
                         CallerAnswer::Keep => (Outcome::Ready, false),

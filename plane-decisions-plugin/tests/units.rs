@@ -21,7 +21,9 @@ use busbar_contract::abi::plane::{
     PlaneOpenIn, PlaneOpenOut, RefusalIn, RefusalOut, UnitCount, EMIT_DONE, EMIT_TO_FAR_END,
     FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, REFUSAL_GATE,
 };
-use busbar_plane_decisions::plane_door::{door, AT_CAPACITY, MAX_UNITS};
+use busbar_plane_decisions::plane_door::{
+    door, AT_CAPACITY, MAX_UNITS, NO_MODEL_NAMED, UNKNOWN_MODEL,
+};
 use busbar_plugin_loader::conformance::{dispatcher, input, json, load, output, Leg, Subject};
 use busbar_plugin_loader::dispatch::kinds::plane::Plane;
 use busbar_plugin_loader::dispatch::{Dispatcher, Frame, Plugin};
@@ -53,6 +55,11 @@ fn octets(b: &[u8]) -> Blob {
 
 /// The linked door, opened over [`SETTINGS`], on a dispatcher of its own.
 fn opened() -> (std::sync::Arc<Dispatcher>, Plugin<Plane>) {
+    opened_over(SETTINGS)
+}
+
+/// The linked door, opened over `settings`.
+fn opened_over(settings: &[u8]) -> (std::sync::Arc<Dispatcher>, Plugin<Plane>) {
     let s = Subject::new(
         door,
         "busbar_plane_decisions_plugin",
@@ -61,7 +68,7 @@ fn opened() -> (std::sync::Arc<Dispatcher>, Plugin<Plane>) {
     let d = dispatcher();
     let p = load::<Plane>(&s, Leg::Linked, s.bind(&d, "plane")).expect("the door loads");
     let mut f: Frame<PlaneOpenIn, PlaneOpenOut> = Frame::new(input(), output());
-    (f.input.open.generation, f.input.open.settings) = (1, json(SETTINGS));
+    (f.input.open.generation, f.input.open.settings) = (1, json(settings));
     let (called, _) = p.open(&mut f);
     assert_eq!(called.outcome, Outcome::Ready, "the door opens");
     (d, p)
@@ -69,6 +76,11 @@ fn opened() -> (std::sync::Arc<Dispatcher>, Plugin<Plane>) {
 
 /// `arrive` of `unit` on `POST /v1/systemone`: its outcome, refusal code and status.
 fn arrive(p: &Plugin<Plane>, unit: u64) -> (Outcome, u32, u32) {
+    arrive_with(p, unit, REQUEST)
+}
+
+/// `arrive` of `unit` carrying `body`.
+fn arrive_with(p: &Plugin<Plane>, unit: u64, body: &[u8]) -> (Outcome, u32, u32) {
     let mut units = [UnitCount {
         class: 0,
         source: 0,
@@ -77,7 +89,7 @@ fn arrive(p: &Plugin<Plane>, unit: u64) -> (Outcome, u32, u32) {
     let mut f: Frame<ArriveIn, ArriveOut> = Frame::new(input(), output());
     f.input.unit = unit;
     (f.input.method, f.input.target) = (abi(b"POST"), abi(b"/v1/systemone"));
-    f.input.body = octets(REQUEST);
+    f.input.body = octets(body);
     (f.input.units_buf, f.input.units_cap) = (units.as_mut_ptr(), units.len());
     let c = p.call(slot::ARRIVE, &mut f);
     (c.outcome, f.out.refusal, f.out.refusal_status)
@@ -309,4 +321,65 @@ fn the_answer_is_held_to_its_last_piece_and_relayed_whole() {
     assert_eq!(last.status, 200);
     assert!(last.flags & EMIT_DONE != 0);
     assert_eq!(last.units, vec![(0, 42), (1, 1)]);
+}
+
+/// Two models, the first with an `upstream_model` that differs from its name.
+const TWO: &[u8] = br#"{"models":{"jev":{"provider":"typesafe","upstream_model":"jev-1.13.0"},"alt":{"provider":"typesafe"}}}"#;
+
+/// RED (finding 1, DECISIONS D8b): with several models a request that names none is refused 400,
+/// and one naming a model no generation configures is refused 404, before the unit holds state.
+#[test]
+fn several_models_route_by_name_and_refuse_none_or_unknown() {
+    let (_d, p) = opened_over(TWO);
+    assert_eq!(
+        arrive_with(&p, 1, REQUEST),
+        (Outcome::Refused, NO_MODEL_NAMED, 400)
+    );
+    assert_eq!(
+        arrive_with(&p, 2, br#"{"model":"nope","state":{}}"#),
+        (Outcome::Refused, UNKNOWN_MODEL, 404)
+    );
+    assert_eq!(
+        arrive_with(&p, 3, br#"{"model":"alt","state":{}}"#).0,
+        Outcome::Ready
+    );
+}
+
+/// RED (finding 1): with ONE model, a request naming another model is 404, not routed to the one.
+#[test]
+fn one_model_refuses_an_unknown_named_model() {
+    let (_d, p) = opened();
+    assert_eq!(
+        arrive_with(&p, 1, br#"{"model":"nope","state":{}}"#),
+        (Outcome::Refused, UNKNOWN_MODEL, 404)
+    );
+}
+
+/// THE DEFAULT IS BYTE-IDENTICAL (D8b, predev's behaviour): one model, none named, and the caller's
+/// body reaches the far end unchanged.
+#[test]
+fn one_model_and_none_named_is_the_default_byte_for_byte() {
+    let (_d, p) = opened();
+    assert_eq!(arrive(&p, 1).0, Outcome::Ready);
+    assert!(body_reaches_the_far_end(&p, 1));
+}
+
+/// RED (finding 2, D8b): `upstream_model` rewrites the top-level `model` value alone, by span
+/// splice, when the request names that model; a model with none set passes byte for byte.
+#[test]
+fn upstream_model_is_spliced_into_the_body_bound_for_the_far_end() {
+    let (_d, p) = opened_over(TWO);
+    let named = br#"{"model":"jev", "state":{"model":"jev"}}"#;
+    assert_eq!(arrive_with(&p, 7, named).0, Outcome::Ready);
+    assert_eq!(piece(&p, 7, FROM_KERNEL, 0, b"").outcome, Outcome::Ready);
+    let body = piece(&p, 7, FROM_CALLER, PIECE_LAST, named);
+    assert!(body.flags & EMIT_TO_FAR_END != 0);
+    assert_eq!(
+        body.emitted, br#"{"model":"jev-1.13.0", "state":{"model":"jev"}}"#,
+        "only the top-level model value changed"
+    );
+    let plain = br#"{"model":"alt","state":{}}"#;
+    assert_eq!(arrive_with(&p, 8, plain).0, Outcome::Ready);
+    assert_eq!(piece(&p, 8, FROM_KERNEL, 0, b"").outcome, Outcome::Ready);
+    assert_eq!(piece(&p, 8, FROM_CALLER, PIECE_LAST, plain).emitted, plain);
 }
