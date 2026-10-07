@@ -383,3 +383,45 @@ fn upstream_model_is_spliced_into_the_body_bound_for_the_far_end() {
     assert_eq!(piece(&p, 8, FROM_KERNEL, 0, b"").outcome, Outcome::Ready);
     assert_eq!(piece(&p, 8, FROM_CALLER, PIECE_LAST, plain).emitted, plain);
 }
+
+/// One served unit `unit` to its far end's last piece: `answer`, at `status`.
+fn answered(p: &Plugin<Plane>, unit: u64, status: u32, answer: &[u8]) -> Answered {
+    assert_eq!(arrive(p, unit).0, Outcome::Ready);
+    assert_eq!(piece(p, unit, FROM_KERNEL, 0, b"").outcome, Outcome::Ready);
+    assert_eq!(
+        piece(p, unit, FROM_CALLER, PIECE_LAST, REQUEST).outcome,
+        Outcome::Ready
+    );
+    let mut b = Bufs::new();
+    let mut f = b.frame(unit, FROM_FAR_END, PIECE_HAS_STATUS | PIECE_LAST, answer, 0);
+    f.input.status_code = status;
+    let c = p.call(slot::ON_PIECE, &mut f);
+    b.answered(c.outcome, &f.out)
+}
+
+/// RED ($, finding 4): a 2xx answer with no readable count is REFUSED and nothing of it reaches
+/// the caller; it used to be relayed and billed no decision.
+#[test]
+fn a_success_with_no_count_is_refused_before_any_byte_is_relayed() {
+    let (_d, p) = opened();
+    for (unit, answer) in [
+        (1, &br#"{"request_id":"r","answers":{}}"#[..]),
+        (2, br#"{"usage":{"units":1.5}}"#),
+    ] {
+        let last = answered(&p, unit, 200, answer);
+        assert_eq!(last.outcome, Outcome::Refused, "unit {unit}");
+        assert!(last.emitted.is_empty() && last.units.is_empty(), "{last:?}");
+    }
+}
+
+/// RED ($, finding 4): a non-2xx answer bills nothing, even one carrying a count; it is relayed.
+#[test]
+fn a_non_success_answer_bills_nothing_and_is_relayed() {
+    let (_d, p) = opened();
+    let answer = br#"{"usage":{"units":9}}"#;
+    let last = answered(&p, 3, 422, answer);
+    assert_eq!(last.outcome, Outcome::Ready);
+    assert_eq!(last.emitted, answer);
+    assert_eq!(last.status, 422);
+    assert!(last.units.is_empty(), "{last:?}");
+}
