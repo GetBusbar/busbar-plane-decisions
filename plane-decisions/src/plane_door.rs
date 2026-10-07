@@ -154,16 +154,15 @@ const OP_CLASSES: &[OpClass] = &[OpClass {
     name: abi_str(tail::OP_CLASSES[0].as_str()),
 }];
 
-const BILLABLE_CLASSES: &[BillableClass] = &[
+/// One of [`tail::BILLABLE_CLASSES`], as the tail states it.
+const fn billable(i: usize) -> BillableClass {
     BillableClass {
-        class: abi_str(tail::BILLABLE_CLASSES[0].0.as_str()),
-        family: abi_str(tail::BILLABLE_CLASSES[0].1),
-    },
-    BillableClass {
-        class: abi_str(tail::BILLABLE_CLASSES[1].0.as_str()),
-        family: abi_str(tail::BILLABLE_CLASSES[1].1),
-    },
-];
+        class: abi_str(tail::BILLABLE_CLASSES[i].0.as_str()),
+        family: abi_str(tail::BILLABLE_CLASSES[i].1),
+    }
+}
+
+const BILLABLE_CLASSES: &[BillableClass] = &[billable(0), billable(1), billable(2), billable(3)];
 
 /// The fee unit the plane counts ([`tail::FEE_UNITS`]).
 const FEE_UNITS: &[AbiStr] = &[abi_str(tail::FEE_UNITS[0])];

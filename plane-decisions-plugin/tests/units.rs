@@ -320,7 +320,7 @@ fn the_answer_is_held_to_its_last_piece_and_relayed_whole() {
     assert_eq!(last.emitted, ANSWER, "the whole answer, unchanged");
     assert_eq!(last.status, 200);
     assert!(last.flags & EMIT_DONE != 0);
-    assert_eq!(last.units, vec![(0, 42), (1, 1)]);
+    assert_eq!(last.units, vec![(0, 42), (1, 1), (2, 0), (3, 0)]);
 }
 
 /// Two models, the first with an `upstream_model` that differs from its name.

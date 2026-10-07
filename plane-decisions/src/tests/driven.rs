@@ -96,6 +96,16 @@ fn far_end_pieces_are_held_whole_and_the_count_read_over_the_whole_answer() {
                 reported: true,
                 amount: 1
             },
+            Units {
+                class: tail::CLASS_INPUT_TOKENS_INDEX,
+                reported: true,
+                amount: 0
+            },
+            Units {
+                class: tail::CLASS_OUTPUT_TOKENS_INDEX,
+                reported: true,
+                amount: 0
+            },
         ]))
     );
 }
@@ -105,8 +115,14 @@ fn far_end_pieces_are_held_whole_and_the_count_read_over_the_whole_answer() {
 #[test]
 fn only_a_success_bills_and_the_count_and_fee_follow_one_rule() {
     let counted = br#"{"usage":{"units":3}}"#;
-    assert_eq!(settled(counted, Some(200)), Ok(vec![(0, 3), (1, 1)]));
-    assert_eq!(settled(counted, Some(204)), Ok(vec![(0, 3), (1, 1)]));
+    assert_eq!(
+        settled(counted, Some(200)),
+        Ok(vec![(0, 3), (1, 1), (2, 0), (3, 0)])
+    );
+    assert_eq!(
+        settled(counted, Some(204)),
+        Ok(vec![(0, 3), (1, 1), (2, 0), (3, 0)])
+    );
     // RED: a non-2xx answer carrying a count, with no `/error`, used to bill its decisions.
     for status in [Some(422), Some(500), Some(302), None] {
         assert_eq!(settled(counted, status), Ok(vec![]), "{status:?}");
@@ -116,7 +132,10 @@ fn only_a_success_bills_and_the_count_and_fee_follow_one_rule() {
     assert_eq!(settled(errored, Some(200)), Ok(vec![]));
     // RED: `"error": null` is no error; a 2xx carrying it used to bill neither count nor fee.
     let null_error = br#"{"error":null,"usage":{"units":5}}"#;
-    assert_eq!(settled(null_error, Some(200)), Ok(vec![(0, 5), (1, 1)]));
+    assert_eq!(
+        settled(null_error, Some(200)),
+        Ok(vec![(0, 5), (1, 1), (2, 0), (3, 0)])
+    );
 }
 
 /// RED ($, finding 4): a SUCCESS with no whole count is refused, never billed as zero. The count
@@ -140,13 +159,13 @@ fn a_success_with_no_whole_count_is_refused_never_free() {
     let max = format!(r#"{{"usage":{{"units":{}}}}}"#, i64::MAX);
     assert_eq!(
         settled(max.as_bytes(), Some(200)),
-        Ok(vec![(0, i64::MAX as u64), (1, 1)])
+        Ok(vec![(0, i64::MAX as u64), (1, 1), (2, 0), (3, 0)])
     );
     let past = format!(r#"{{"usage":{{"units":{}}}}}"#, i64::MAX as u64 + 1);
     assert_eq!(settled(past.as_bytes(), Some(200)), Err(Uncounted));
     assert_eq!(
         settled(br#"{"usage":{"units":0}}"#, Some(200)),
-        Ok(vec![(0, 0), (1, 1)])
+        Ok(vec![(0, 0), (1, 1), (2, 0), (3, 0)])
     );
     // Not a success: no count is owed, so none is missing.
     assert_eq!(settled(br#"{}"#, Some(503)), Ok(vec![]));
@@ -159,7 +178,7 @@ fn the_units_never_read_state_or_answers() {
             br#"{"usage":{"units":7},"state":{"units":999},"answers":{"units":888}}"#,
             Some(200)
         ),
-        Ok(vec![(0, 7), (1, 1)])
+        Ok(vec![(0, 7), (1, 1), (2, 0), (3, 0)])
     );
     assert_eq!(
         settled(
@@ -320,4 +339,54 @@ fn an_answer_past_the_backstop_is_refused() {
     assert_eq!(reading.take_answer(), b"12345678");
     assert!(reading.take_answer().is_empty(), "taken, not copied");
     assert_eq!(ANSWER_BACKSTOP, 256 * 1024 * 1024);
+}
+
+/// RED ($, finding 5): the owner's decisions card prices `decision`, `input_tokens` and
+/// `output_tokens`, family `decision`; the tail declares all three (and the fee unit), and an
+/// answer's token counts are reported under them. Predev declared the decision class alone.
+#[test]
+fn the_card_classes_are_declared_and_the_token_counts_reported() {
+    let named: Vec<(&str, &str)> = tail::BILLABLE_CLASSES
+        .iter()
+        .map(|(c, f)| (c.as_str(), *f))
+        .collect();
+    for class in ["decision", "input_tokens", "output_tokens"] {
+        assert!(
+            named.contains(&(class, "decision")),
+            "{class} is declared in the decision family: {named:?}"
+        );
+    }
+    assert_eq!(
+        named[tail::CLASS_INPUT_TOKENS_INDEX as usize].0,
+        "input_tokens"
+    );
+    assert_eq!(
+        named[tail::CLASS_OUTPUT_TOKENS_INDEX as usize].0,
+        "output_tokens"
+    );
+    assert_eq!(
+        settled(
+            br#"{"usage":{"units":2,"input_tokens":120,"output_tokens":7}}"#,
+            Some(200)
+        ),
+        Ok(vec![(0, 2), (1, 1), (2, 120), (3, 7)])
+    );
+    // Absent token counts are 0 (0 = free); only the decision count is required.
+    assert_eq!(
+        settled(br#"{"usage":{"units":2,"output_tokens":7}}"#, Some(200)),
+        Ok(vec![(0, 2), (1, 1), (2, 0), (3, 7)])
+    );
+    // A token count that is present but not whole is refused, never billed as zero.
+    for body in [
+        &br#"{"usage":{"units":2,"input_tokens":1.5}}"#[..],
+        br#"{"usage":{"units":2,"output_tokens":-3}}"#,
+        br#"{"usage":{"units":2,"output_tokens":"7"}}"#,
+    ] {
+        assert_eq!(
+            settled(body, Some(200)),
+            Err(Uncounted),
+            "{}",
+            String::from_utf8_lossy(body)
+        );
+    }
 }
