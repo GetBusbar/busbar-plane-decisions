@@ -12,10 +12,6 @@ const TEST_FILES: &[(&str, &str)] = &[
         include_str!("../../tests/alloc_gate.rs"),
     ),
     (
-        "tests/conformance.rs",
-        include_str!("../../tests/conformance.rs"),
-    ),
-    (
         "tests/invariance.rs",
         include_str!("../../tests/invariance.rs"),
     ),

@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "busbar-plane-decisions-plugin"
+version = "1.6.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "First-party signed kind:plane plugin cdylib: the decisions plane, packaged as a droppable busbar plugin. Drop the signed tarball into plugins/."
+
+[lib]
+# cdylib: the DROPPED-IN door (a signed tarball in `plugins/`), exporting `busbar_plugin_door`.
+# rlib: what `cargo test` links, and what makes `cargo test` emit the cdylib the conformance test
+# loads (a cdylib-only package builds a trivial test harness and never produces the library).
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# THE LOGIC, same repo: its `plane_door::door` is the door this image exports. A busbar build that
+# LINKS the plane names the logic crate, which exports no symbol.
+busbar-plane-decisions = { path = "../plane-decisions" }
+busbar-contract = { workspace = true }
+
+[dev-dependencies]
+# The conformance test loads the linked door and dlopens the built cdylib over busbar's REAL loader:
+# dev-only, never in the shipped artifact. `conformance` is busbar's published suite
+# (`tests/conformance.rs`, `conformance_suite!`), which moved here with the crate from busbar's
+# crates/busbar-plane-decisions.
+busbar-plugin-loader = { workspace = true, features = ["conformance"] }
