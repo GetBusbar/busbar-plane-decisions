@@ -29,7 +29,7 @@ use busbar_plugin_loader::dispatch::kinds::plane::Plane;
 use busbar_plugin_loader::dispatch::{Dispatcher, Frame, Plugin};
 
 /// The section every instance here opens over: one model.
-const SETTINGS: &[u8] = br#"{"models":{"jev":{"provider":"typesafe"}}}"#;
+const SETTINGS: &[u8] = br#"{"models":{"jev":{"provider":"typesafe","protocol":"jev"}}}"#;
 
 /// A caller's request body.
 const REQUEST: &[u8] = br#"{"state":{"session":"s"},"context":{}}"#;
@@ -81,6 +81,17 @@ fn arrive(p: &Plugin<Plane>, unit: u64) -> (Outcome, u32, u32) {
 
 /// `arrive` of `unit` carrying `body`.
 fn arrive_with(p: &Plugin<Plane>, unit: u64, body: &[u8]) -> (Outcome, u32, u32) {
+    arrive_at(p, unit, b"/v1/systemone", body).0
+}
+
+/// `arrive` of `unit` on `POST <target>` carrying `body`: its outcome, refusal code and status,
+/// and the dialect it answered.
+fn arrive_at(
+    p: &Plugin<Plane>,
+    unit: u64,
+    target: &[u8],
+    body: &[u8],
+) -> ((Outcome, u32, u32), u32) {
     let mut units = [UnitCount {
         class: 0,
         source: 0,
@@ -88,11 +99,14 @@ fn arrive_with(p: &Plugin<Plane>, unit: u64, body: &[u8]) -> (Outcome, u32, u32)
     }; 4];
     let mut f: Frame<ArriveIn, ArriveOut> = Frame::new(input(), output());
     f.input.unit = unit;
-    (f.input.method, f.input.target) = (abi(b"POST"), abi(b"/v1/systemone"));
+    (f.input.method, f.input.target) = (abi(b"POST"), abi(target));
     f.input.body = octets(body);
     (f.input.units_buf, f.input.units_cap) = (units.as_mut_ptr(), units.len());
     let c = p.call(slot::ARRIVE, &mut f);
-    (c.outcome, f.out.refusal, f.out.refusal_status)
+    (
+        (c.outcome, f.out.refusal, f.out.refusal_status),
+        f.out.dialect,
+    )
 }
 
 /// `refusal` of `unit`: the kernel refused it (a gate, a limit), and the unit ends.
@@ -324,7 +338,7 @@ fn the_answer_is_held_to_its_last_piece_and_relayed_whole() {
 }
 
 /// Two models, the first with an `upstream_model` that differs from its name.
-const TWO: &[u8] = br#"{"models":{"jev":{"provider":"typesafe","upstream_model":"jev-1.13.0"},"alt":{"provider":"typesafe"}}}"#;
+const TWO: &[u8] = br#"{"models":{"jev":{"provider":"typesafe","protocol":"jev","upstream_model":"jev-1.13.0"},"alt":{"provider":"typesafe","protocol":"jev"}}}"#;
 
 /// RED (finding 1, DECISIONS D8b): with several models a request that names none is refused 400,
 /// and one naming a model no generation configures is refused 404, before the unit holds state.
@@ -424,4 +438,89 @@ fn a_non_success_answer_bills_nothing_and_is_relayed() {
     assert_eq!(last.emitted, answer);
     assert_eq!(last.status, 422);
     assert!(last.units.is_empty(), "{last:?}");
+}
+
+/// A NanoJev model beside a jev one (each by its override).
+const MIXED: &[u8] = br#"{"models":{"jev":{"provider":"typesafe","protocol":"jev"},"nano":{"provider":"local","protocol":"nanojev"}}}"#;
+
+/// A NanoJev request, in its server's own shape.
+const EVALUATE: &[u8] = br#"{"states":[{"id":"a","state":"A","questions":{"q":{"type":"boolean","instructions":"Is A present?"}}}]}"#;
+
+/// THE NANOJEV DIALECT, through the one loader (THE DESIGN section 2): `POST /api/evaluate` arrives
+/// in dialect 1, routes to the NanoJev model, goes to its far end unchanged on `/api/evaluate`,
+/// and bills its own unit, `execution.states`.
+#[test]
+fn nanojev_is_served_on_its_own_claim_and_meters_execution_states() {
+    let (_d, p) = opened_over(MIXED);
+    assert_eq!(
+        arrive_at(&p, 1, b"/api/evaluate", EVALUATE),
+        ((Outcome::Ready, 0, 0), 1)
+    );
+    let mut b = Bufs::new();
+    let mut f = b.frame(1, FROM_KERNEL, 0, b"", 1);
+    assert_eq!(p.call(slot::ON_PIECE, &mut f).outcome, Outcome::Ready);
+    let target = f.out.target;
+    let at = |s: Span| {
+        String::from_utf8_lossy(&b.arena[s.offset as usize..(s.offset + s.len) as usize])
+            .into_owned()
+    };
+    assert_eq!(at(target), "/api/evaluate");
+    let body = piece(&p, 1, FROM_CALLER, PIECE_LAST, EVALUATE);
+    assert_eq!(body.emitted, EVALUATE, "the request passes byte for byte");
+    let answer =
+        br#"{"execution":{"states":1,"forward_passes":1},"states":[{"id":"a","answers":{}}]}"#;
+    let mut b = Bufs::new();
+    let mut f = b.frame(1, FROM_FAR_END, PIECE_HAS_STATUS | PIECE_LAST, answer, 0);
+    let c = p.call(slot::ON_PIECE, &mut f);
+    let last = b.answered(c.outcome, &f.out);
+    assert_eq!(last.outcome, Outcome::Ready);
+    assert_eq!(last.emitted, answer);
+    assert_eq!(last.units, vec![(0, 1), (1, 1), (2, 0), (3, 0)]);
+}
+
+/// A model of the other dialect gets this dialect's unknown-model refusal (404); a NanoJev answer
+/// with no count is refused, never served free.
+#[test]
+fn nanojev_wrong_dialect_and_uncounted_answers_are_refused() {
+    let (_d, p) = opened_over(MIXED);
+    assert_eq!(
+        arrive_at(&p, 2, b"/v1/systemone", br#"{"model":"nano"}"#),
+        ((Outcome::Refused, UNKNOWN_MODEL, 404), 0)
+    );
+    assert_eq!(
+        arrive_at(&p, 3, b"/api/evaluate", EVALUATE).0 .0,
+        Outcome::Ready
+    );
+    assert_eq!(piece(&p, 3, FROM_KERNEL, 0, b"").outcome, Outcome::Ready);
+    assert_eq!(
+        piece(&p, 3, FROM_CALLER, PIECE_LAST, EVALUATE).outcome,
+        Outcome::Ready
+    );
+    let last = piece(
+        &p,
+        3,
+        FROM_FAR_END,
+        PIECE_HAS_STATUS | PIECE_LAST,
+        br#"{"execution":{"forward_passes":1},"states":[]}"#,
+    );
+    assert_eq!(last.outcome, Outcome::Refused);
+    assert!(last.emitted.is_empty());
+}
+
+/// A NanoJev model that sets `upstream_model` is refused at `open`, naming it.
+#[test]
+fn nanojev_upstream_model_is_refused_at_open() {
+    let s = Subject::new(
+        door,
+        "busbar_plane_decisions_plugin",
+        include_str!("conformance.json"),
+    );
+    let d = dispatcher();
+    let p = load::<Plane>(&s, Leg::Linked, s.bind(&d, "plane")).expect("the door loads");
+    let settings =
+        br#"{"models":{"n":{"provider":"local","protocol":"nanojev","upstream_model":"x"}}}"#;
+    let mut f: Frame<PlaneOpenIn, PlaneOpenOut> = Frame::new(input(), output());
+    (f.input.open.generation, f.input.open.settings) = (1, json(settings));
+    let (called, _) = p.open(&mut f);
+    assert_ne!(called.outcome, Outcome::Ready);
 }

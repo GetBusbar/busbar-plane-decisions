@@ -302,17 +302,81 @@ pub fn read_dealt(settings: &[u8]) -> Result<DecisionsSection, String> {
     }
 }
 
-/// ONE GENERATION'S SNAPSHOT for a section with `models` configured models: the claims
-/// [`driven::served_claims`] serves, each an exact target over the claim's transport. It binds no
-/// audience: the operation is served on the plain data plane to a keyed caller, as the llm plane's
-/// is, and its refusals are this dialect's.
+/// ONE GENERATION'S MODELS, each in its dialect: its override, else the protocol of the provider
+/// it names in `providers` (the referenced providers' dialect fields the plane is handed at open,
+/// THE DESIGN section 4).
+///
+/// # Errors
+///
+/// [`Models::of`]'s: every model in no dialect this plane speaks, and every model that sets an
+/// `upstream_model` that can never take effect.
+pub fn models_of(
+    section: &DecisionsSection,
+    providers: &BTreeMap<String, String>,
+) -> Result<Models, String> {
+    Models::of(section, |name, cfg| {
+        driven::dialect_of(
+            name,
+            model_override(cfg),
+            providers.get(&cfg.provider).map(String::as_str),
+        )
+    })
+}
+
+/// THE REFERENCED PROVIDERS' PROTOCOLS, by provider name: the dialect facts the host hands at
+/// `open` (`PlaneOpenIn::providers`, THE DESIGN section 4). A host that hands none leaves every
+/// model to its own override.
+fn provider_dialects(open: Lent<'_, PlaneOpenIn>) -> BTreeMap<String, String> {
+    open.providers()
+        .iter()
+        .filter_map(|p| {
+            let name = p.field(|f| &f.name).as_str().ok()?;
+            let protocol = p.field(|f| &f.protocol).as_str().ok()?;
+            Some((name.to_owned(), protocol.to_owned()))
+        })
+        .collect()
+}
+
+/// WHAT `validate` CAN JUDGE OF THE DIALECTS: `validate` is handed no provider facts, so it judges
+/// each model's own override (a dialect this plane does not speak, or an `upstream_model` its
+/// dialect can never splice); a model resolved through its provider is judged at `open`.
+///
+/// # Errors
+///
+/// [`Models::of`]'s words for the overrides.
+pub fn judge_overrides(section: &DecisionsSection) -> Result<(), String> {
+    Models::of(section, |name, cfg| match model_override(cfg) {
+        Some(dialect) => driven::dialect_of(name, Some(dialect), None),
+        // Judged at `open`, against its provider's protocol.
+        None => Ok(crate::dialect::JEV),
+    })
+    .map(drop)
+}
+
+/// A model's own dialect override (#51), when it states one.
+fn model_override(cfg: &busbar_contract::config::ModelCfg) -> Option<&str> {
+    cfg.protocol.as_deref()
+}
+
+/// ONE GENERATION'S SNAPSHOT for `models`: the claims [`driven::served_claims`] serves, each an
+/// exact target over the claim's transport. It binds no audience: the operation is served on the
+/// plain data plane to a keyed caller, as the llm plane's is, and its refusals are its dialect's.
 #[must_use]
-pub fn snapshot_spec(models: usize) -> SnapshotSpec {
+pub fn snapshot_spec(models: &Models) -> SnapshotSpec {
     SnapshotSpec {
         claims: driven::served_claims(models)
             .iter()
-            .map(|(verb, target)| ClaimSpec::new(verb, target, claims::TRANSPORT, CLAIM_EXACT))
+            .map(|(verb, target)| ClaimSpec {
+                // A refusal before `arrive` wears the dialect the path names.
+                refusal_dialect: crate::dialect::of_path(target)
+                    .and_then(|d| u16::try_from(d).ok())
+                    .unwrap_or(0),
+                ..ClaimSpec::new(verb, target, claims::TRANSPORT, CLAIM_EXACT)
+            })
             .collect(),
+        // THE GENERATION'S LISTED NAMES (THE DESIGN section 2, DECISIONS D8): every configured
+        // decisions model; the kernel appends them to `/v1/models`, scope-filtered.
+        listed: models.names().map(str::to_owned).collect(),
         ..SnapshotSpec::default()
     }
 }
@@ -341,6 +405,8 @@ struct Unit {
     content_type: Option<Vec<u8>>,
     /// The ticket the unit's pieces cross on: a `cancel` names the unit by it.
     ticket: Option<Ticket>,
+    /// The dialect it arrived in: its far-end request, its count and its refusals follow it.
+    dialect: u32,
     /// The name the caller body's top-level `model` is spliced to ([`driven::splice_model`]):
     /// the routed model's `upstream_model`, where the request named it and it differs.
     upstream: Option<String>,
@@ -356,6 +422,8 @@ pub struct DecisionsDoor {
     units: Keyed<u64, Unit>,
     /// How many units were refused, by why ([`Refused`]): the SDK's per-instance keyed state.
     refused: Keyed<Refused, u64>,
+    /// The protocols of the providers the section references, as `open` was handed them.
+    providers: BTreeMap<String, String>,
 }
 
 /// Why a unit was refused by the instance itself, counted per instance.
@@ -376,6 +444,7 @@ impl DecisionsDoor {
             generations: Generations::new(),
             units: Keyed::new(),
             refused: Keyed::new(),
+            providers: BTreeMap::new(),
         }
     }
 
@@ -430,8 +499,8 @@ macro_rules! slot {
 slot!(
     /// `validate`: the settings read as the section, or refused in the grammar's words.
     Validate, ValidateIn, OutHead, |_, input, mut out| {
-        match read_dealt(input.field(|i| &i.settings).bytes()) {
-            Ok(_) => Outcome::Ready,
+        match read_dealt(input.field(|i| &i.settings).bytes()).and_then(|s| judge_overrides(&s)) {
+            Ok(()) => Outcome::Ready,
             Err(words) => out.fail(Refusal::refused(words)),
         }
     }
@@ -445,9 +514,13 @@ slot!(
             Ok(section) => section,
             Err(words) => return open_failed(open, &mut out, |o| &o.open.err_len, &words),
         };
-        let plane = DecisionsDoor::new();
-        let models = Models::of(&section);
-        let spec = snapshot_spec(models.len());
+        let mut plane = DecisionsDoor::new();
+        plane.providers = provider_dialects(input);
+        let models = match models_of(&section, &plane.providers) {
+            Ok(models) => models,
+            Err(words) => return open_failed(open, &mut out, |o| &o.open.err_len, &words),
+        };
+        let spec = snapshot_spec(&models);
         out.publish_with(|o| &o.snapshot, &plane.generations, open.generation, &spec, models);
         instance.open(plane);
         Outcome::Ready
@@ -464,8 +537,12 @@ slot!(
             Ok(section) => section,
             Err(words) => return out.fail(Refusal::refused(words)),
         };
-        let models = Models::of(&section);
-        let spec = snapshot_spec(models.len());
+        // The providers are the ones handed at `open`: a model that names another is refused.
+        let models = match models_of(&section, &plane.providers) {
+            Ok(models) => models,
+            Err(words) => return out.fail(Refusal::refused(words)),
+        };
+        let spec = snapshot_spec(&models);
         out.publish_with(|o| &o.snapshot, &plane.generations, input.generation, &spec, models);
         Outcome::Ready
     }
@@ -546,7 +623,8 @@ slot!(
             // THE ROUTE (DECISIONS D8b), over the newest generation's models, by the request's
             // top-level `model`; refused here, before the unit holds any state.
             let models = plane.generations.current().unwrap_or_default();
-            let (model, upstream) = match models.resolve(input.field(|i| &i.body).bytes()) {
+            let routed = models.resolve(arrived.dialect, input.field(|i| &i.body).bytes());
+            let (model, upstream) = match routed {
                 Ok(routed) => (routed.model.to_owned(), routed.upstream.map(str::to_owned)),
                 Err(why) => {
                     out.set(|o| &o.refusal, unrouted_code(why));
@@ -566,6 +644,7 @@ slot!(
                 Some(state) => {
                     state.caller = caller;
                     state.upstream = upstream;
+                    state.dialect = arrived.dialect;
                     true
                 }
                 None => false,
@@ -674,7 +753,7 @@ fn attempt_piece(
     input: Lent<'_, OnPieceIn>,
     out: &mut Out<'_, OnPieceOut>,
 ) -> Outcome {
-    let request = driven::attempt_request(&[]);
+    let request = driven::attempt_request(unit.dialect, &[]);
     let (mut fields, units, mut arena) = (input.fields_buf(), input.units_buf(), input.arena_buf());
     let verb = arena.span(request.verb.as_bytes());
     let target = arena.span(request.target.as_bytes());
@@ -698,6 +777,7 @@ fn attempt_piece(
         caller: std::mem::take(&mut unit.caller),
         ticket: unit.ticket,
         upstream: unit.upstream.take(),
+        dialect: unit.dialect,
         ..Unit::default()
     };
     out.set(|o| &o.verb, verb);
@@ -749,7 +829,7 @@ fn far_end(
         }
         // THE ONE SUCCESS RULE ($): a success with no whole count is refused, loudly and counted,
         // before a byte of it reaches the caller; it is never served free.
-        let Ok(settled) = unit.reading.settle(unit.status) else {
+        let Ok(settled) = unit.reading.settle(unit.dialect, unit.status) else {
             plane.count(Refused::Uncounted);
             return (Outcome::Refused, true);
         };
@@ -855,7 +935,7 @@ slot!(
         }
         let status = u16::try_from(given.status).unwrap_or(0);
         let text = input.field(|i| &i.text).as_str().unwrap_or_default();
-        let body = driven::refusal_body(status, text);
+        let body = driven::refusal_body(given.dialect, status, text);
         let (mut reply, mut fields, mut arena) =
             (input.reply_buf(), input.fields_buf(), input.arena_buf());
         reply.extend(&body);

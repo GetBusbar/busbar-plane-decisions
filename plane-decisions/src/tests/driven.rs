@@ -56,7 +56,7 @@ fn the_caller_body_is_kept_and_an_empty_one_is_refused() {
 #[test]
 fn an_attempt_forwards_the_caller_body_unchanged() {
     let body = br#"{"state":{"session":"s"},"context":{}}"#;
-    let r = attempt_request(body);
+    let r = attempt_request(crate::dialect::JEV, body);
     assert_eq!(r.verb, "POST");
     assert_eq!(r.target, "/v1/systemone");
     assert_eq!(r.fields, [("content-type", &b"application/json"[..])]);
@@ -72,7 +72,7 @@ fn settled(body: &[u8], status: Option<u32>) -> Result<Vec<(u32, u64)>, Uncounte
     let mut reading = FarEndReading::new();
     reading.piece(body).expect("under the backstop");
     reading
-        .settle(status)
+        .settle(crate::dialect::JEV, status)
         .map(|s| s.units().iter().map(|u| (u.class, u.amount)).collect())
 }
 
@@ -84,7 +84,7 @@ fn far_end_pieces_are_held_whole_and_the_count_read_over_the_whole_answer() {
     assert_eq!(reading.piece(a), Ok(()));
     assert_eq!(reading.piece(b), Ok(()));
     assert_eq!(
-        reading.settle(Some(200)),
+        reading.settle(crate::dialect::JEV, Some(200)),
         Ok(Settled::Billed([
             Units {
                 class: tail::CLASS_DECISION_INDEX,
@@ -192,38 +192,55 @@ fn the_units_never_read_state_or_answers() {
 #[test]
 fn a_refusal_carries_the_kernel_text_in_the_dialect_shape() {
     assert_eq!(
-        refusal_body(403, "the caller may not perform this operation"),
+        refusal_body(crate::dialect::JEV, 403, "the caller may not perform this operation"),
         br#"{"error":{"code":"unsupported_operation","message":"the caller may not perform this operation"}}"#
     );
     assert_eq!(
-        refusal_body(401, "no key"),
+        refusal_body(crate::dialect::JEV, 401, "no key"),
         br#"{"error":{"code":"invalid_request","message":"no key"}}"#
     );
     assert_eq!(
-        refusal_body(404, "no provider"),
+        refusal_body(crate::dialect::JEV, 404, "no provider"),
         br#"{"error":{"code":"invalid_params","message":"no provider"}}"#
     );
     assert_eq!(
-        refusal_body(500, "x"),
+        refusal_body(crate::dialect::JEV, 500, "x"),
         br#"{"error":{"code":"internal","message":"x"}}"#
     );
     assert_eq!(
-        refusal_body(503, "x"),
+        refusal_body(crate::dialect::JEV, 503, "x"),
         br#"{"error":{"code":"unsupported_operation","message":"x"}}"#
     );
 }
 
 #[test]
 fn any_configured_model_mounts_the_claim() {
-    assert!(served_claims(0).is_empty());
-    assert_eq!(served_claims(1), tail::CLAIMS);
+    assert!(served_claims(&models(r#"{"models":{}}"#)).is_empty());
+    let jev = &tail::CLAIMS[..1];
+    assert_eq!(
+        served_claims(&models(r#"{"models":{"jev":{"provider":"typesafe"}}}"#)),
+        jev
+    );
     // RED (finding 1): several models used to mount nothing.
-    assert_eq!(served_claims(2), tail::CLAIMS);
-    assert_eq!(served_claims(7), tail::CLAIMS);
+    assert_eq!(
+        served_claims(&models(
+            r#"{"models":{"a":{"provider":"typesafe"},"b":{"provider":"typesafe"}}}"#
+        )),
+        jev
+    );
+}
+
+/// The providers the cells name, by protocol: `typesafe` speaks jev, `nano` speaks nanojev.
+fn providers() -> std::collections::BTreeMap<String, String> {
+    [("typesafe", "jev"), ("nano", "nanojev")]
+        .into_iter()
+        .map(|(p, d)| (p.to_string(), d.to_string()))
+        .collect()
 }
 
 fn models(json: &str) -> Models {
-    Models::of(&crate::plane_door::read_settings(json.as_bytes()).expect("a section"))
+    let section = crate::plane_door::read_settings(json.as_bytes()).expect("a section");
+    crate::plane_door::models_of(&section, &providers()).expect("the models resolve")
 }
 
 /// MODEL RESOLUTION (DECISIONS D8b), every case a cell.
@@ -236,7 +253,7 @@ fn a_request_routes_by_its_model() {
     // One configured, none named: the default, nothing to rewrite.
     for body in [&br#"{"state":{}}"#[..], br#"{"model":null,"state":{}}"#] {
         assert_eq!(
-            one.resolve(body),
+            one.resolve(crate::dialect::JEV, body),
             Ok(Routed {
                 model: "jev",
                 upstream: None
@@ -245,18 +262,25 @@ fn a_request_routes_by_its_model() {
     }
     // One configured, it named.
     assert_eq!(
-        one.resolve(br#"{"model":"jev"}"#).map(|r| r.model),
+        one.resolve(crate::dialect::JEV, br#"{"model":"jev"}"#)
+            .map(|r| r.model),
         Ok("jev")
     );
     // RED: one configured, an unknown one named, is 404 (predev routed it to the one).
-    assert_eq!(one.resolve(br#"{"model":"other"}"#), Err(Unrouted::Unknown));
+    assert_eq!(
+        one.resolve(crate::dialect::JEV, br#"{"model":"other"}"#),
+        Err(Unrouted::Unknown)
+    );
     assert_eq!(Unrouted::Unknown.status(), 404);
     // RED: several configured, none named, is 400.
-    assert_eq!(two.resolve(br#"{"state":{}}"#), Err(Unrouted::NoneNamed));
+    assert_eq!(
+        two.resolve(crate::dialect::JEV, br#"{"state":{}}"#),
+        Err(Unrouted::NoneNamed)
+    );
     assert_eq!(Unrouted::NoneNamed.status(), 400);
     // Several configured, one named: it, with its differing upstream name.
     assert_eq!(
-        two.resolve(br#"{"model":"jev"}"#),
+        two.resolve(crate::dialect::JEV, br#"{"model":"jev"}"#),
         Ok(Routed {
             model: "jev",
             upstream: Some("jev-1.13.0")
@@ -264,22 +288,25 @@ fn a_request_routes_by_its_model() {
     );
     // An `upstream_model` equal to the key rewrites nothing.
     assert_eq!(
-        two.resolve(br#"{"model":"alt"}"#),
+        two.resolve(crate::dialect::JEV, br#"{"model":"alt"}"#),
         Ok(Routed {
             model: "alt",
             upstream: None
         })
     );
     // A `model` that is not a string is 400; the name is matched exactly, never inside `state`.
-    assert_eq!(two.resolve(br#"{"model":7}"#), Err(Unrouted::NotAName));
+    assert_eq!(
+        two.resolve(crate::dialect::JEV, br#"{"model":7}"#),
+        Err(Unrouted::NotAName)
+    );
     assert_eq!(Unrouted::NotAName.status(), 400);
     assert_eq!(
-        two.resolve(br#"{"state":{"model":"jev"}}"#),
+        two.resolve(crate::dialect::JEV, br#"{"state":{"model":"jev"}}"#),
         Err(Unrouted::NoneNamed)
     );
     // No model configured: nothing routes (the generation mounts no claim).
     assert_eq!(
-        models(r#"{"models":{}}"#).resolve(br#"{}"#),
+        models(r#"{"models":{}}"#).resolve(crate::dialect::JEV, br#"{}"#),
         Err(Unrouted::Unknown)
     );
 }
@@ -389,4 +416,107 @@ fn the_card_classes_are_declared_and_the_token_counts_reported() {
             String::from_utf8_lossy(body)
         );
     }
+}
+
+/// NANOJEV'S BILLING UNIT ($, THE DESIGN section 2): `execution.states`, counted from the answer
+/// already read; an answer with no count refuses; it states no tokens (0). Fixtures follow its
+/// server's shapes (github.com/TianyuCodings/NanoJev 76fdfc9, `predict_toy_decisions.py`).
+#[test]
+fn nanojev_meters_execution_states() {
+    use crate::dialect::NANOJEV;
+    let answer = br#"{"schema_version":"openjev-toy-inference-v1","execution":{"device":"cuda","states":3,"questions":5,"forward_passes":1,"network_model_calls":0},"states":[{"id":"a","answers":{}},{"id":"b","answers":{}},{"id":"c","answers":{}}]}"#;
+    let mut reading = FarEndReading::new();
+    reading.piece(answer).expect("under the backstop");
+    let counted: Vec<_> = reading
+        .settle(NANOJEV, Some(200))
+        .expect("a counted success")
+        .units()
+        .iter()
+        .map(|u| (u.class, u.amount))
+        .collect();
+    assert_eq!(counted, [(0, 3), (1, 1), (2, 0), (3, 0)]);
+    // jev's pointer is not NanoJev's: the same answer read as jev states no count.
+    assert_eq!(
+        reading.settle(crate::dialect::JEV, Some(200)),
+        Err(Uncounted)
+    );
+    for uncounted in [
+        &br#"{"execution":{"forward_passes":1},"states":[]}"#[..],
+        br#"{"execution":{"states":"3"},"states":[]}"#,
+        br#"{"states":[{"id":"a","answers":{}}]}"#,
+    ] {
+        let mut reading = FarEndReading::new();
+        reading.piece(uncounted).expect("under the backstop");
+        assert_eq!(reading.settle(NANOJEV, Some(200)), Err(Uncounted));
+    }
+    // Its errors are `{"error": "<text>"}` at 400/404/500: no success, nothing billed.
+    let mut error = FarEndReading::new();
+    error
+        .piece(br#"{"error":"states must be a non-empty array"}"#)
+        .expect("held");
+    assert_eq!(error.settle(NANOJEV, Some(400)), Ok(Settled::NotASuccess));
+}
+
+/// A MODEL'S DIALECT (#51): its override, else its provider's protocol; one the plane does not
+/// speak fails closed, naming the model.
+#[test]
+fn a_models_dialect_is_its_override_else_its_providers_and_unknown_fails_closed() {
+    use crate::dialect::{JEV, NANOJEV};
+    assert_eq!(dialect_of("m", None, Some("jev")), Ok(JEV));
+    assert_eq!(dialect_of("m", Some("nanojev"), Some("jev")), Ok(NANOJEV));
+    let words = dialect_of("m", None, Some("anthropic")).expect_err("not a decisions dialect");
+    assert!(
+        words.contains("decisions.models.m") && words.contains("anthropic"),
+        "{words}"
+    );
+    assert!(dialect_of("m", None, None).is_err());
+}
+
+/// ROUTING ACROSS DIALECTS: a request routes among its own dialect's models; a named model of the
+/// other dialect gets this dialect's unknown-model refusal (404); with none named, the one model of
+/// the arrival's dialect is the default.
+#[test]
+fn a_request_routes_within_its_dialect() {
+    use crate::dialect::{JEV, NANOJEV};
+    let mixed = models(r#"{"models":{"jev":{"provider":"typesafe"},"nano":{"provider":"nano"}}}"#);
+    assert_eq!(
+        mixed.resolve(NANOJEV, br#"{"states":[]}"#).map(|r| r.model),
+        Ok("nano")
+    );
+    assert_eq!(
+        mixed.resolve(JEV, br#"{"state":{}}"#).map(|r| r.model),
+        Ok("jev")
+    );
+    assert_eq!(
+        mixed.resolve(JEV, br#"{"model":"nano"}"#),
+        Err(Unrouted::Unknown)
+    );
+    let nanos = models(r#"{"models":{"n1":{"provider":"nano"},"n2":{"provider":"nano"}}}"#);
+    assert_eq!(
+        nanos.resolve(NANOJEV, br#"{"states":[]}"#),
+        Err(Unrouted::NoneNamed)
+    );
+    assert_eq!(
+        nanos.resolve(JEV, br#"{"state":{}}"#),
+        Err(Unrouted::Unknown)
+    );
+}
+
+/// An `upstream_model` that can never take effect is refused, naming the model: a NanoJev request
+/// names no model, so there is nothing to splice (coordinator Q10).
+#[test]
+fn upstream_model_on_a_nanojev_model_is_refused() {
+    let section = crate::plane_door::read_settings(
+        br#"{"models":{"n":{"provider":"nano","upstream_model":"x"},"j":{"provider":"typesafe","upstream_model":"y"}}}"#,
+    )
+    .expect("a section");
+    let words = crate::plane_door::models_of(&section, &providers()).expect_err("refused");
+    assert!(
+        words.contains("decisions.models.n.upstream_model"),
+        "{words}"
+    );
+    assert!(
+        !words.contains("decisions.models.j"),
+        "a jev model may set one: {words}"
+    );
 }

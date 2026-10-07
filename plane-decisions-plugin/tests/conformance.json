@@ -1,9 +1,9 @@
 {
-  "settings": { "models": { "jev": { "provider": "typesafe" } } },
+  "settings": { "models": { "jev": { "provider": "typesafe", "protocol": "jev" } } },
   "plane": {
     "bad_settings": [{ "modles": {} }],
     "refresh_settings": {
-      "models": { "a": { "provider": "typesafe" }, "b": { "provider": "typesafe" } }
+      "models": { "a": { "provider": "typesafe", "protocol": "jev" }, "b": { "provider": "typesafe", "protocol": "jev" } }
     },
     "open_claims": [["POST", "/v1/systemone"]],
     "refresh_claims": [["POST", "/v1/systemone"]],

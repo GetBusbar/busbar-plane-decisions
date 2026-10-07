@@ -37,10 +37,7 @@ use std::collections::BTreeMap;
 
 use busbar_contract::ids::{MeterClassId, OpClassId};
 
-use crate::codec::{
-    self, error_body, CONTENT_TYPE_JSON, EGRESS_SCHEME, FIELD_CONTENT_TYPE, PTR_ERROR,
-    PTR_USAGE_INPUT_TOKENS, PTR_USAGE_OUTPUT_TOKENS, PTR_USAGE_UNITS,
-};
+use crate::codec::{self, CONTENT_TYPE_JSON, EGRESS_SCHEME, FIELD_CONTENT_TYPE, PTR_ERROR};
 use crate::ops;
 
 /// The plane's Statement tail, as data.
@@ -54,8 +51,9 @@ pub mod tail {
     /// The sections this plane reads and does not own: every model names its provider there.
     pub const SECTIONS_CONSUMED: &[&str] = &["providers"];
 
-    /// The one dialect this plane speaks. Dialect index 0 everywhere below.
-    pub const DIALECTS: &[&str] = &[config::PROTOCOL];
+    /// The dialects this plane speaks, in [`crate::dialect::ROWS`] order: `jev` (0) and
+    /// `nanojev` (1).
+    pub const DIALECTS: &[&str] = &[crate::dialect::ROWS[0].name, crate::dialect::ROWS[1].name];
 
     /// The outbound auth style a jev far end is reached under: the operator's credential as a
     /// bearer (the signed design: "auth = core gateway credential, plane returns a
@@ -64,7 +62,7 @@ pub mod tail {
 
     /// Each dialect's default outbound auth style, `(dialect index, style)` (the design, "Outbound auth", step 2:
     /// a provider entry's `auth:`, else this; ARCHITECT Q-L1-AUTH (A), 2026-10-03).
-    pub const DIALECT_AUTH: &[(u32, &str)] = &[(0, OUTBOUND_STYLE)];
+    pub const DIALECT_AUTH: &[(u32, &str)] = &[(0, OUTBOUND_STYLE), (1, OUTBOUND_STYLE)];
 
     /// The resource granularity a grant names: a configured decision provider.
     pub const SCOPE_KINDS: &[&str] = &["decision_provider"];
@@ -78,8 +76,9 @@ pub mod tail {
     /// The record resource kind a registration is audited under: the scope kind.
     pub const AUDIT_KIND: &str = SCOPE_KINDS[0];
 
-    /// The op classes this plane serves, in index order. `systemone` alone (see the module doc).
-    pub const OP_CLASSES: &[OpClassId] = &[ops::OP_SYSTEMONE];
+    /// The op classes this plane serves, in index order: each dialect's one operation (see the
+    /// module doc; the model catalogue is not served).
+    pub const OP_CLASSES: &[OpClassId] = &[ops::OP_SYSTEMONE, ops::OP_EVALUATE];
 
     /// The billable classes, in index order, each with its family: the far end's decision count,
     /// the fee unit (also a class: the tail check holds `fee_units ⊆ billable_classes`), and the
@@ -123,25 +122,36 @@ pub mod tail {
     pub const NEEDS: &[(&str, &str)] = &[(claims::TRANSPORT, OUTBOUND_STYLE)];
 
     /// The claims the generation snapshot publishes, `(verb, target)`.
-    pub const CLAIMS: &[(&str, &str)] = &[("POST", ops::PATH_SYSTEMONE)];
+    pub const CLAIMS: &[(&str, &str)] =
+        &[("POST", ops::PATH_SYSTEMONE), ("POST", ops::PATH_EVALUATE)];
 }
 
-/// The claims a generation's snapshot publishes, given how many `decisions.models` it configures:
-/// [`tail::CLAIMS`] for one or more, none for none (see the module doc).
+/// The claims a generation's snapshot publishes: each dialect's claim ([`tail::CLAIMS`], in
+/// dialect order) that at least one of its models speaks; none for a generation with no model.
 #[must_use]
-pub fn served_claims(models: usize) -> &'static [(&'static str, &'static str)] {
-    if models == 0 {
-        &[]
-    } else {
-        tail::CLAIMS
-    }
+pub fn served_claims(models: &Models) -> Vec<(&'static str, &'static str)> {
+    tail::CLAIMS
+        .iter()
+        .zip(0_u32..)
+        .filter(|(_, dialect)| models.speaks(*dialect))
+        .map(|(claim, _)| *claim)
+        .collect()
 }
 
-/// ONE GENERATION'S MODELS: each busbar-facing name, and the name its far end is sent instead where
-/// the entry's `upstream_model` is set and differs.
+/// One configured model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Entry {
+    /// The name its request's top-level `model` is spliced to, where set and different.
+    upstream: Option<String>,
+    /// Its dialect: its override, or its provider's protocol ([`crate::dialect::ROWS`] index).
+    dialect: u32,
+}
+
+/// ONE GENERATION'S MODELS: each busbar-facing name, its dialect, and the name its far end is sent
+/// instead where the entry's `upstream_model` is set and differs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Models {
-    by_name: BTreeMap<String, Option<String>>,
+    by_name: BTreeMap<String, Entry>,
 }
 
 /// Where a request routes ([`Models::resolve`]).
@@ -161,7 +171,8 @@ pub enum Unrouted {
     NoneNamed,
     /// Its top-level `model` is not a string: `400`.
     NotAName,
-    /// It names a model this generation does not configure: `404`.
+    /// It names a model this generation does not configure, or one of another dialect (that
+    /// dialect's unknown-model refusal, THE DESIGN section 2): `404`.
     Unknown,
 }
 
@@ -189,19 +200,60 @@ impl Unrouted {
 }
 
 impl Models {
-    /// The models `section` configures.
-    #[must_use]
-    pub fn of(section: &crate::config::DecisionsSection) -> Self {
-        Self {
-            by_name: section
-                .models
-                .iter()
-                .map(|(name, cfg)| {
-                    let upstream = cfg.upstream_model.clone().filter(|u| u != name);
-                    (name.clone(), upstream)
-                })
-                .collect(),
+    /// The models `section` configures, each in the dialect `dialect_of` resolves for it (its
+    /// override, else its provider's protocol; #51, fail-closed).
+    ///
+    /// # Errors
+    ///
+    /// Every broken rule, one line each, in model order: a model whose dialect this plane does not
+    /// speak (`dialect_of`'s words), and a model of a dialect whose request names no model that
+    /// sets `upstream_model` (it could never take effect, so it is refused rather than ignored).
+    pub fn of(
+        section: &crate::config::DecisionsSection,
+        dialect_of: impl Fn(&str, &busbar_contract::config::ModelCfg) -> Result<u32, String>,
+    ) -> Result<Self, String> {
+        let mut names: Vec<&String> = section.models.keys().collect();
+        names.sort();
+        let mut errors = Vec::new();
+        let mut by_name = BTreeMap::new();
+        for name in names {
+            let cfg = &section.models[name];
+            let dialect = match dialect_of(name, cfg) {
+                Ok(dialect) => dialect,
+                Err(words) => {
+                    errors.push(words);
+                    continue;
+                }
+            };
+            let row = crate::dialect::row(dialect);
+            if cfg.upstream_model.is_some() && !row.names_model {
+                errors.push(format!(
+                    "decisions.models.{name}.upstream_model is set, but model '{name}' speaks \
+                     '{}', whose request names no model, so it can never take effect. Remove \
+                     decisions.models.{name}.upstream_model.",
+                    row.name
+                ));
+                continue;
+            }
+            let upstream = cfg.upstream_model.clone().filter(|u| u != name);
+            by_name.insert(name.clone(), Entry { upstream, dialect });
         }
+        if errors.is_empty() {
+            Ok(Self { by_name })
+        } else {
+            Err(errors.join("\n"))
+        }
+    }
+
+    /// Whether any model speaks `dialect`.
+    #[must_use]
+    pub fn speaks(&self, dialect: u32) -> bool {
+        self.by_name.values().any(|e| e.dialect == dialect)
+    }
+
+    /// Each configured model's name, in order: the generation's listed names.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.by_name.keys().map(String::as_str)
     }
 
     /// How many models are configured.
@@ -216,17 +268,22 @@ impl Models {
         self.by_name.is_empty()
     }
 
-    /// Route a request by its top-level `model` ([`codec::PTR_MODEL`], read as metadata): the named
-    /// model; with none named (absent or `null`), the one configured model, the default.
+    /// Route a request arriving in `dialect` by its top-level `model` ([`codec::PTR_MODEL`], read
+    /// as metadata): the named model, which must speak `dialect`; with none named (absent or
+    /// `null`), the one model that speaks `dialect`, the default.
     ///
     /// # Errors
     ///
-    /// [`Unrouted`]: none named with more than one configured, a `model` that is not a string, or a
-    /// model this generation does not configure.
-    pub fn resolve(&self, body: &[u8]) -> Result<Routed<'_>, Unrouted> {
+    /// [`Unrouted`]: none named with more than one model of the dialect, a `model` that is not a
+    /// string, or a model this generation does not configure in this dialect.
+    pub fn resolve(&self, dialect: u32, body: &[u8]) -> Result<Routed<'_>, Unrouted> {
         match codec::read_raw(body, codec::PTR_MODEL) {
             None | Some(b"null") => {
-                let mut all = self.by_name.keys();
+                let mut all = self
+                    .by_name
+                    .iter()
+                    .filter(|(_, e)| e.dialect == dialect)
+                    .map(|(name, _)| name);
                 match (all.next(), all.next()) {
                     (Some(one), None) => Ok(Routed {
                         model: one,
@@ -238,15 +295,44 @@ impl Models {
             }
             Some(_) => {
                 let named = codec::read_str(body, codec::PTR_MODEL).ok_or(Unrouted::NotAName)?;
-                let (model, upstream) =
-                    self.by_name.get_key_value(named).ok_or(Unrouted::Unknown)?;
+                let (model, entry) = self
+                    .by_name
+                    .get_key_value(named)
+                    .filter(|(_, e)| e.dialect == dialect)
+                    .ok_or(Unrouted::Unknown)?;
                 Ok(Routed {
                     model,
-                    upstream: upstream.as_deref(),
+                    upstream: entry.upstream.as_deref(),
                 })
             }
         }
     }
+}
+
+/// A MODEL'S DIALECT (#51, THE DESIGN section 2): its own override when it states one, else its
+/// provider's protocol; a dialect this plane does not speak fails closed, naming the model.
+///
+/// # Errors
+///
+/// The model resolves to no dialect, or to one this plane does not speak.
+pub fn dialect_of(
+    model: &str,
+    override_protocol: Option<&str>,
+    provider_protocol: Option<&str>,
+) -> Result<u32, String> {
+    let Some(name) = override_protocol.or(provider_protocol) else {
+        return Err(format!(
+            "decisions.models.{model} resolves to no dialect: its provider states no protocol \
+             and the model states none"
+        ));
+    };
+    crate::dialect::index_of(name).ok_or_else(|| {
+        format!(
+            "decisions.models.{model} resolves to dialect '{name}', which the decisions plane \
+             does not speak (it speaks {}; #51: an unknown dialect fails closed)",
+            tail::DIALECTS.join(", ")
+        )
+    })
 }
 
 /// THE `upstream_model` SPLICE: `body` with its top-level `model` value replaced by `upstream`, as
@@ -300,7 +386,7 @@ pub fn arrive(verb: &str, target: &str) -> Option<Arrived> {
         // A decision is billed to someone: the provider account is the deployment's, and the unit
         // is the caller's.
         principal: PrincipalNeed::Required,
-        dialect: 0,
+        dialect: crate::dialect::of_path(row.path)?,
     })
 }
 
@@ -344,10 +430,10 @@ pub struct FarEndRequest<'a> {
 /// `attempt_request`, not `attempt`, so it is not a cross-plane re-spelling of llm/a2a's `attempt`
 /// (structure-lint plane-dup; ARCHITECT ruling 2b 2026-10-04).
 #[must_use]
-pub fn attempt_request(caller_body: &[u8]) -> FarEndRequest<'_> {
+pub fn attempt_request(dialect: u32, caller_body: &[u8]) -> FarEndRequest<'_> {
     FarEndRequest {
         verb: "POST",
-        target: ops::PATH_SYSTEMONE,
+        target: crate::dialect::row(dialect).path,
         fields: [(FIELD_CONTENT_TYPE, CONTENT_TYPE_JSON)],
         auth: EGRESS_SCHEME,
         body: caller_body,
@@ -439,19 +525,20 @@ impl FarEndReading {
     ///
     /// [`Uncounted`], for a success that states no whole decision count, or a token count that is
     /// present and not whole.
-    pub fn settle(&self, status: Option<u32>) -> Result<Settled, Uncounted> {
+    pub fn settle(&self, dialect: u32, status: Option<u32>) -> Result<Settled, Uncounted> {
         if !self.success(status) {
             return Ok(Settled::NotASuccess);
         }
-        let amount = whole(&self.body, PTR_USAGE_UNITS).ok_or(Uncounted)?;
-        let tokens = |pointer| match codec::read_raw(&self.body, pointer) {
-            None => Ok(0),
-            Some(_) => whole(&self.body, pointer).ok_or(Uncounted),
-        };
-        let (input, output) = (
-            tokens(PTR_USAGE_INPUT_TOKENS)?,
-            tokens(PTR_USAGE_OUTPUT_TOKENS)?,
-        );
+        // The usage pointers are dialect data (DECISIONS Q1-5): `jev` states `/usage/units` and
+        // its tokens, `nanojev` its own billing unit, `execution.states`, and no tokens.
+        let row = crate::dialect::row(dialect);
+        let amount = whole(&self.body, row.units).ok_or(Uncounted)?;
+        let tokens =
+            |pointer: Option<&str>| match pointer.map(|p| (p, codec::read_raw(&self.body, p))) {
+                None | Some((_, None)) => Ok(0),
+                Some((p, Some(_))) => whole(&self.body, p).ok_or(Uncounted),
+            };
+        let (input, output) = (tokens(row.input_tokens)?, tokens(row.output_tokens)?);
         Ok(Settled::Billed([
             Units {
                 class: tail::CLASS_DECISION_INDEX,
@@ -536,11 +623,11 @@ pub fn relayed_fields<'f>(
         .collect()
 }
 
-/// Render a refusal the kernel decided, in this dialect's error shape: `{"error": {"code", "message"}}`.
-/// The kernel chose the status and wrote the text; the plane chooses only the code word for the
-/// status.
+/// Render a refusal the kernel decided, in `dialect`'s error shape: `jev`'s `{"error": {"code",
+/// "message"}}`, `nanojev`'s `{"error": <text>}`. The kernel chose the status and wrote the text;
+/// the plane chooses only the code word for the status.
 #[must_use]
-pub fn refusal_body(status: u16, text: &str) -> Vec<u8> {
+pub fn refusal_body(dialect: u32, status: u16, text: &str) -> Vec<u8> {
     let code = match status {
         403 | 429 => "unsupported_operation",
         404 => "invalid_params",
@@ -548,7 +635,7 @@ pub fn refusal_body(status: u16, text: &str) -> Vec<u8> {
         500 => "internal",
         _ => "unsupported_operation",
     };
-    error_body(code, text)
+    crate::dialect::error_body(dialect, code, text)
 }
 
 #[cfg(test)]
