@@ -41,10 +41,25 @@ pub const PTR_ID: &str = "/id";
 /// without this plane growing a second top-level member to ignore.
 pub const PTR_USAGE_UNITS: &str = "/usage/units";
 
+/// The pointer a successful `systemone` response reports the input tokens it consumed at
+/// (dialect data, DECISIONS Q1-5: the jev dialect's usage pointers). Absent = `0`.
+pub const PTR_USAGE_INPUT_TOKENS: &str = "/usage/input_tokens";
+
+/// The pointer a successful `systemone` response reports the output tokens it produced at
+/// (dialect data, as [`PTR_USAGE_INPUT_TOKENS`]). Absent = `0`.
+pub const PTR_USAGE_OUTPUT_TOKENS: &str = "/usage/output_tokens";
+
 /// Every pointer this plane resolves in a RESPONSE body (`systemone` or `models`). Declared here
 /// once, so the "never resolves `/state` or `/answers`" claim is checkable by reading one list
 /// rather than auditing every call site.
-pub const RESPONSE_PTRS: &[&str] = &[PTR_ERROR, PTR_REQUEST_ID, PTR_ID, PTR_USAGE_UNITS];
+pub const RESPONSE_PTRS: &[&str] = &[
+    PTR_ERROR,
+    PTR_REQUEST_ID,
+    PTR_ID,
+    PTR_USAGE_UNITS,
+    PTR_USAGE_INPUT_TOKENS,
+    PTR_USAGE_OUTPUT_TOKENS,
+];
 
 /// The pointer a request names its model at: top-level metadata, read to route the request and
 /// rewritten only by the `upstream_model` splice (DECISIONS D8b). Never `state`, never `answers`.
