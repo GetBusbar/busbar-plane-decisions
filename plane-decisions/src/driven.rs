@@ -9,30 +9,22 @@
 //! | `arrive` | [`arrive`]: the op class, the principal need and the dialect of a claimed request |
 //! | `on_piece`, from the caller | [`caller_piece`]: the caller's whole body arrives as one piece; the kernel keeps it |
 //! | `on_piece`, ATTEMPT (from the kernel) | [`attempt`]: the request bound for the far end, verb and target explicit |
-//! | `on_piece`, from the far end | [`FarEndReading`]: the bytes relayed unchanged, and the units the far end reported |
+//! | `on_piece`, from the far end | [`FarEndReading`]: the answer held to its last piece, then relayed unchanged with the units the far end reported |
 //! | `refusal` | [`refusal_body`]: the kernel's status and text, in this dialect's error shape |
 //!
 //! Every answer is plain data. Nothing here holds a byte across calls: [`FarEndReading`] is a value
-//! the caller owns for the length of one unit, and it is the only accumulating thing in the module.
+//! the caller owns for the length of one unit, bounded by [`ANSWER_BACKSTOP`], and it is the only
+//! accumulating thing in the module.
 //! Writing these answers into the host buffers of the plane ABI (`busbar_contract::abi::plane`) is
 //! the plane door's job, one generic adapter for every plane; it is not this plane's.
 //!
-//! ZERO OR SEVERAL DECISIONS MODELS — the driver's rule is today's behaviour, byte for byte. A jev
-//! request names no model, so it has a destination only when `decisions.models` holds exactly one.
-//! Measured on the busbar binary before the driver serves this plane:
-//!
-//! | config | `--validate` and boot | `POST /v1/systemone` |
-//! |---|---|---|
-//! | no jev provider, `decisions.models: {}` | accepted | `404`, the unclaimed-route body |
-//! | a jev provider, `decisions.models: {}` | refused, `BUSBAR-3015`: provider '<name>' has unknown protocol 'jev' | (no boot) |
-//! | one model | accepted | `404`, the unclaimed-route body (the served operation is new surface) |
-//! | two or more models | accepted | `404`, the unclaimed-route body |
-//!
-//! The unclaimed-route body is `{"error":{"code":null,"message":"the requested resource was not
-//! found","param":null,"type":"not_found_error"}}`. So with zero or several models the driver serves
-//! no `systemone` claim for this generation (the snapshot publishes [`served_claims`], empty) and the request falls
-//! through to that same 404; there is no boot check and no new refusal. Only exactly one model
-//! mounts the claim.
+//! MODEL RESOLUTION (`BUSBAR-1.6.0.md` section 2, the decisions bullet; DECISIONS D8b): a request
+//! routes by its top-level `model` ([`Models::resolve`]). One configured model and none named is the
+//! default, and the body passes byte-identical; more than one and none named is `400`; a model this
+//! generation does not configure is `404`. `upstream_model` rewrites ONLY the top-level `model`
+//! value, by span splice ([`splice_model`]), when it is set and differs; otherwise the body passes
+//! through. A generation with no model mounts no claim ([`served_claims`]), so its request falls
+//! through to the kernel's unclaimed-route `404`, as before.
 //!
 //! WHAT THIS PLANE DOES NOT CLAIM: `GET /v1/models`. That path keeps its 1.5.5 bytes (the model
 //! list busbar already serves there), so [`tail::CLAIMS`] and [`tail::OP_CLASSES`] carry `systemone` alone and
@@ -41,11 +33,13 @@
 //! Money-blind, like the rest of the crate: the plane reports how many decision units the far end
 //! said it used, in its one billable class, and never what they are worth.
 
+use std::collections::BTreeMap;
+
 use busbar_contract::ids::{MeterClassId, OpClassId};
 
 use crate::codec::{
     self, error_body, CONTENT_TYPE_JSON, EGRESS_SCHEME, FIELD_CONTENT_TYPE, PTR_ERROR,
-    PTR_USAGE_UNITS,
+    PTR_USAGE_INPUT_TOKENS, PTR_USAGE_OUTPUT_TOKENS, PTR_USAGE_UNITS,
 };
 use crate::ops;
 
@@ -88,11 +82,22 @@ pub mod tail {
     pub const OP_CLASSES: &[OpClassId] = &[ops::OP_SYSTEMONE];
 
     /// The billable classes, in index order, each with its family: the far end's decision count,
-    /// and the fee unit (also a class: the tail check holds `fee_units ⊆ billable_classes`).
+    /// the fee unit (also a class: the tail check holds `fee_units ⊆ billable_classes`), and the
+    /// card's two token classes ($; DECISIONS Q1-5: `decision`, `input_tokens` and
+    /// `output_tokens`, family `decision`, all three required, 0 = free). The token classes are
+    /// appended, so the decision and fee indices hold.
     pub const BILLABLE_CLASSES: &[(MeterClassId, &str)] = &[
         (meta::CLASS_DECISION, "decision"),
         (MeterClassId::new(FEE_PER_REQUEST), FEE_FAMILY),
+        (meta::CLASS_INPUT_TOKENS, "decision"),
+        (meta::CLASS_OUTPUT_TOKENS, "decision"),
     ];
+
+    /// The index of [`meta::CLASS_INPUT_TOKENS`] in [`BILLABLE_CLASSES`].
+    pub const CLASS_INPUT_TOKENS_INDEX: u32 = 2;
+
+    /// The index of [`meta::CLASS_OUTPUT_TOKENS`] in [`BILLABLE_CLASSES`].
+    pub const CLASS_OUTPUT_TOKENS_INDEX: u32 = 3;
 
     /// The index of [`meta::CLASS_DECISION`] in [`BILLABLE_CLASSES`].
     pub const CLASS_DECISION_INDEX: u32 = 0;
@@ -122,14 +127,141 @@ pub mod tail {
 }
 
 /// The claims a generation's snapshot publishes, given how many `decisions.models` it configures:
-/// [`tail::CLAIMS`] for exactly one, none otherwise (see the module doc's measured table).
+/// [`tail::CLAIMS`] for one or more, none for none (see the module doc).
 #[must_use]
 pub fn served_claims(models: usize) -> &'static [(&'static str, &'static str)] {
-    if models == 1 {
-        tail::CLAIMS
-    } else {
+    if models == 0 {
         &[]
+    } else {
+        tail::CLAIMS
     }
+}
+
+/// ONE GENERATION'S MODELS: each busbar-facing name, and the name its far end is sent instead where
+/// the entry's `upstream_model` is set and differs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Models {
+    by_name: BTreeMap<String, Option<String>>,
+}
+
+/// Where a request routes ([`Models::resolve`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Routed<'m> {
+    /// The configured model it routes over.
+    pub model: &'m str,
+    /// The name the request's top-level `model` is rewritten to: set only when the request names a
+    /// model and that model's `upstream_model` differs from it.
+    pub upstream: Option<&'m str>,
+}
+
+/// Why a request routes nowhere ([`Models::resolve`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unrouted {
+    /// It names no model, and more than one is configured: `400`.
+    NoneNamed,
+    /// Its top-level `model` is not a string: `400`.
+    NotAName,
+    /// It names a model this generation does not configure: `404`.
+    Unknown,
+}
+
+impl Unrouted {
+    /// The status the refusal wears.
+    #[must_use]
+    pub const fn status(self) -> u32 {
+        match self {
+            Self::NoneNamed | Self::NotAName => 400,
+            Self::Unknown => 404,
+        }
+    }
+
+    /// The words the refusal carries. They never echo the caller's model name.
+    #[must_use]
+    pub const fn words(self) -> &'static str {
+        match self {
+            Self::NoneNamed => {
+                "the request names no model, and more than one decisions model is configured"
+            }
+            Self::NotAName => "the request's model is not a string",
+            Self::Unknown => "the requested model is not configured",
+        }
+    }
+}
+
+impl Models {
+    /// The models `section` configures.
+    #[must_use]
+    pub fn of(section: &crate::config::DecisionsSection) -> Self {
+        Self {
+            by_name: section
+                .models
+                .iter()
+                .map(|(name, cfg)| {
+                    let upstream = cfg.upstream_model.clone().filter(|u| u != name);
+                    (name.clone(), upstream)
+                })
+                .collect(),
+        }
+    }
+
+    /// How many models are configured.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.by_name.len()
+    }
+
+    /// Whether none is.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_name.is_empty()
+    }
+
+    /// Route a request by its top-level `model` ([`codec::PTR_MODEL`], read as metadata): the named
+    /// model; with none named (absent or `null`), the one configured model, the default.
+    ///
+    /// # Errors
+    ///
+    /// [`Unrouted`]: none named with more than one configured, a `model` that is not a string, or a
+    /// model this generation does not configure.
+    pub fn resolve(&self, body: &[u8]) -> Result<Routed<'_>, Unrouted> {
+        match codec::read_raw(body, codec::PTR_MODEL) {
+            None | Some(b"null") => {
+                let mut all = self.by_name.keys();
+                match (all.next(), all.next()) {
+                    (Some(one), None) => Ok(Routed {
+                        model: one,
+                        upstream: None,
+                    }),
+                    (Some(_), Some(_)) => Err(Unrouted::NoneNamed),
+                    (None, _) => Err(Unrouted::Unknown),
+                }
+            }
+            Some(_) => {
+                let named = codec::read_str(body, codec::PTR_MODEL).ok_or(Unrouted::NotAName)?;
+                let (model, upstream) =
+                    self.by_name.get_key_value(named).ok_or(Unrouted::Unknown)?;
+                Ok(Routed {
+                    model,
+                    upstream: upstream.as_deref(),
+                })
+            }
+        }
+    }
+}
+
+/// THE `upstream_model` SPLICE: `body` with its top-level `model` value replaced by `upstream`, as
+/// a JSON string, and every other byte unchanged; `None` when the body has no top-level `model`
+/// string (nothing to rewrite: the body passes through).
+#[must_use]
+pub fn splice_model(body: &[u8], upstream: &str) -> Option<Vec<u8>> {
+    let span = codec::span_of(body, codec::PTR_MODEL)?;
+    codec::read_str(body, codec::PTR_MODEL)?;
+    let value = serde_json::to_string(upstream).ok()?;
+    let mut out = Vec::with_capacity(body.len() - (span.end - span.start) + value.len());
+    out.extend_from_slice(&body[..span.start]);
+    out.extend_from_slice(value.as_bytes());
+    out.extend_from_slice(&body[span.end..]);
+    Some(out)
 }
 
 /// Whether the kernel must verify a principal before the first piece.
@@ -233,11 +365,22 @@ pub struct Units {
     pub amount: u64,
 }
 
-/// The far end's answer, read as it is relayed.
+/// THE ABUSE BACKSTOP on the one far-end answer a unit holds: past it the unit is refused, loudly,
+/// and counted, and no other unit is touched. Decision answers are unbounded (#41, "jev ~5 KB
+/// unbounded responses"), so this is no size policy: it is the backstop #41 allows, "a ceiling set
+/// absurdly high that only a runaway/attack could hit; on trip it cleanly refuses THAT ONE request".
+pub const ANSWER_BACKSTOP: usize = 256 * 1024 * 1024;
+
+/// A far-end answer grew past [`ANSWER_BACKSTOP`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OverBackstop;
+
+/// The far end's answer, HELD until its last piece.
 ///
-/// Every piece is relayed to the caller unchanged, as it arrives. The count lives inside the body
-/// (`/usage/units`), so the bytes are also kept until the last piece, and the count is read once,
-/// over the whole answer.
+/// The count lives inside the body (`/usage/units`), so the answer is held whole and read once, and
+/// only then relayed: an answer that cannot be billed is refused before a byte of it reaches the
+/// caller. The held bytes are the one copy: the relay pays out of them, never out of a second
+/// buffer (jev answers are not streamed, so holding them loses the caller nothing).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FarEndReading {
     body: Vec<u8>,
@@ -250,46 +393,118 @@ impl FarEndReading {
         Self::default()
     }
 
-    /// Take one far-end piece and return the bytes to relay to the caller: the piece itself.
-    pub fn piece<'p>(&mut self, bytes: &'p [u8]) -> &'p [u8] {
-        self.body.extend_from_slice(bytes);
-        bytes
+    /// Hold one far-end piece.
+    ///
+    /// # Errors
+    ///
+    /// [`OverBackstop`] when the answer would grow past [`ANSWER_BACKSTOP`]; nothing is held.
+    pub fn piece(&mut self, bytes: &[u8]) -> Result<(), OverBackstop> {
+        self.piece_within(bytes, ANSWER_BACKSTOP)
     }
 
-    /// The units the far end reported, read at the last piece, by the rule the plane's
-    /// `decode_response` reads them (`plane.rs`): a count is reported only for an answer with no
-    /// `/error` member, whose `/usage/units` is a whole number a signed 64-bit count holds. An
-    /// error answer, or a count that is missing, negative, fractional or past `i64::MAX`, reports
-    /// nothing. The status plays no part: `decode_response` judges success by the `/error` member
-    /// alone.
-    #[must_use]
-    pub fn units(&self) -> Option<Units> {
-        if codec::has(&self.body, PTR_ERROR) {
-            return None;
+    /// [`Self::piece`] under the backstop `cap`.
+    pub(crate) fn piece_within(&mut self, bytes: &[u8], cap: usize) -> Result<(), OverBackstop> {
+        if self.body.len().saturating_add(bytes.len()) > cap {
+            return Err(OverBackstop);
         }
-        codec::read_u64(&self.body, PTR_USAGE_UNITS)
-            .filter(|amount| i64::try_from(*amount).is_ok())
-            .map(|amount| Units {
+        self.body.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    /// The held answer, moved out whole for the relay (no copy).
+    pub fn take_answer(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.body)
+    }
+
+    /// Whether the far end answered a SUCCESS: a `2xx` status and no `/error` member (a `null`
+    /// one is none). The one success rule: the decision count and the request fee both follow it.
+    #[must_use]
+    pub fn success(&self, status: Option<u32>) -> bool {
+        status.is_some_and(|s| (200..300).contains(&s))
+            && codec::read_raw(&self.body, PTR_ERROR).is_none_or(|e| e == b"null")
+    }
+
+    /// WHAT THE ANSWER BILLS, read once at the last piece ($; Q128 plane-decisions finding 4).
+    ///
+    /// * Not a success ([`Self::success`]): nothing, no decision and no fee.
+    /// * A success whose `/usage/units` is a whole number a signed 64-bit count holds: that many
+    ///   `decision`, reported, the request fee `1`, and its `/usage/input_tokens` and
+    ///   `/usage/output_tokens` (each `0` when absent: 0 = free; a token count that is present but
+    ///   not a whole count is [`Uncounted`], never billed as zero).
+    /// * A success with no such count (absent, negative, fractional, a string, past `i64::MAX`):
+    ///   [`Uncounted`]. The answer is never served free: the unit is refused, loudly (THE DESIGN
+    ///   section 2: "an answer with no count refuses loudly").
+    ///
+    /// # Errors
+    ///
+    /// [`Uncounted`], for a success that states no whole decision count, or a token count that is
+    /// present and not whole.
+    pub fn settle(&self, status: Option<u32>) -> Result<Settled, Uncounted> {
+        if !self.success(status) {
+            return Ok(Settled::NotASuccess);
+        }
+        let amount = whole(&self.body, PTR_USAGE_UNITS).ok_or(Uncounted)?;
+        let tokens = |pointer| match codec::read_raw(&self.body, pointer) {
+            None => Ok(0),
+            Some(_) => whole(&self.body, pointer).ok_or(Uncounted),
+        };
+        let (input, output) = (
+            tokens(PTR_USAGE_INPUT_TOKENS)?,
+            tokens(PTR_USAGE_OUTPUT_TOKENS)?,
+        );
+        Ok(Settled::Billed([
+            Units {
                 class: tail::CLASS_DECISION_INDEX,
                 reported: true,
                 amount,
-            })
-    }
-
-    /// THE REQUEST FEE, read at the last piece: `1` of [`tail::FEE_PER_REQUEST`] for an answer the
-    /// far end gave as a success — a `2xx` status and no `/error` member, the success rule
-    /// [`Self::units`] reads — and nothing otherwise, so a refused or failed unit owes no fee
-    /// (billable success only).
-    #[must_use]
-    pub fn fee(&self, status: Option<u32>) -> Option<Units> {
-        let success = status.is_some_and(|s| (200..300).contains(&s));
-        (success && !codec::has(&self.body, PTR_ERROR)).then_some(Units {
-            class: tail::CLASS_FEE_INDEX,
-            reported: true,
-            amount: 1,
-        })
+            },
+            Units {
+                class: tail::CLASS_FEE_INDEX,
+                reported: true,
+                amount: 1,
+            },
+            Units {
+                class: tail::CLASS_INPUT_TOKENS_INDEX,
+                reported: true,
+                amount: input,
+            },
+            Units {
+                class: tail::CLASS_OUTPUT_TOKENS_INDEX,
+                reported: true,
+                amount: output,
+            },
+        ]))
     }
 }
+
+/// The whole count at `pointer`: a bare non-negative integer a signed 64-bit count holds.
+fn whole(body: &[u8], pointer: &str) -> Option<u64> {
+    codec::read_u64(body, pointer).filter(|amount| i64::try_from(*amount).is_ok())
+}
+
+/// What a settled answer bills ([`FarEndReading::settle`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Settled {
+    /// The far end did not answer a success: no unit is reported.
+    NotASuccess,
+    /// A success: its decision count, its request fee, and its input and output tokens.
+    Billed([Units; 4]),
+}
+
+impl Settled {
+    /// The units to report.
+    #[must_use]
+    pub fn units(&self) -> &[Units] {
+        match self {
+            Self::NotASuccess => &[],
+            Self::Billed(units) => units,
+        }
+    }
+}
+
+/// A success answer that states no whole decision count: refused, never billed as zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Uncounted;
 
 /// THE CALLER FIELDS THE FAR END NEVER RECEIVES: the ones the plane writes itself (the document
 /// type), the ones naming the hop (`host`), and the credential carriers (the far end is presented
