@@ -39,7 +39,7 @@ use busbar_contract::ids::{MeterClassId, OpClassId};
 
 use crate::codec::{
     self, error_body, CONTENT_TYPE_JSON, EGRESS_SCHEME, FIELD_CONTENT_TYPE, PTR_ERROR,
-    PTR_USAGE_UNITS,
+    PTR_USAGE_INPUT_TOKENS, PTR_USAGE_OUTPUT_TOKENS, PTR_USAGE_UNITS,
 };
 use crate::ops;
 
@@ -82,11 +82,22 @@ pub mod tail {
     pub const OP_CLASSES: &[OpClassId] = &[ops::OP_SYSTEMONE];
 
     /// The billable classes, in index order, each with its family: the far end's decision count,
-    /// and the fee unit (also a class: the tail check holds `fee_units ⊆ billable_classes`).
+    /// the fee unit (also a class: the tail check holds `fee_units ⊆ billable_classes`), and the
+    /// card's two token classes ($; DECISIONS Q1-5: `decision`, `input_tokens` and
+    /// `output_tokens`, family `decision`, all three required, 0 = free). The token classes are
+    /// appended, so the decision and fee indices hold.
     pub const BILLABLE_CLASSES: &[(MeterClassId, &str)] = &[
         (meta::CLASS_DECISION, "decision"),
         (MeterClassId::new(FEE_PER_REQUEST), FEE_FAMILY),
+        (meta::CLASS_INPUT_TOKENS, "decision"),
+        (meta::CLASS_OUTPUT_TOKENS, "decision"),
     ];
+
+    /// The index of [`meta::CLASS_INPUT_TOKENS`] in [`BILLABLE_CLASSES`].
+    pub const CLASS_INPUT_TOKENS_INDEX: u32 = 2;
+
+    /// The index of [`meta::CLASS_OUTPUT_TOKENS`] in [`BILLABLE_CLASSES`].
+    pub const CLASS_OUTPUT_TOKENS_INDEX: u32 = 3;
 
     /// The index of [`meta::CLASS_DECISION`] in [`BILLABLE_CLASSES`].
     pub const CLASS_DECISION_INDEX: u32 = 0;
@@ -405,40 +416,95 @@ impl FarEndReading {
         std::mem::take(&mut self.body)
     }
 
-    /// The units the far end reported, read at the last piece, by the rule the plane's
-    /// `decode_response` reads them (`plane.rs`): a count is reported only for an answer with no
-    /// `/error` member, whose `/usage/units` is a whole number a signed 64-bit count holds. An
-    /// error answer, or a count that is missing, negative, fractional or past `i64::MAX`, reports
-    /// nothing. The status plays no part: `decode_response` judges success by the `/error` member
-    /// alone.
+    /// Whether the far end answered a SUCCESS: a `2xx` status and no `/error` member (a `null`
+    /// one is none). The one success rule: the decision count and the request fee both follow it.
     #[must_use]
-    pub fn units(&self) -> Option<Units> {
-        if codec::has(&self.body, PTR_ERROR) {
-            return None;
+    pub fn success(&self, status: Option<u32>) -> bool {
+        status.is_some_and(|s| (200..300).contains(&s))
+            && codec::read_raw(&self.body, PTR_ERROR).is_none_or(|e| e == b"null")
+    }
+
+    /// WHAT THE ANSWER BILLS, read once at the last piece ($; Q128 plane-decisions finding 4).
+    ///
+    /// * Not a success ([`Self::success`]): nothing, no decision and no fee.
+    /// * A success whose `/usage/units` is a whole number a signed 64-bit count holds: that many
+    ///   `decision`, reported, the request fee `1`, and its `/usage/input_tokens` and
+    ///   `/usage/output_tokens` (each `0` when absent: 0 = free; a token count that is present but
+    ///   not a whole count is [`Uncounted`], never billed as zero).
+    /// * A success with no such count (absent, negative, fractional, a string, past `i64::MAX`):
+    ///   [`Uncounted`]. The answer is never served free: the unit is refused, loudly (THE DESIGN
+    ///   section 2: "an answer with no count refuses loudly").
+    ///
+    /// # Errors
+    ///
+    /// [`Uncounted`], for a success that states no whole decision count, or a token count that is
+    /// present and not whole.
+    pub fn settle(&self, status: Option<u32>) -> Result<Settled, Uncounted> {
+        if !self.success(status) {
+            return Ok(Settled::NotASuccess);
         }
-        codec::read_u64(&self.body, PTR_USAGE_UNITS)
-            .filter(|amount| i64::try_from(*amount).is_ok())
-            .map(|amount| Units {
+        let amount = whole(&self.body, PTR_USAGE_UNITS).ok_or(Uncounted)?;
+        let tokens = |pointer| match codec::read_raw(&self.body, pointer) {
+            None => Ok(0),
+            Some(_) => whole(&self.body, pointer).ok_or(Uncounted),
+        };
+        let (input, output) = (
+            tokens(PTR_USAGE_INPUT_TOKENS)?,
+            tokens(PTR_USAGE_OUTPUT_TOKENS)?,
+        );
+        Ok(Settled::Billed([
+            Units {
                 class: tail::CLASS_DECISION_INDEX,
                 reported: true,
                 amount,
-            })
-    }
-
-    /// THE REQUEST FEE, read at the last piece: `1` of [`tail::FEE_PER_REQUEST`] for an answer the
-    /// far end gave as a success — a `2xx` status and no `/error` member, the success rule
-    /// [`Self::units`] reads — and nothing otherwise, so a refused or failed unit owes no fee
-    /// (billable success only).
-    #[must_use]
-    pub fn fee(&self, status: Option<u32>) -> Option<Units> {
-        let success = status.is_some_and(|s| (200..300).contains(&s));
-        (success && !codec::has(&self.body, PTR_ERROR)).then_some(Units {
-            class: tail::CLASS_FEE_INDEX,
-            reported: true,
-            amount: 1,
-        })
+            },
+            Units {
+                class: tail::CLASS_FEE_INDEX,
+                reported: true,
+                amount: 1,
+            },
+            Units {
+                class: tail::CLASS_INPUT_TOKENS_INDEX,
+                reported: true,
+                amount: input,
+            },
+            Units {
+                class: tail::CLASS_OUTPUT_TOKENS_INDEX,
+                reported: true,
+                amount: output,
+            },
+        ]))
     }
 }
+
+/// The whole count at `pointer`: a bare non-negative integer a signed 64-bit count holds.
+fn whole(body: &[u8], pointer: &str) -> Option<u64> {
+    codec::read_u64(body, pointer).filter(|amount| i64::try_from(*amount).is_ok())
+}
+
+/// What a settled answer bills ([`FarEndReading::settle`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Settled {
+    /// The far end did not answer a success: no unit is reported.
+    NotASuccess,
+    /// A success: its decision count, its request fee, and its input and output tokens.
+    Billed([Units; 4]),
+}
+
+impl Settled {
+    /// The units to report.
+    #[must_use]
+    pub fn units(&self) -> &[Units] {
+        match self {
+            Self::NotASuccess => &[],
+            Self::Billed(units) => units,
+        }
+    }
+}
+
+/// A success answer that states no whole decision count: refused, never billed as zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Uncounted;
 
 /// THE CALLER FIELDS THE FAR END NEVER RECEIVES: the ones the plane writes itself (the document
 /// type), the ones naming the hop (`host`), and the credential carriers (the far end is presented

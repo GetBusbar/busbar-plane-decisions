@@ -67,6 +67,15 @@ fn an_attempt_forwards_the_caller_body_unchanged() {
     );
 }
 
+/// The decision count and the fee a held answer settles to, under `status`.
+fn settled(body: &[u8], status: Option<u32>) -> Result<Vec<(u32, u64)>, Uncounted> {
+    let mut reading = FarEndReading::new();
+    reading.piece(body).expect("under the backstop");
+    reading
+        .settle(status)
+        .map(|s| s.units().iter().map(|u| (u.class, u.amount)).collect())
+}
+
 #[test]
 fn far_end_pieces_are_held_whole_and_the_count_read_over_the_whole_answer() {
     let mut reading = FarEndReading::new();
@@ -75,72 +84,109 @@ fn far_end_pieces_are_held_whole_and_the_count_read_over_the_whole_answer() {
     assert_eq!(reading.piece(a), Ok(()));
     assert_eq!(reading.piece(b), Ok(()));
     assert_eq!(
-        reading.units(),
-        Some(Units {
-            class: 0,
-            reported: true,
-            amount: 42
-        })
+        reading.settle(Some(200)),
+        Ok(Settled::Billed([
+            Units {
+                class: tail::CLASS_DECISION_INDEX,
+                reported: true,
+                amount: 42
+            },
+            Units {
+                class: tail::CLASS_FEE_INDEX,
+                reported: true,
+                amount: 1
+            },
+            Units {
+                class: tail::CLASS_INPUT_TOKENS_INDEX,
+                reported: true,
+                amount: 0
+            },
+            Units {
+                class: tail::CLASS_OUTPUT_TOKENS_INDEX,
+                reported: true,
+                amount: 0
+            },
+        ]))
     );
 }
 
+/// ONE SUCCESS RULE ($, finding 4): a `2xx` status and no `/error` member (a `null` one is none).
+/// What is not a success bills nothing at all: no decision, no fee.
 #[test]
-fn an_error_answer_reports_no_units() {
-    let mut reading = FarEndReading::new();
-    reading
-        .piece(br#"{"error":{"code":"invalid_state"},"usage":{"units":3}}"#)
-        .expect("under the backstop");
-    assert_eq!(reading.units(), None);
-}
-
-/// RED: the count is read as `decode_response` reads it. Success is the absence of an `/error`
-/// member, whatever the status (a 4xx with no `/error` still reports its count, as predev's decode
-/// sets the fact), and a count past `i64::MAX` reports nothing (predev's `i64::try_from` drops it).
-#[test]
-fn the_count_is_read_as_decode_response_reads_it() {
-    let mut reading = FarEndReading::new();
-    reading
-        .piece(br#"{"usage":{"units":3}}"#)
-        .expect("under the backstop");
-    assert_eq!(reading.units().map(|u| u.amount), Some(3));
-    for (body, amount) in [
-        (
-            format!(r#"{{"usage":{{"units":{}}}}}"#, i64::MAX),
-            Some(i64::MAX as u64),
-        ),
-        (
-            format!(r#"{{"usage":{{"units":{}}}}}"#, i64::MAX as u64 + 1),
-            None,
-        ),
-        (format!(r#"{{"usage":{{"units":{}}}}}"#, u64::MAX), None),
-    ] {
-        let mut reading = FarEndReading::new();
-        reading.piece(body.as_bytes()).expect("under the backstop");
-        assert_eq!(reading.units().map(|u| u.amount), amount, "{body}");
+fn only_a_success_bills_and_the_count_and_fee_follow_one_rule() {
+    let counted = br#"{"usage":{"units":3}}"#;
+    assert_eq!(
+        settled(counted, Some(200)),
+        Ok(vec![(0, 3), (1, 1), (2, 0), (3, 0)])
+    );
+    assert_eq!(
+        settled(counted, Some(204)),
+        Ok(vec![(0, 3), (1, 1), (2, 0), (3, 0)])
+    );
+    // RED: a non-2xx answer carrying a count, with no `/error`, used to bill its decisions.
+    for status in [Some(422), Some(500), Some(302), None] {
+        assert_eq!(settled(counted, status), Ok(vec![]), "{status:?}");
     }
+    // An error answer bills nothing, whatever its status.
+    let errored = br#"{"error":{"code":"invalid_state"},"usage":{"units":3}}"#;
+    assert_eq!(settled(errored, Some(200)), Ok(vec![]));
+    // RED: `"error": null` is no error; a 2xx carrying it used to bill neither count nor fee.
+    let null_error = br#"{"error":null,"usage":{"units":5}}"#;
+    assert_eq!(
+        settled(null_error, Some(200)),
+        Ok(vec![(0, 5), (1, 1), (2, 0), (3, 0)])
+    );
 }
 
+/// RED ($, finding 4): a SUCCESS with no whole count is refused, never billed as zero. The count
+/// is a whole number a signed 64-bit count holds; zero is a count.
 #[test]
-fn a_count_that_is_not_a_whole_number_reports_no_units() {
+fn a_success_with_no_whole_count_is_refused_never_free() {
     for body in [
         &br#"{"usage":{"units":-1}}"#[..],
         br#"{"usage":{"units":1.5}}"#,
+        br#"{"usage":{"units":"7"}}"#,
         br#"{"usage":{}}"#,
         br#"{}"#,
     ] {
-        let mut reading = FarEndReading::new();
-        reading.piece(body).expect("under the backstop");
-        assert_eq!(reading.units(), None, "{}", String::from_utf8_lossy(body));
+        assert_eq!(
+            settled(body, Some(200)),
+            Err(Uncounted),
+            "{}",
+            String::from_utf8_lossy(body)
+        );
     }
+    let max = format!(r#"{{"usage":{{"units":{}}}}}"#, i64::MAX);
+    assert_eq!(
+        settled(max.as_bytes(), Some(200)),
+        Ok(vec![(0, i64::MAX as u64), (1, 1), (2, 0), (3, 0)])
+    );
+    let past = format!(r#"{{"usage":{{"units":{}}}}}"#, i64::MAX as u64 + 1);
+    assert_eq!(settled(past.as_bytes(), Some(200)), Err(Uncounted));
+    assert_eq!(
+        settled(br#"{"usage":{"units":0}}"#, Some(200)),
+        Ok(vec![(0, 0), (1, 1), (2, 0), (3, 0)])
+    );
+    // Not a success: no count is owed, so none is missing.
+    assert_eq!(settled(br#"{}"#, Some(503)), Ok(vec![]));
 }
 
 #[test]
 fn the_units_never_read_state_or_answers() {
-    let mut reading = FarEndReading::new();
-    reading
-        .piece(br#"{"usage":{"units":7},"state":{"units":999},"answers":{"units":888}}"#)
-        .expect("under the backstop");
-    assert_eq!(reading.units().map(|u| u.amount), Some(7));
+    assert_eq!(
+        settled(
+            br#"{"usage":{"units":7},"state":{"units":999},"answers":{"units":888}}"#,
+            Some(200)
+        ),
+        Ok(vec![(0, 7), (1, 1), (2, 0), (3, 0)])
+    );
+    assert_eq!(
+        settled(
+            br#"{"state":{"usage":{"units":9}},"answers":{"usage":{"units":9}}}"#,
+            Some(200)
+        ),
+        Err(Uncounted)
+    );
 }
 
 #[test]
@@ -257,29 +303,6 @@ fn upstream_model_rewrites_only_the_top_level_model_value() {
     assert_eq!(splice_model(br#"{"model":null}"#, "x"), None);
 }
 
-/// BILLABLE SUCCESS ONLY: the request fee is counted once for a far end's 2xx answer with no
-/// `/error` member, and never for an error answer, a non-2xx status or an answer with no status.
-#[test]
-fn the_request_fee_is_counted_on_a_success_alone() {
-    let mut ok = FarEndReading::new();
-    ok.piece(br#"{"usage":{"units":3}}"#)
-        .expect("under the backstop");
-    let fee = ok.fee(Some(200)).expect("a success owes its fee");
-    assert_eq!(
-        (fee.class, fee.amount, fee.reported),
-        (tail::CLASS_FEE_INDEX, 1, true)
-    );
-    // RED ARMS.
-    assert_eq!(ok.fee(Some(422)), None, "a refused request owes none");
-    assert_eq!(ok.fee(Some(500)), None);
-    assert_eq!(ok.fee(None), None, "no status read, no fee");
-    let mut failed = FarEndReading::new();
-    failed
-        .piece(br#"{"error":{"code":"x","message":"y"}}"#)
-        .expect("under the backstop");
-    assert_eq!(failed.fee(Some(200)), None, "an error answer owes none");
-}
-
 /// THE CALLER'S FIELDS REACH THE FAR END (DEC-SERVE Q2, DIALECT-FIDELITY F2): every one, in order,
 /// a repeated name keeping each value, but the governed set (the document type the plane writes, the
 /// hop's `host`, the credential carriers), compared without case.
@@ -316,4 +339,54 @@ fn an_answer_past_the_backstop_is_refused() {
     assert_eq!(reading.take_answer(), b"12345678");
     assert!(reading.take_answer().is_empty(), "taken, not copied");
     assert_eq!(ANSWER_BACKSTOP, 256 * 1024 * 1024);
+}
+
+/// RED ($, finding 5): the owner's decisions card prices `decision`, `input_tokens` and
+/// `output_tokens`, family `decision`; the tail declares all three (and the fee unit), and an
+/// answer's token counts are reported under them. Predev declared the decision class alone.
+#[test]
+fn the_card_classes_are_declared_and_the_token_counts_reported() {
+    let named: Vec<(&str, &str)> = tail::BILLABLE_CLASSES
+        .iter()
+        .map(|(c, f)| (c.as_str(), *f))
+        .collect();
+    for class in ["decision", "input_tokens", "output_tokens"] {
+        assert!(
+            named.contains(&(class, "decision")),
+            "{class} is declared in the decision family: {named:?}"
+        );
+    }
+    assert_eq!(
+        named[tail::CLASS_INPUT_TOKENS_INDEX as usize].0,
+        "input_tokens"
+    );
+    assert_eq!(
+        named[tail::CLASS_OUTPUT_TOKENS_INDEX as usize].0,
+        "output_tokens"
+    );
+    assert_eq!(
+        settled(
+            br#"{"usage":{"units":2,"input_tokens":120,"output_tokens":7}}"#,
+            Some(200)
+        ),
+        Ok(vec![(0, 2), (1, 1), (2, 120), (3, 7)])
+    );
+    // Absent token counts are 0 (0 = free); only the decision count is required.
+    assert_eq!(
+        settled(br#"{"usage":{"units":2,"output_tokens":7}}"#, Some(200)),
+        Ok(vec![(0, 2), (1, 1), (2, 0), (3, 7)])
+    );
+    // A token count that is present but not whole is refused, never billed as zero.
+    for body in [
+        &br#"{"usage":{"units":2,"input_tokens":1.5}}"#[..],
+        br#"{"usage":{"units":2,"output_tokens":-3}}"#,
+        br#"{"usage":{"units":2,"output_tokens":"7"}}"#,
+    ] {
+        assert_eq!(
+            settled(body, Some(200)),
+            Err(Uncounted),
+            "{}",
+            String::from_utf8_lossy(body)
+        );
+    }
 }

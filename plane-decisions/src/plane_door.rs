@@ -154,16 +154,15 @@ const OP_CLASSES: &[OpClass] = &[OpClass {
     name: abi_str(tail::OP_CLASSES[0].as_str()),
 }];
 
-const BILLABLE_CLASSES: &[BillableClass] = &[
+/// One of [`tail::BILLABLE_CLASSES`], as the tail states it.
+const fn billable(i: usize) -> BillableClass {
     BillableClass {
-        class: abi_str(tail::BILLABLE_CLASSES[0].0.as_str()),
-        family: abi_str(tail::BILLABLE_CLASSES[0].1),
-    },
-    BillableClass {
-        class: abi_str(tail::BILLABLE_CLASSES[1].0.as_str()),
-        family: abi_str(tail::BILLABLE_CLASSES[1].1),
-    },
-];
+        class: abi_str(tail::BILLABLE_CLASSES[i].0.as_str()),
+        family: abi_str(tail::BILLABLE_CLASSES[i].1),
+    }
+}
+
+const BILLABLE_CLASSES: &[BillableClass] = &[billable(0), billable(1), billable(2), billable(3)];
 
 /// The fee unit the plane counts ([`tail::FEE_UNITS`]).
 const FEE_UNITS: &[AbiStr] = &[abi_str(tail::FEE_UNITS[0])];
@@ -366,6 +365,8 @@ enum Refused {
     AtCap,
     /// Its answer passed [`driven::ANSWER_BACKSTOP`].
     OverBackstop,
+    /// Its far end answered a success with no whole decision count ([`driven::Uncounted`]).
+    Uncounted,
 }
 
 impl DecisionsDoor {
@@ -388,6 +389,12 @@ impl DecisionsDoor {
     #[must_use]
     pub fn refused_at_cap(&self) -> u64 {
         self.refused.get(&Refused::AtCap).unwrap_or(0)
+    }
+
+    /// How many success answers were refused for stating no whole decision count.
+    #[must_use]
+    pub fn refused_uncounted(&self) -> u64 {
+        self.refused.get(&Refused::Uncounted).unwrap_or(0)
     }
 
     /// How many units were refused past [`driven::ANSWER_BACKSTOP`].
@@ -740,10 +747,13 @@ fn far_end(
                 value: arena.span(value),
             });
         }
-        for count in [unit.reading.units(), unit.reading.fee(unit.status)]
-            .into_iter()
-            .flatten()
-        {
+        // THE ONE SUCCESS RULE ($): a success with no whole count is refused, loudly and counted,
+        // before a byte of it reaches the caller; it is never served free.
+        let Ok(settled) = unit.reading.settle(unit.status) else {
+            plane.count(Refused::Uncounted);
+            return (Outcome::Refused, true);
+        };
+        for count in settled.units() {
             units.push(UnitCount {
                 class: count.class,
                 source: UNITS_REPORTED,
