@@ -1,0 +1,35 @@
+{
+  "schema": "blackbox/1",
+  "case": "validate_ok_on_a_good_decisions_config",
+  "requires": {
+    "features": [
+      "plane-decisions"
+    ],
+    "sections": [
+      "decisions"
+    ]
+  },
+  "files": {
+    "providers.yaml": "mock:\n  protocol: jev\n  base_url: \"http://127.0.0.1:9\"\n  api_key_env: MOCK_KEY\n",
+    "config.yaml": "listen: \"127.0.0.1:0\"\nstore: {module: memory}\nproviders:\n  mock:\n    api_key: { env: MOCK_KEY }\nmodels: {}\ndecisions:\n  models:\n    verdicts:\n      provider: mock\n"
+  },
+  "vars": {
+    "MOCK_KEY": "test-key-value",
+    "BUSBAR_SIGNING_KEY": "0000000000000000000000000000000000000000000000000000000000000001",
+    "BUSBAR_CONFIG": "{dir}/config.yaml",
+    "BUSBAR_PROVIDERS": "{dir}/providers.yaml"
+  },
+  "unset": [
+    "BUSBAR_CLI_VALIDATE_TEST_UNSET_VAR"
+  ],
+  "steps": [
+    {
+      "validate": {
+        "exit": 0,
+        "stdout_contains": [
+          "ok: config valid"
+        ]
+      }
+    }
+  ]
+}

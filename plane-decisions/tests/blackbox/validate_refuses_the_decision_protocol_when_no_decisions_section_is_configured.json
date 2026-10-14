@@ -1,0 +1,38 @@
+{
+  "schema": "blackbox/1",
+  "case": "validate_refuses_the_decision_protocol_when_no_decisions_section_is_configured",
+  "requires": {
+    "features": [
+      "plane-decisions"
+    ],
+    "sections": [
+      "decisions"
+    ],
+    "axes": [
+      "body-ingress"
+    ]
+  },
+  "files": {
+    "providers.yaml": "mock:\n  protocol: jev\n  base_url: \"http://127.0.0.1:9\"\n  api_key_env: MOCK_KEY\n",
+    "config.yaml": "listen: \"127.0.0.1:0\"\nstore: {module: memory}\nproviders:\n  mock:\n    api_key: { env: MOCK_KEY }\nmodels: {}\n"
+  },
+  "vars": {
+    "MOCK_KEY": "test-key-value",
+    "BUSBAR_SIGNING_KEY": "0000000000000000000000000000000000000000000000000000000000000001",
+    "BUSBAR_CONFIG": "{dir}/config.yaml",
+    "BUSBAR_PROVIDERS": "{dir}/providers.yaml"
+  },
+  "unset": [
+    "BUSBAR_CLI_VALIDATE_TEST_UNSET_VAR"
+  ],
+  "steps": [
+    {
+      "validate": {
+        "exit": "nonzero",
+        "stderr_contains": [
+          "provider 'mock' has unknown protocol 'jev': must be one of: anthropic, openai, gemini, bedrock, responses, cohere\n"
+        ]
+      }
+    }
+  ]
+}
