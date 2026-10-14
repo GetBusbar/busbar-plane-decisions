@@ -41,15 +41,19 @@ pub const PTR_ID: &str = "/id";
 /// without this plane growing a second top-level member to ignore.
 pub const PTR_USAGE_UNITS: &str = "/usage/units";
 
-/// The pointer a successful `systemone` response reports the input tokens it consumed at
-/// (dialect data, DECISIONS Q1-5: the jev dialect's usage pointers). Absent = `0`.
+/// The pointers a SUCCESSFUL `systemone` response reports its input and output tokens at, where it
+/// reports them (DECISIONS Q1-5: "usage pointers are DIALECT data (/usage/units,
+/// /usage/input_tokens,/usage/output_tokens)").
 pub const PTR_USAGE_INPUT_TOKENS: &str = "/usage/input_tokens";
-
-/// The pointer a successful `systemone` response reports the output tokens it produced at
-/// (dialect data, as [`PTR_USAGE_INPUT_TOKENS`]). Absent = `0`.
+/// See [`PTR_USAGE_INPUT_TOKENS`].
 pub const PTR_USAGE_OUTPUT_TOKENS: &str = "/usage/output_tokens";
 
-/// Every pointer this plane resolves in a RESPONSE body (`systemone` or `models`). Declared here
+/// The pointer a SUCCESSFUL `nanojev` answer states the upstream's own billing unit at: the states
+/// its evaluation ran (THE DESIGN section 2: "it meters the upstream's own billing unit, counted
+/// from the answer already read (`execution.states`; an answer with no count refuses loudly").
+pub const PTR_EXECUTION_STATES: &str = "/execution/states";
+
+/// Every pointer this plane resolves in a RESPONSE body (`systemone`, `evaluate` or `models`). Declared here
 /// once, so the "never resolves `/state` or `/answers`" claim is checkable by reading one list
 /// rather than auditing every call site.
 pub const RESPONSE_PTRS: &[&str] = &[
@@ -59,14 +63,18 @@ pub const RESPONSE_PTRS: &[&str] = &[
     PTR_USAGE_UNITS,
     PTR_USAGE_INPUT_TOKENS,
     PTR_USAGE_OUTPUT_TOKENS,
+    PTR_EXECUTION_STATES,
 ];
 
-/// The pointer a request names its model at: top-level metadata, read to route the request and
-/// rewritten only by the `upstream_model` splice (DECISIONS D8b). Never `state`, never `answers`.
+/// The pointer a request names the model it is routed over at: its top-level `model` (THE DESIGN
+/// section 2, model resolution; DECISIONS D8b "REQUEST_PTRS += /model (metadata)"). Routing
+/// metadata, never decision content.
 pub const PTR_MODEL: &str = "/model";
 
-/// Every pointer this plane resolves in a REQUEST body: the model it routes by (DECISIONS D8b,
-/// `REQUEST_PTRS += /model`). jev names its operation in the path, so nothing else is read.
+/// Every pointer this plane resolves in a REQUEST body: the model it routes over, and nothing else.
+/// A `systemone` request carries the caller's `state`, which this plane never reads; jev names its
+/// operation in the path, so the top-level `model` is the one member routing needs
+/// (`driven::route_model`) and the one `upstream_model` rewrites (`driven::spliced`).
 pub const REQUEST_PTRS: &[&str] = &[PTR_MODEL];
 
 /// The span view of a body, built from one of the two declared pointer lists above.
@@ -101,16 +109,8 @@ pub fn has(body: &[u8], pointer: &str) -> bool {
 /// The raw bytes at one declared pointer of a body.
 #[must_use]
 pub fn read_raw<'u>(body: &'u [u8], pointer: &str) -> Option<&'u [u8]> {
-    body.get(span_of(body, pointer)?)
-}
-
-/// Where the value at one declared pointer of a body lies, its quotes included for a string.
-#[must_use]
-pub fn span_of(body: &[u8], pointer: &str) -> Option<core::ops::Range<usize>> {
     match busbar_contract::spans::resolve_pointer(body, pointer) {
-        busbar_contract::spans::Resolved::Found(span) if span.end <= body.len() => {
-            Some(span.start..span.end)
-        }
+        busbar_contract::spans::Resolved::Found(span) => body.get(span.start..span.end),
         _ => None,
     }
 }
@@ -139,6 +139,9 @@ pub(crate) const EGRESS_SCHEME: &str = "decision-egress";
 
 /// The envelope member naming the document type of an outbound body.
 pub(crate) const FIELD_CONTENT_TYPE: &str = "content-type";
+
+/// The response field a refusal names its wait in: whole seconds until the caller may retry.
+pub(crate) const FIELD_RETRY_AFTER: &str = "retry-after";
 
 /// The document type every body of this protocol is.
 pub(crate) const CONTENT_TYPE_JSON: &[u8] = b"application/json";
