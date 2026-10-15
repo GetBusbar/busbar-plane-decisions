@@ -60,8 +60,8 @@ use busbar_contract::abi::plane::{
     ArriveIn, ArriveOut, BillableClass, DialectAuth, OnPieceIn, OnPieceOut, OpClass, OutField,
     PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, PlaneRefreshOut, PlaneSnapshot,
     PlaneTail, ProjectIn, ProjectOut, RefusalIn, RefusalOut, ServeIn, ServeOut, UnitCount,
-    CANCEL_ABORTED, CANCEL_OK_PARTIAL, CLAIM_EXACT, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER,
-    FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE, PIECE_HAS_STATUS, PIECE_LAST,
+    ANSWER_LAYOUT, CANCEL_ABORTED, CANCEL_OK_PARTIAL, CLAIM_EXACT, EMIT_DONE, EMIT_TO_FAR_END,
+    FROM_CALLER, FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE, PIECE_HAS_STATUS, PIECE_LAST,
     PRINCIPAL_NONE, PRINCIPAL_OPTIONAL, PRINCIPAL_REQUIRED, ROUTE_DIRECT, SHAPE_WHOLE,
     UNITS_REPORTED,
 };
@@ -206,7 +206,7 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     ingress: INGRESS_REQUEST_RESPONSE,
     // The kernel gathers the caller's whole body and pushes it as one piece.
     dispatch_shape: SHAPE_WHOLE,
-    _reserved: 0,
+    answer_layout: ANSWER_LAYOUT,
     scope: abi_str(tail::SCOPE_KINDS[0]),
     label: abi_str(LABEL),
     subject_noun: abi_str(tail::SUBJECT_NOUN),
