@@ -52,7 +52,7 @@ pub(crate) const NOT_APPLICABLE: &[(&str, &str, &str)] = &[
     (
         "catalogue",
         "decisions",
-        "the decisions plane publishes no listing a caller could SEE: it claims one operation (POST /v1/systemone) and nothing else, and GET /v1/models keeps the bytes the llm plane's catalogue serves, so there is no per-item visibility of its own to answer",
+        "the decisions plane publishes no listing a caller could SEE: it claims one operation (POST /v1/systemone) and nothing else, and GET /v1/models keeps the bytes the model catalogue's own plane serves, so there is no per-item visibility of its own to answer",
     ),
 ];
 
