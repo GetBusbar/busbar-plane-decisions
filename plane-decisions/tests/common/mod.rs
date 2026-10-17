@@ -221,6 +221,18 @@ pub fn response_frame(bytes: &[u8]) -> Frame {
     }
 }
 
+/// A codec host with no entropy and no clock: the plane mints nothing and reads no wall clock.
+pub struct NoHost;
+
+impl busbar_contract::codec::CodecHost for NoHost {
+    fn fill_entropy(&self, _out: &mut [u8]) -> bool {
+        false
+    }
+    fn wall_clock_now(&self) -> Option<u64> {
+        None
+    }
+}
+
 /// Everything a context borrows, held together so a test can build one.
 pub struct Scaffold {
     pub arena: TestPlaneAlloc,
@@ -249,6 +261,7 @@ impl Scaffold {
             &self.transport,
             &self.labels,
             &self.arena,
+            &NoHost,
         )
     }
 
