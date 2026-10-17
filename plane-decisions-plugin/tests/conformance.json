@@ -8,6 +8,7 @@
     "open_claims": [["POST", "/v1/systemone"]],
     "refresh_claims": [["POST", "/v1/systemone"]],
     "member": "jev",
+    "arrive_each": true,
     "claimed": { "unit": 7, "method": "POST", "target": "/v1/systemone" },
     "unclaimed": { "unit": 8, "method": "GET", "target": "/v1/models", "status": 404 },
     "request": "{\"state\":{\"session\":\"s\"},\"context\":{}}",

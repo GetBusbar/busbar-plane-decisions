@@ -365,3 +365,48 @@ fn an_arrival_never_started_is_reclaimed_once_the_cap_is_reached() {
     let next = door.arrive(MAX_UNITS + 1, br#"{}"#);
     assert_eq!(next.outcome, Outcome::Ready, "{next:?}");
 }
+
+/// RED (audit plane-decisions, the request target): the kernel matches an exact claim on the
+/// request PATH and hands `arrive` the whole target, query included; a claimed request with a
+/// query routes as its path does, never the unclaimed `404` (THE DESIGN section 2: "a request routes
+/// by its model; one configured model and none named is the default").
+#[test]
+fn a_claimed_request_with_a_query_routes_as_its_path() {
+    let one = open(ONE);
+    let queried = one.arrive_on(1, "POST", "/v1/systemone?trace=1", br#"{"state":{}}"#, &[]);
+    assert_eq!(
+        (queried.outcome, queried.route, queried.entry.as_str()),
+        (Outcome::Ready, ROUTE_DIRECT, "jev"),
+        "{queried:?}"
+    );
+}
+
+/// RED (audit plane-decisions#6, the reclaimed unit): a unit whose arrival state the door no
+/// longer holds is refused at its first piece, never served from a blank state that drops its
+/// `upstream_model` splice and its relayed caller fields (THE DESIGN section 2: "`upstream_model`
+/// rewrites only the top-level model value ... when it is set and differs").
+#[test]
+fn a_unit_whose_arrival_state_is_gone_is_refused_never_served_blank() {
+    let upstream = r#"{"models":{"jev":{"provider":"typesafe","upstream_model":"jev-1.13.0"}}}"#;
+    let door = open(upstream);
+    let body = br#"{"model":"jev","state":{}}"#;
+    assert_eq!(door.arrive(1, body).outcome, Outcome::Ready);
+    // MAX_UNITS arrivals that never cross a piece: the last one reclaims unit 1's state.
+    for unit in 2..=MAX_UNITS + 1 {
+        assert_eq!(
+            door.arrive(unit, br#"{}"#).outcome,
+            Outcome::Ready,
+            "unit {unit}"
+        );
+    }
+    // One of them is refused, so the instance has room again.
+    door.refusal(2, 429, "the key's limit is spent", false);
+    let mut bufs = Bufs::new(1 << 16);
+    let attempt = door.piece(1, Given::attempt(1), &mut bufs);
+    let caller = door.piece(1, Given::caller(body), &mut bufs);
+    assert!(
+        !(caller.far && caller.bytes == body),
+        "unit 1 reached the far end with its model unspliced: {attempt:?} {caller:?}"
+    );
+    assert_eq!(attempt.outcome, Some(Outcome::Refused), "{attempt:?}");
+}
