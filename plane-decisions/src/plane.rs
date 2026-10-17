@@ -159,9 +159,7 @@ fn refusal_render(reason: RefusalReason) -> (&'static str, &'static str) {
         | RefusalReason::PlanePanic
         | RefusalReason::TaskLost
         | RefusalReason::SecretPlaceholder
-        | RefusalReason::Internal => {
-            ("internal", "the request could not be served at this time")
-        }
+        | RefusalReason::Internal => ("internal", "the request could not be served at this time"),
     }
 }
 
