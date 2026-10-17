@@ -60,8 +60,8 @@ use busbar_contract::abi::plane::{
     ArriveIn, ArriveOut, BillableClass, DialectAuth, OnPieceIn, OnPieceOut, OpClass, OutField,
     PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, PlaneRefreshOut, PlaneSnapshot,
     PlaneTail, ProjectIn, ProjectOut, RefusalIn, RefusalOut, ServeIn, ServeOut, UnitCount,
-    CANCEL_ABORTED, CANCEL_OK_PARTIAL, CLAIM_EXACT, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER,
-    FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE, PIECE_HAS_STATUS, PIECE_LAST,
+    ANSWER_LAYOUT, CANCEL_ABORTED, CANCEL_OK_PARTIAL, CLAIM_EXACT, EMIT_DONE, EMIT_TO_FAR_END,
+    FROM_CALLER, FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE, PIECE_HAS_STATUS, PIECE_LAST,
     PRINCIPAL_NONE, PRINCIPAL_OPTIONAL, PRINCIPAL_REQUIRED, ROUTE_DIRECT, SHAPE_WHOLE,
     UNITS_REPORTED,
 };
@@ -206,7 +206,7 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     ingress: INGRESS_REQUEST_RESPONSE,
     // The kernel gathers the caller's whole body and pushes it as one piece.
     dispatch_shape: SHAPE_WHOLE,
-    _reserved: 0,
+    answer_layout: ANSWER_LAYOUT,
     scope: abi_str(tail::SCOPE_KINDS[0]),
     label: abi_str(LABEL),
     subject_noun: abi_str(tail::SUBJECT_NOUN),
@@ -243,6 +243,8 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     admin_routes: ptr::null(),
     admin_routes_len: 0,
     admin_openapi: Blob::ABSENT,
+    metric_lanes: ptr::null(),
+    metric_lanes_len: 0,
     stream_ceiling_secs: 0,
 };
 
@@ -325,7 +327,7 @@ pub fn snapshot_spec(dialects: &[u32]) -> SnapshotSpec {
 
 /// What a claimed arrival routes over: a model's dialect, and its `upstream_model`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Routed {
+pub struct ModelRoute {
     /// Its index in [`tail::DIALECTS`].
     pub dialect: u32,
     /// Its `upstream_model`.
@@ -344,7 +346,7 @@ pub struct Routed {
 pub fn routes(
     section: &DecisionsSection,
     protocols: &BTreeMap<String, String>,
-) -> Result<BTreeMap<String, Routed>, String> {
+) -> Result<BTreeMap<String, ModelRoute>, String> {
     section
         .models
         .iter()
@@ -363,7 +365,7 @@ pub fn routes(
             })?;
             Ok((
                 name.clone(),
-                Routed {
+                ModelRoute {
                     dialect,
                     upstream: model.upstream_model.clone(),
                 },
@@ -377,7 +379,7 @@ pub fn routes(
 /// models are listed, scope-filtered by the kernel; `/v1/models` appends them), in ascending name
 /// order.
 #[must_use]
-pub fn generation_spec(routes: &BTreeMap<String, Routed>) -> SnapshotSpec {
+pub fn generation_spec(routes: &BTreeMap<String, ModelRoute>) -> SnapshotSpec {
     let dialects: Vec<u32> = routes.values().map(|r| r.dialect).collect();
     SnapshotSpec {
         listed: routes.keys().cloned().collect(),
@@ -402,7 +404,7 @@ struct Unit {
     owed_flags: u32,
     /// The caller's fields the far end receives ([`driven::relayed_fields`]), kept from `arrive`
     /// (the caller's head crosses once) for every ATTEMPT of the unit.
-    caller: driven::Relayed,
+    caller: driven::RelayedFields,
     /// The ticket the unit's last piece crossed on: what a `cancel` names it by.
     ticket: Option<Ticket>,
     /// Its place in the instance's arrivals ([`DecisionsDoor::arrivals`]).
@@ -421,7 +423,7 @@ pub struct DecisionsDoor {
     units: Keyed<u64, Unit>,
     /// The models a claimed arrival routes over, directly, by name: every model the latest
     /// generation configures, each with its dialect and `upstream_model`.
-    models: Keyed<String, Routed>,
+    models: Keyed<String, ModelRoute>,
     /// How many arrivals the instance has kept: each unit's [`Unit::seq`]. The count is the
     /// SDK's per-instance keyed state, its one entry under `()`: the plane holds no interior
     /// state of its own.
@@ -432,7 +434,7 @@ pub struct DecisionsDoor {
 
 impl DecisionsDoor {
     /// Route claimed arrivals over `routes`.
-    fn route_over(&self, routes: BTreeMap<String, Routed>) {
+    fn route_over(&self, routes: BTreeMap<String, ModelRoute>) {
         self.models.with_all(|models| *models = routes);
     }
 }
@@ -809,7 +811,7 @@ fn far_end(
         // its fee; a usage member that is not a whole count fails the unit loudly, never a silent 0.
         let counts = match unit.reading.counts(unit.status) {
             Ok(counts) => counts,
-            Err(driven::Unreadable(pointer)) => {
+            Err(driven::UnreadableUsage(pointer)) => {
                 return (
                     out.fail(Refusal::failed(format!(
                         "the far end's answer carries `{pointer}`, which is not a whole count"
@@ -840,7 +842,8 @@ fn far_end(
 
 /// At [`MAX_UNITS`], the oldest unit that arrived [`MAX_UNITS`] or more arrivals before `seq` and
 /// never crossed a piece is reclaimed: the kernel never started it, and keeping it would leave the
-/// instance refusing every arrival for good. A unit that crossed a piece is never reclaimed.
+/// instance refusing every arrival for good. A unit that crossed a piece is never reclaimed, and a
+/// reclaimed unit's later piece is refused (`on_piece` serves only a unit it keeps state for).
 fn reclaim_stale(units: &mut BTreeMap<u64, Unit>, key: u64, seq: u64) {
     if units.len() < MAX_UNITS || units.contains_key(&key) {
         return;
@@ -874,7 +877,9 @@ slot!(
         let given = input.get();
         let bytes = input.field(|i| &i.bytes).bytes();
         plane.units.with_all(|units| {
-            let Some(unit) = unit_of(units, given.unit) else {
+            // Only a unit `arrive` keeps state for is served: one whose state is gone (reclaimed,
+            // or never arrived) would cross without its `upstream_model` and its caller fields.
+            let Some(unit) = units.get_mut(&given.unit) else {
                 return Outcome::Refused;
             };
             unit.ticket = Some(given.head.ticket);
