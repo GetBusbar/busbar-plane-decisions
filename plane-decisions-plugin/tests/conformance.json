@@ -20,7 +20,7 @@
       "answer_out": "{\"request_id\":\"req_1\",\"usage\":{\"units\":42,\"input_tokens\":7,\"output_tokens\":9},\"answers\":{}}",
       "units": [[0, 42], [2, 7], [3, 9], [1, 1]]
     },
-    "narrow": { "unit": 9, "reply_cap": 16, "more": 5 },
+    "narrow": { "unit": 9, "reply_cap": 40, "more": 2 },
     "short": { "unit": 11 },
     "empty": { "unit": 10, "outcome": "Refused" },
     "refusal": {
