@@ -325,9 +325,11 @@ pub struct Arrived {
 }
 
 /// Classify an arriving request by its verb and target: its operation, and the dialect its claim
-/// is. `None` for anything this plane does not claim, including `GET /v1/models`.
+/// is. `None` for anything this plane does not claim, including `GET /v1/models`. The kernel
+/// matches a claim on the request path and hands the whole target, so a query is not the path.
 #[must_use]
 pub fn arrive(verb: &str, target: &str) -> Option<Arrived> {
+    let target = target.split_once('?').map_or(target, |(path, _)| path);
     let row = ops::row_for(verb, target)?;
     let op_class = tail::OP_CLASSES.iter().position(|op| *op == row.op)?;
     let dialect = tail::CLAIMS

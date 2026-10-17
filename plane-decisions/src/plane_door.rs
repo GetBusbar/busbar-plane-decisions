@@ -842,7 +842,8 @@ fn far_end(
 
 /// At [`MAX_UNITS`], the oldest unit that arrived [`MAX_UNITS`] or more arrivals before `seq` and
 /// never crossed a piece is reclaimed: the kernel never started it, and keeping it would leave the
-/// instance refusing every arrival for good. A unit that crossed a piece is never reclaimed.
+/// instance refusing every arrival for good. A unit that crossed a piece is never reclaimed, and a
+/// reclaimed unit's later piece is refused (`on_piece` serves only a unit it keeps state for).
 fn reclaim_stale(units: &mut BTreeMap<u64, Unit>, key: u64, seq: u64) {
     if units.len() < MAX_UNITS || units.contains_key(&key) {
         return;
@@ -876,7 +877,9 @@ slot!(
         let given = input.get();
         let bytes = input.field(|i| &i.bytes).bytes();
         plane.units.with_all(|units| {
-            let Some(unit) = unit_of(units, given.unit) else {
+            // Only a unit `arrive` keeps state for is served: one whose state is gone (reclaimed,
+            // or never arrived) would cross without its `upstream_model` and its caller fields.
+            let Some(unit) = units.get_mut(&given.unit) else {
                 return Outcome::Refused;
             };
             unit.ticket = Some(given.head.ticket);
