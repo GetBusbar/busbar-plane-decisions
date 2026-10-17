@@ -206,7 +206,7 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     ingress: INGRESS_REQUEST_RESPONSE,
     // The kernel gathers the caller's whole body and pushes it as one piece.
     dispatch_shape: SHAPE_WHOLE,
-    _reserved: 0,
+    answer_layout: busbar_contract::abi::plane::ANSWER_LAYOUT,
     scope: abi_str(tail::SCOPE_KINDS[0]),
     label: abi_str(LABEL),
     subject_noun: abi_str(tail::SUBJECT_NOUN),

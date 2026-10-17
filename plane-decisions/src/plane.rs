@@ -140,6 +140,7 @@ fn refusal_render(reason: RefusalReason) -> (&'static str, &'static str) {
         | RefusalReason::DestinationBudgetExhausted
         | RefusalReason::BreakerOpen
         | RefusalReason::DestinationUnreachable
+        | RefusalReason::CredentialUnavailable
         | RefusalReason::Drain
         | RefusalReason::Superseded
         | RefusalReason::ClientGone
