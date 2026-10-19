@@ -231,6 +231,8 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     fee_units_len: FEE_UNITS.len(),
     record_kinds: ptr::null(),
     record_kinds_len: 0,
+    record_retentions: ptr::null(),
+    record_retentions_len: 0,
     egress_targets: ptr::null(),
     egress_targets_len: 0,
     record_chains: ptr::null(),
