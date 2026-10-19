@@ -121,11 +121,13 @@ const SECTIONS: &[Section] = &[
         name: abi_str(tail::SECTION_DECLARING),
         flags: SECTION_DECLARING,
         _reserved: 0,
+        ..Section::ZERO
     },
     Section {
         name: abi_str(tail::SECTIONS_CONSUMED[0]),
         flags: SECTION_CONSUMED,
         _reserved: 0,
+        ..Section::ZERO
     },
 ];
 
@@ -141,6 +143,7 @@ const fn dialect_auth(i: usize) -> DialectAuth {
         _reserved: 0,
         style: abi_str(tail::DIALECT_AUTH[i].1),
         params: Blob::ABSENT,
+        ..DialectAuth::ZERO
     }
 }
 
@@ -153,6 +156,7 @@ const fn op_class(i: usize) -> OpClass {
     OpClass {
         op: abi_str(tail::OP_CLASSES[i].as_str()),
         name: abi_str(tail::OP_CLASSES[i].as_str()),
+        ..OpClass::ZERO
     }
 }
 
@@ -163,6 +167,7 @@ const fn billable(i: usize) -> BillableClass {
     BillableClass {
         class: abi_str(tail::BILLABLE_CLASSES[i].0.as_str()),
         family: abi_str(tail::BILLABLE_CLASSES[i].1),
+        ..BillableClass::ZERO
     }
 }
 
@@ -186,6 +191,7 @@ pub const NEEDS: &[Need] = &[Need {
         len: 0,
         fmt: BLOB_ABSENT,
         flags: 0,
+        ..Blob::ZERO
     },
     keep_response_headers: KEEP_RESPONSE_HEADERS.as_ptr(),
     keep_response_headers_len: KEEP_RESPONSE_HEADERS.len(),
@@ -194,6 +200,7 @@ pub const NEEDS: &[Need] = &[Need {
     _reserved: 0,
     deny_response_headers: core::ptr::null(),
     deny_response_headers_len: 0,
+    ..Need::ZERO
 }];
 
 /// THE STATEMENT TAIL: the plane's static facts, every list [`crate::driven::tail`]'s.

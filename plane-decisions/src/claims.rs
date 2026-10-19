@@ -35,6 +35,7 @@ pub const CLAIMS: &[Claim] = &[
         scheme: Some(SCHEME),
         scheme_alternatives: SCHEME_ALTERNATIVES,
         idempotency: None,
+        ..Claim::ZERO
     },
     Claim {
         transport: TRANSPORT,
@@ -42,6 +43,7 @@ pub const CLAIMS: &[Claim] = &[
         scheme: Some(SCHEME),
         scheme_alternatives: SCHEME_ALTERNATIVES,
         idempotency: None,
+        ..Claim::ZERO
     },
 ];
 
