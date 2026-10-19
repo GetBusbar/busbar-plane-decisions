@@ -89,6 +89,24 @@ impl PlaneAlloc for TestPlaneAlloc {
     }
 }
 
+/// The codec host every context this scaffold builds hands its plane: a fixed, non-zero entropy fill
+/// and no clock of its own (the context carries the clock). A context cannot be built without one.
+pub struct FixtureCodecHost;
+
+impl busbar_contract::codec::CodecHost for FixtureCodecHost {
+    fn fill_entropy(&self, out: &mut [u8]) -> bool {
+        out.fill(0x5A);
+        true
+    }
+
+    fn wall_clock_now(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// The handle every context here is built with.
+pub const CODEC_HOST: &dyn busbar_contract::codec::CodecHost = &FixtureCodecHost;
+
 /// A configuration block with nothing in it.
 pub struct EmptyConfig;
 
@@ -249,6 +267,7 @@ impl Scaffold {
             &self.transport,
             &self.labels,
             &self.arena,
+            CODEC_HOST,
         )
     }
 
