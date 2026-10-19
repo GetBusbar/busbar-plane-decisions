@@ -13,14 +13,14 @@ use busbar_contract::abi::mechanism::call::{
     AbiStr, Blob, Field, InHead, OutHead, Outcome, Span, BLOB_OCTETS,
 };
 use busbar_contract::abi::mechanism::lifecycle::{
-    slot as life, CancelIn, CancelOut, OpenIn, OpenOut, OpsHead, RefreshIn, ValidateIn,
+    slot as life, CancelIn, CancelOut, OpenIn, OpenOut, OpsHead, ValidateIn,
 };
 use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
 use busbar_contract::abi::plane::{
     slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, Ops, OutField, PlaneCancelIn, PlaneCancelOut,
-    PlaneOpenIn, PlaneOpenOut, PlaneRefreshOut, PlaneSnapshot, ProviderFacts, RecordWrite,
-    RefusalIn, RefusalOut, UnitCount, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END,
-    FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, REFUSAL_ARRIVE, REFUSAL_KERNEL,
+    PlaneOpenIn, PlaneOpenOut, PlaneRefreshIn, PlaneRefreshOut, PlaneSnapshot, ProviderFacts,
+    RecordWrite, RefusalIn, RefusalOut, UnitCount, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER,
+    FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, REFUSAL_ARRIVE, REFUSAL_KERNEL,
 };
 use busbar_plane_decisions::plane_door::door;
 
@@ -324,10 +324,10 @@ impl Bufs {
 impl Door {
     /// `refresh` onto `generation` over `settings`: the new generation's claims.
     pub fn refresh(&self, settings: &str, generation: u64) -> Vec<(String, String)> {
-        let mut i: RefreshIn = z();
-        i.head = head::<RefreshIn>(life::REFRESH, Ticket::NONE);
-        i.generation = generation;
-        i.settings = octets(settings.as_bytes());
+        let mut i: PlaneRefreshIn = z();
+        i.refresh.head = head::<PlaneRefreshIn>(life::REFRESH, Ticket::NONE);
+        i.refresh.generation = generation;
+        i.refresh.settings = octets(settings.as_bytes());
         let mut o: PlaneRefreshOut = z();
         o.head = out_head::<PlaneRefreshOut>();
         let f = lifecycle().refresh.expect("refresh");

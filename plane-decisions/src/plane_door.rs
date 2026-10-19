@@ -52,18 +52,16 @@ use busbar_contract::abi::mechanism::call::{AbiStr, Blob, InHead, OutHead, Outco
 use busbar_contract::abi::mechanism::door::{
     KindTailHead, Section, Statement, SECTION_CONSUMED, SECTION_DECLARING,
 };
-use busbar_contract::abi::mechanism::lifecycle::{
-    GenIn, RefreshIn, ReleaseIn, TickIn, TickOut, ValidateIn,
-};
+use busbar_contract::abi::mechanism::lifecycle::{GenIn, ReleaseIn, TickIn, TickOut, ValidateIn};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::plane::{
     ArriveIn, ArriveOut, BillableClass, DialectAuth, OnPieceIn, OnPieceOut, OpClass, OutField,
-    PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, PlaneRefreshOut, PlaneSnapshot,
-    PlaneTail, ProjectIn, ProjectOut, RefusalIn, RefusalOut, ServeIn, ServeOut, UnitCount,
-    ANSWER_LAYOUT, CANCEL_ABORTED, CANCEL_OK_PARTIAL, CLAIM_EXACT, EMIT_DONE, EMIT_TO_FAR_END,
-    FROM_CALLER, FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE, PIECE_HAS_STATUS, PIECE_LAST,
-    PRINCIPAL_NONE, PRINCIPAL_OPTIONAL, PRINCIPAL_REQUIRED, ROUTE_DIRECT, SHAPE_WHOLE,
-    UNITS_REPORTED,
+    PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, PlaneRefreshIn, PlaneRefreshOut,
+    PlaneSnapshot, PlaneTail, ProjectIn, ProjectOut, RefusalIn, RefusalOut, ServeIn, ServeOut,
+    UnitCount, ANSWER_LAYOUT, CANCEL_ABORTED, CANCEL_OK_PARTIAL, CLAIM_EXACT, EMIT_DONE,
+    EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE,
+    PIECE_HAS_STATUS, PIECE_LAST, PRINCIPAL_NONE, PRINCIPAL_OPTIONAL, PRINCIPAL_REQUIRED,
+    ROUTE_DIRECT, SHAPE_WHOLE, UNITS_REPORTED,
 };
 use busbar_contract::abi::plane::{PlaneCancelIn, PlaneCancelOut};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
@@ -499,11 +497,11 @@ slot!(
 
 slot!(
     /// `refresh`: the new section judged, and the next generation's snapshot.
-    Refresh, RefreshIn, PlaneRefreshOut, |instance, input, mut out| {
+    Refresh, PlaneRefreshIn, PlaneRefreshOut, |instance, input, mut out| {
         let Some(plane) = instance.get() else {
             return Outcome::Failed;
         };
-        let section = match read_settings(input.field(|i| &i.settings).bytes()) {
+        let section = match read_settings(input.field(|i| &i.refresh.settings).bytes()) {
             Ok(section) => section,
             Err(words) => return out.fail(Refusal::refused(words)),
         };
@@ -513,7 +511,7 @@ slot!(
         };
         let spec = generation_spec(&routed);
         plane.route_over(routed);
-        out.publish(|o| &o.snapshot, &plane.generations, input.generation, &spec);
+        out.publish(|o| &o.snapshot, &plane.generations, input.refresh.generation, &spec);
         Outcome::Ready
     }
 );
