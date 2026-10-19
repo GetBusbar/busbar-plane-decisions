@@ -249,6 +249,7 @@ impl Scaffold {
             &self.transport,
             &self.labels,
             &self.arena,
+            CODEC_HOST,
         )
     }
 
@@ -286,3 +287,21 @@ pub fn sealed_destination() -> busbar_contract::dest::VerifiedDestination {
         None,
     )
 }
+
+/// The codec host every context this scaffold builds hands the plane: a fixed, non-zero entropy fill
+/// and no clock of its own (the context carries the clock), as the contract's own fixture does.
+pub struct TestCodecHost;
+
+impl busbar_contract::codec::CodecHost for TestCodecHost {
+    fn fill_entropy(&self, out: &mut [u8]) -> bool {
+        out.fill(0x5A);
+        true
+    }
+
+    fn wall_clock_now(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// The handle every context here is built with.
+pub const CODEC_HOST: &dyn busbar_contract::codec::CodecHost = &TestCodecHost;

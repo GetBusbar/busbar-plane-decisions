@@ -137,6 +137,7 @@ pub fn open_with(settings: &str, providers: &[(&str, &str)]) -> Door {
             name: str_of(name.as_bytes()),
             protocol: str_of(protocol.as_bytes()),
             error_map: Blob::ABSENT,
+            ..ProviderFacts::ZERO
         })
         .collect();
     let mut err = [0_u8; 1024];
