@@ -228,7 +228,7 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     fee_units_len: FEE_UNITS.len(),
     caller_credential_refusal: NONE,
     admin_openapi: Blob::ABSENT,
-    ..PlaneTail::ZERO,
+    ..PlaneTail::ZERO
 };
 
 /// THE STATEMENT: the plane's key and version, its sections, its need and its tail.
