@@ -58,35 +58,6 @@ fn refusal_render_never_names_a_provider_or_billing_word() {
     }
 }
 
-/// The kernel's own refusals (busbar ARCHITECT ruling 2026-10-16, 3b B): a method no route at the
-/// path takes, and a node fault it names to no caller. This dialect has no previous-release bytes for
-/// either, so the words are pinned here (busbar ARCHITECT ruling 2026-10-17 accepted them): the
-/// method refusal reads as an unsupported operation, and the node fault as the same neutral
-/// `internal` answer every other fault wears. RED arm: the fault is indistinguishable from a plane
-/// panic's.
-#[test]
-fn the_kernels_method_and_fault_refusals_are_pinned_words() {
-    assert_eq!(
-        refusal_render(RefusalReason::MethodNotAllowed),
-        (
-            "unsupported_operation",
-            "the method is not allowed for this resource"
-        )
-    );
-    assert_eq!(
-        refusal_render(RefusalReason::Internal),
-        ("internal", "the request could not be served at this time")
-    );
-    assert_eq!(
-        refusal_render(RefusalReason::Internal),
-        refusal_render(RefusalReason::PlanePanic)
-    );
-    assert_eq!(
-        error_body("unsupported_operation", "the method is not allowed for this resource"),
-        br#"{"error":{"code":"unsupported_operation","message":"the method is not allowed for this resource"}}"#
-    );
-}
-
 // ---- the plane driven through its own trait, over the crate's shared test scaffold ----
 
 #[path = "../../tests/common/mod.rs"]

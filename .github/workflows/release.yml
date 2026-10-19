@@ -25,7 +25,7 @@ jobs:
     secrets: inherit
   release:
     needs: ci
-    uses: GetBusbar/busbar/.github/workflows/plugin-release.yml@29d93143717c043a33652659f04790b54545c369
+    uses: GetBusbar/busbar/.github/workflows/plugin-release.yml@d41587120122823228292158622798cf4987616f
     with:
       plugin_crate: busbar-plane-decisions-plugin
       manifest_name: busbar-plane-decisions
@@ -41,7 +41,7 @@ jobs:
   consumer-verify:
     needs: release
     if: ${{ !cancelled() }}
-    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@29d93143717c043a33652659f04790b54545c369
+    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@d41587120122823228292158622798cf4987616f
     with:
       version: ${{ github.ref_name }}
       asset_prefix: busbar-plane-decisions

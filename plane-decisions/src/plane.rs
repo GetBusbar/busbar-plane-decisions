@@ -100,10 +100,6 @@ impl DecisionPlane {
 fn refusal_render(reason: RefusalReason) -> (&'static str, &'static str) {
     match reason {
         RefusalReason::BodyTooLarge => ("invalid_request", "the request is too large"),
-        RefusalReason::MethodNotAllowed => (
-            "unsupported_operation",
-            "the method is not allowed for this resource",
-        ),
         RefusalReason::DecodeFailed => ("invalid_request", "the request could not be read"),
         RefusalReason::SchemeNotDeclared
         | RefusalReason::CredentialRejected
@@ -158,8 +154,9 @@ fn refusal_render(reason: RefusalReason) -> (&'static str, &'static str) {
         | RefusalReason::HandoffMismatch
         | RefusalReason::PlanePanic
         | RefusalReason::TaskLost
-        | RefusalReason::SecretPlaceholder
-        | RefusalReason::Internal => ("internal", "the request could not be served at this time"),
+        | RefusalReason::SecretPlaceholder => {
+            ("internal", "the request could not be served at this time")
+        }
     }
 }
 
