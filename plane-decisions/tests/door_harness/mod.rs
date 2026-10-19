@@ -33,6 +33,7 @@ fn str_of(s: &[u8]) -> AbiStr {
     AbiStr {
         ptr: s.as_ptr(),
         len: s.len(),
+        ..AbiStr::ZERO
     }
 }
 
@@ -42,6 +43,7 @@ fn octets(b: &[u8]) -> Blob {
         len: b.len(),
         fmt: BLOB_OCTETS,
         flags: 0,
+        ..Blob::ZERO
     }
 }
 
@@ -114,6 +116,7 @@ pub fn ticket_of(unit: u64) -> Ticket {
     Ticket {
         slot: u32::try_from(unit).expect("a small unit"),
         generation: 1,
+        ..Ticket::ZERO
     }
 }
 

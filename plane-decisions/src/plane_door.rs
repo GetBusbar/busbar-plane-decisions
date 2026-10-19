@@ -112,6 +112,7 @@ const LABEL: &str = "Decisions";
 const NONE: AbiStr = AbiStr {
     ptr: ptr::null(),
     len: 0,
+    ..AbiStr::ZERO
 };
 
 /// `decisions:` declared, `providers:` consumed ([`tail::SECTION_DECLARING`],
@@ -121,11 +122,13 @@ const SECTIONS: &[Section] = &[
         name: abi_str(tail::SECTION_DECLARING),
         flags: SECTION_DECLARING,
         _reserved: 0,
+        ..Section::ZERO
     },
     Section {
         name: abi_str(tail::SECTIONS_CONSUMED[0]),
         flags: SECTION_CONSUMED,
         _reserved: 0,
+        ..Section::ZERO
     },
 ];
 
@@ -141,6 +144,7 @@ const fn dialect_auth(i: usize) -> DialectAuth {
         _reserved: 0,
         style: abi_str(tail::DIALECT_AUTH[i].1),
         params: Blob::ABSENT,
+        ..DialectAuth::ZERO
     }
 }
 
@@ -153,6 +157,7 @@ const fn op_class(i: usize) -> OpClass {
     OpClass {
         op: abi_str(tail::OP_CLASSES[i].as_str()),
         name: abi_str(tail::OP_CLASSES[i].as_str()),
+        ..OpClass::ZERO
     }
 }
 
@@ -163,6 +168,7 @@ const fn billable(i: usize) -> BillableClass {
     BillableClass {
         class: abi_str(tail::BILLABLE_CLASSES[i].0.as_str()),
         family: abi_str(tail::BILLABLE_CLASSES[i].1),
+        ..BillableClass::ZERO
     }
 }
 
@@ -186,6 +192,7 @@ pub const NEEDS: &[Need] = &[Need {
         len: 0,
         fmt: BLOB_ABSENT,
         flags: 0,
+        ..Blob::ZERO
     },
     keep_response_headers: KEEP_RESPONSE_HEADERS.as_ptr(),
     keep_response_headers_len: KEEP_RESPONSE_HEADERS.len(),
@@ -194,6 +201,7 @@ pub const NEEDS: &[Need] = &[Need {
     _reserved: 0,
     deny_response_headers: core::ptr::null(),
     deny_response_headers_len: 0,
+    ..Need::ZERO
 }];
 
 /// THE STATEMENT TAIL: the plane's static facts, every list [`crate::driven::tail`]'s.
@@ -201,6 +209,7 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     head: KindTailHead {
         size: size_of::<PlaneTail>() as u32,
         _reserved: 0,
+        ..KindTailHead::ZERO
     },
     flags: 0,
     ingress: INGRESS_REQUEST_RESPONSE,
@@ -246,6 +255,7 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     metric_lanes: ptr::null(),
     metric_lanes_len: 0,
     stream_ceiling_secs: 0,
+    ..PlaneTail::ZERO
 };
 
 /// THE STATEMENT: the plane's key and version, its sections, its need and its tail.
@@ -747,12 +757,14 @@ fn attempt_piece(
         fields.push(OutField {
             name: arena.span(name.as_bytes()),
             value: arena.span(value),
+            ..OutField::ZERO
         });
     }
     for (name, value) in unit.caller.iter() {
         fields.push(OutField {
             name: arena.span(name),
             value: arena.span(value),
+            ..OutField::ZERO
         });
     }
     if settle(out, &fields, &units, &arena) {
@@ -802,6 +814,7 @@ fn far_end(
                 fields.push(OutField {
                     name: arena.span(FIELD_CONTENT_TYPE.as_bytes()),
                     value: arena.span(f.field(|f| &f.value).bytes()),
+                    ..OutField::ZERO
                 });
             }
         }
@@ -825,6 +838,7 @@ fn far_end(
                 class: count.class,
                 source: UNITS_REPORTED,
                 amount: count.amount,
+                ..UnitCount::ZERO
             });
         }
     }
@@ -936,13 +950,15 @@ slot!(
         fields.push(OutField {
             name: arena.span(FIELD_CONTENT_TYPE.as_bytes()),
             value: arena.span(CONTENT_TYPE_JSON),
-        });
+..OutField::ZERO
+});
         if given.retry_after_s > 0 {
             let wait = given.retry_after_s.to_string();
             fields.push(OutField {
                 name: arena.span(FIELD_RETRY_AFTER.as_bytes()),
                 value: arena.span(wait.as_bytes()),
-            });
+..OutField::ZERO
+});
         }
         let short = !(reply.fits() && fields.fits() && arena.fits());
         let (rw, rnd) = reply.settle(short);
