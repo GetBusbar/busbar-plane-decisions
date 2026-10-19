@@ -138,7 +138,8 @@ const DIALECT_AUTH: &[DialectAuth] = &[dialect_auth(0), dialect_auth(1)];
 const fn dialect_auth(i: usize) -> DialectAuth {
     DialectAuth {
         dialect: tail::DIALECT_AUTH[i].0,
-        _reserved: 0,
+        // No provider's `protocol` names a decisions dialect for a lane, and no caller signs one.
+        flags: 0,
         style: abi_str(tail::DIALECT_AUTH[i].1),
         params: Blob::ABSENT,
     }
