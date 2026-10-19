@@ -11,6 +11,7 @@
 use busbar_contract::bounded::{
     Labels, PlaneAlloc, PlaneAllocBudget, ScratchBytes, SlabBytes, Span,
 };
+use busbar_contract::codec::CodecHost;
 use busbar_contract::ids::{PrincipalId, SessionId};
 use busbar_contract::unit::{Clock, ConfigView, Ctx, SessionView, TransportView};
 use busbar_contract::wire::{Direction, Frame, FrameMeta};
@@ -222,12 +223,27 @@ pub fn response_frame(bytes: &[u8]) -> Frame {
 }
 
 /// Everything a context borrows, held together so a test can build one.
+/// The host's codec services, as a test holds them: none. The decisions plane mints no identifier
+/// and stamps no time, so a context it is given needs a host to be built but never reads one.
+pub struct NoCodecHost;
+
+impl CodecHost for NoCodecHost {
+    fn fill_entropy(&self, _out: &mut [u8]) -> bool {
+        false
+    }
+
+    fn wall_clock_now(&self) -> Option<u64> {
+        None
+    }
+}
+
 pub struct Scaffold {
     pub arena: TestPlaneAlloc,
     pub config: EmptyConfig,
     pub transport: TestTransport,
     pub session: TestSession,
     pub labels: Labels<'static>,
+    pub host: NoCodecHost,
 }
 
 impl Scaffold {
@@ -238,6 +254,7 @@ impl Scaffold {
             transport: TestTransport::new(transport),
             session: TestSession::new(),
             labels: Labels::new(),
+            host: NoCodecHost,
         }
     }
 
@@ -249,6 +266,7 @@ impl Scaffold {
             &self.transport,
             &self.labels,
             &self.arena,
+            &self.host,
         )
     }
 
