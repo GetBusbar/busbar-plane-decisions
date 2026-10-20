@@ -105,6 +105,40 @@ fn a_request_routes_by_its_model() {
     );
 }
 
+/// THE DROPPED-IN TWIN NAMES A ROUTE AS THE LINKED DOOR DOES (THE DESIGN section 11.4, "compiled in
+/// or dropped in ... NOTHING CHANGES about the plugin itself"; section 11.2, "no allocation and no
+/// blocking on the hot path"). The twin's image is built from this workspace against its own
+/// busbar-contract pin, so the SDK compiled here is the SDK the shipped library carries. A READY
+/// arrival naming a model the instance has named before is answered from the instance's one kept
+/// copy of that name, read with no heap and no lock: every arrival over model `b` hands the host the
+/// same name at the same address. An SDK that keeps a fresh copy of the name per arrival (a heap
+/// allocation and a push under the instance's shared text lock) hands a new address each time.
+#[test]
+fn a_model_named_again_is_routed_by_the_instances_kept_name() {
+    let two = open(TWO);
+    let first = two.arrive(1, br#"{"model":"b","state":{}}"#);
+    assert_eq!(
+        (first.outcome, first.route, first.entry.as_str()),
+        (Outcome::Ready, ROUTE_DIRECT, "b"),
+        "{first:?}"
+    );
+    for unit in 2..=4 {
+        let again = two.arrive(unit, br#"{"state":{},"model":"b"}"#);
+        assert_eq!(
+            (again.outcome, again.entry.as_str()),
+            (Outcome::Ready, "b"),
+            "{again:?}"
+        );
+        assert_eq!(
+            again.entry_at, first.entry_at,
+            "arrival {unit} named model b from a fresh copy, not the instance's kept name"
+        );
+    }
+    let other = two.arrive(5, br#"{"model":"a","state":{}}"#);
+    assert_eq!(other.entry.as_str(), "a", "{other:?}");
+    assert_ne!(other.entry_at, first.entry_at, "each entry keeps its own name");
+}
+
 /// A refused arrival is answered in jev's error shape, the arrival's words and status.
 #[test]
 fn an_unrouted_arrival_renders_in_the_dialect_shape() {
