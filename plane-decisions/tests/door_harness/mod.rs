@@ -204,6 +204,8 @@ pub struct Arrived {
     /// The route class and the entry it names.
     pub route: u8,
     pub entry: String,
+    /// Where the entry's name lives: the address of the copy the instance keeps for the answer.
+    pub entry_at: usize,
 }
 
 /// What one `on_piece` answered, re-called while it said `more`.
@@ -385,6 +387,7 @@ impl Door {
             text: read(o.head.error),
             route: o.route,
             entry: read(o.pool),
+            entry_at: o.pool.ptr as usize,
         }
     }
 
