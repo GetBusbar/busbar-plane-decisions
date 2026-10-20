@@ -136,7 +136,10 @@ fn a_model_named_again_is_routed_by_the_instances_kept_name() {
     }
     let other = two.arrive(5, br#"{"model":"a","state":{}}"#);
     assert_eq!(other.entry.as_str(), "a", "{other:?}");
-    assert_ne!(other.entry_at, first.entry_at, "each entry keeps its own name");
+    assert_ne!(
+        other.entry_at, first.entry_at,
+        "each entry keeps its own name"
+    );
 }
 
 /// A refused arrival is answered in jev's error shape, the arrival's words and status.
