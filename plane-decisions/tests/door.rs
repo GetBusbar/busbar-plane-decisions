@@ -225,12 +225,13 @@ fn class(name: &str) -> u32 {
     u32::try_from(at).unwrap()
 }
 
-/// `(class, amount)` of every count an answer reported, each REPORTED.
+/// `(class, amount)` of every count an answer bills, each REPORTED or the plane's FLOOR.
 fn counts(a: &door_harness::Answered) -> Vec<(u32, u64)> {
     assert!(
-        a.units
-            .iter()
-            .all(|(_, source, _)| *source == busbar_contract::abi::plane::UNITS_REPORTED),
+        a.units.iter().all(|(_, source, _)| {
+            *source == busbar_contract::abi::plane::UNITS_REPORTED
+                || *source == busbar_contract::abi::plane::UNITS_FLOOR
+        }),
         "{a:?}"
     );
     a.units.iter().map(|(c, _, n)| (*c, *n)).collect()
@@ -244,6 +245,15 @@ fn a_success_with_no_count_bills_one_decision() {
     let a = answered(200, br#"{"answers":{}}"#);
     assert_eq!(a.outcome, Some(Outcome::Ready), "{a:?}");
     assert_eq!(counts(&a), vec![(class("decision"), 1), (fee, 1)]);
+    // RED (audit plane-decisions R3, the count's source): the decision the answer did not state is
+    // the plane's floor, never a count the far end reported; the request fee is reported.
+    assert_eq!(
+        a.units,
+        vec![
+            (class("decision"), busbar_contract::abi::plane::UNITS_FLOOR, 1),
+            (fee, busbar_contract::abi::plane::UNITS_REPORTED, 1),
+        ]
+    );
     let reported = answered(200, br#"{"usage":{"units":42}}"#);
     assert_eq!(counts(&reported), vec![(class("decision"), 42), (fee, 1)]);
 }
@@ -404,16 +414,71 @@ fn past_the_cap_an_arrival_is_refused_and_no_live_unit_dropped() {
     assert!(still_live(&door, MAX_UNITS, &mut bufs));
 }
 
-/// A unit that arrived and never crossed a piece while [`MAX_UNITS`] arrivals followed is
-/// reclaimed, so the instance never refuses every arrival for good.
+/// RED (audit plane-decisions R3, the reclaim): a unit that arrived and has crossed no piece yet
+/// (its verify still running) is live: however many arrivals follow it, it is never dropped to make
+/// room. Past [`MAX_UNITS`] live units the new arrival is refused, and the waiting unit is still
+/// served at its first piece (THE DESIGN section 1: an active unit is never evicted; a bound is a
+/// refusal at admission). Every unit that ends is released by its refusal, its last piece or its
+/// cancel, which names it.
 #[test]
-fn an_arrival_never_started_is_reclaimed_once_the_cap_is_reached() {
+fn a_live_unit_not_yet_started_is_never_dropped_to_make_room() {
     let door = open(ONE);
     for unit in 1..=MAX_UNITS {
         assert_eq!(door.arrive(unit, br#"{}"#).outcome, Outcome::Ready);
     }
     let next = door.arrive(MAX_UNITS + 1, br#"{}"#);
-    assert_eq!(next.outcome, Outcome::Ready, "{next:?}");
+    assert_eq!(
+        (next.outcome, next.status),
+        (Outcome::Refused, 503),
+        "{next:?}"
+    );
+    let mut bufs = Bufs::new(1 << 16);
+    let first = door.piece(1, Given::attempt(1), &mut bufs);
+    assert_eq!(
+        (first.outcome, first.request.as_str()),
+        (Some(Outcome::Ready), "POST /v1/systemone"),
+        "the first unit, which crossed no piece while the instance filled, was dropped: {first:?}"
+    );
+    // A unit the host cancels by name makes room for the next arrival.
+    assert_eq!(
+        door.cancel_unit(2),
+        (Outcome::Ready, busbar_contract::abi::plane::CANCEL_ABORTED)
+    );
+    assert_eq!(
+        door.arrive(MAX_UNITS + 2, br#"{}"#).outcome,
+        Outcome::Ready
+    );
+}
+
+/// RED (audit plane-decisions R3, the cancel): the host cancels a unit it minted by naming it
+/// (`PlaneCancelIn::unit`, "so a plane that keys its units from `arrive` finds one whose ticket no
+/// piece ever carried"); a unit cancelled before its first piece is dropped, its relayed fields and
+/// `upstream_model` with it, so its next piece is refused.
+#[test]
+fn a_unit_cancelled_before_its_first_piece_is_dropped() {
+    let door = open(ONE);
+    assert_eq!(door.arrive(5, br#"{"state":{}}"#).outcome, Outcome::Ready);
+    assert_eq!(
+        door.cancel_unit(5),
+        (Outcome::Ready, busbar_contract::abi::plane::CANCEL_ABORTED)
+    );
+    let mut bufs = Bufs::new(1 << 16);
+    let after = door.piece(5, Given::attempt(1), &mut bufs);
+    assert_eq!(
+        after.outcome,
+        Some(Outcome::Refused),
+        "the cancelled unit kept its state: {after:?}"
+    );
+    // A unit no other cancel names is untouched.
+    assert_eq!(door.arrive(6, br#"{"state":{}}"#).outcome, Outcome::Ready);
+    assert_eq!(
+        door.cancel_unit(7),
+        (Outcome::Ready, busbar_contract::abi::plane::CANCEL_ABORTED)
+    );
+    assert_eq!(
+        door.piece(6, Given::attempt(1), &mut bufs).outcome,
+        Some(Outcome::Ready)
+    );
 }
 
 /// RED (audit plane-decisions, the request target): the kernel matches an exact claim on the
@@ -441,16 +506,8 @@ fn a_unit_whose_arrival_state_is_gone_is_refused_never_served_blank() {
     let door = open(upstream);
     let body = br#"{"model":"jev","state":{}}"#;
     assert_eq!(door.arrive(1, body).outcome, Outcome::Ready);
-    // MAX_UNITS arrivals that never cross a piece: the last one reclaims unit 1's state.
-    for unit in 2..=MAX_UNITS + 1 {
-        assert_eq!(
-            door.arrive(unit, br#"{}"#).outcome,
-            Outcome::Ready,
-            "unit {unit}"
-        );
-    }
-    // One of them is refused, so the instance has room again.
-    door.refusal(2, 429, "the key's limit is spent", false);
+    // The host ends the unit before its first piece (a cancel naming it): its state goes.
+    door.cancel_unit(1);
     let mut bufs = Bufs::new(1 << 16);
     let attempt = door.piece(1, Given::attempt(1), &mut bufs);
     let caller = door.piece(1, Given::caller(body), &mut bufs);
@@ -459,4 +516,82 @@ fn a_unit_whose_arrival_state_is_gone_is_refused_never_served_blank() {
         "unit 1 reached the far end with its model unspliced: {attempt:?} {caller:?}"
     );
     assert_eq!(attempt.outcome, Some(Outcome::Refused), "{attempt:?}");
+}
+
+/// RED (audit plane-decisions R3, the refused reload): each generation's routes ride beside its
+/// snapshot. A reload the host refuses after this plane's `refresh` (its seal fails) is retired by
+/// the host, and arrivals route over the generation it kept serving again: a model only the
+/// refused section names is unknown, and a model only it removed is routed (THE DESIGN section 6:
+/// a refused reload leaves the running generation serving).
+#[test]
+fn a_reload_the_host_refused_leaves_the_running_generation_routing() {
+    let door = open(r#"{"models":{"kept":{"provider":"typesafe"}}}"#);
+    door.refresh(r#"{"models":{"added":{"provider":"typesafe"}}}"#, 2);
+    assert_eq!(
+        door.arrive(1, br#"{"model":"added"}"#).entry,
+        "added",
+        "a sealed generation routes over its own models"
+    );
+    // The host could not seal generation 2: it retires it and keeps serving generation 1.
+    assert_eq!(door.retire(2), Outcome::Ready);
+    let kept = door.arrive(2, br#"{"model":"kept"}"#);
+    assert_eq!(
+        (kept.outcome, kept.entry.as_str()),
+        (Outcome::Ready, "kept"),
+        "the running generation's model: {kept:?}"
+    );
+    let added = door.arrive(3, br#"{"model":"added"}"#);
+    assert_eq!(
+        (added.outcome, added.status),
+        (Outcome::Refused, 404),
+        "the refused generation's model: {added:?}"
+    );
+    // The next reload the host keeps routes over its own models, and retiring the one before it
+    // changes nothing.
+    door.refresh(r#"{"models":{"next":{"provider":"typesafe"}}}"#, 3);
+    assert_eq!(door.retire(1), Outcome::Ready);
+    assert_eq!(door.arrive(4, br#"{"model":"next"}"#).entry, "next");
+}
+
+/// RED (audit plane-decisions R3, the admission estimate): a READY arrival states what a success
+/// bills at least, one decision and its request fee, ESTIMATED, so a budget in estimate mode prices
+/// a decisions unit (THE DESIGN section 7: `admission: estimate` prices the plane's expected units).
+#[test]
+fn an_arrival_states_its_admission_estimate() {
+    let door = open(ONE);
+    let fee = class(busbar_contract::plane::PER_REQUEST);
+    let arrived = door.arrive(1, br#"{"state":{}}"#);
+    assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
+    let estimated = busbar_contract::abi::plane::UNITS_ESTIMATED;
+    assert_eq!(
+        arrived.expected,
+        vec![(class("decision"), estimated, 1), (fee, estimated, 1)]
+    );
+    // A refused arrival states none.
+    let refused = door.arrive(2, br#"{"model":"zz"}"#);
+    assert!(refused.expected.is_empty(), "{refused:?}");
+}
+
+/// RED (audit plane-decisions R3, the unbounded echo): a requested model name longer than the
+/// refusal's words may run is cut in the unknown-model refusal, so `arrive` answers its own 404 in
+/// its dialect and never a FAULT past `MAX_REFUSAL_TEXT`; a name within the bound is echoed whole.
+#[test]
+fn an_unknown_model_name_of_any_length_is_refused_in_bounded_words() {
+    let two = open(TWO);
+    let name = "x".repeat(600 * 1024);
+    let body = format!("{{\"model\":\"{name}\"}}");
+    let unknown = two.arrive(1, body.as_bytes());
+    assert_eq!(
+        (unknown.outcome, unknown.status),
+        (Outcome::Refused, 404),
+        "{}",
+        unknown.text.len()
+    );
+    assert!(
+        (unknown.text.len() as u64) < 4096
+            && (unknown.text.len() as u64) < busbar_contract::abi::plane::MAX_REFUSAL_TEXT,
+        "the refusal's words run {} bytes",
+        unknown.text.len()
+    );
+    assert!(unknown.text.starts_with("The model 'xxx"), "{}", &unknown.text[..32]);
 }

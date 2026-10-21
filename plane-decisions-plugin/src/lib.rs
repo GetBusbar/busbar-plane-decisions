@@ -2,7 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The `decisions` plane as a droppable busbar plugin: the `cdylib` a signed tarball carries
-//! (`kind: plane`, key `decision`, dialect `jev`). It holds one line: the logic crate's door
+//! (`kind: plane`, key `decision`, dialects `jev` and `nanojev`). It holds one line: the logic
+//! crate's door
 //! (`busbar_plane_decisions::door`, the one a busbar build links) exported as this image's ONE
 //! symbol, `busbar_plugin_door`, with `busbar_contract::export_door!`, so the library carries
 //! exactly the door a busbar build links and is no second path to the logic crate's Rust items

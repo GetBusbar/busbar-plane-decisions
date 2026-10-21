@@ -8,9 +8,10 @@
 //! | the Statement tail | [`tail`]: declaring and consumed sections, dialects, scope kinds, op classes, billable classes, fee units, needs, claims |
 //! | `arrive` | [`arrive`]: the op class, the principal need and the dialect of a claimed request |
 //! | `on_piece`, from the caller | [`caller_piece`]: the caller's whole body arrives as one piece; the kernel keeps it |
-//! | `on_piece`, ATTEMPT (from the kernel) | [`attempt`]: the request bound for the far end, verb and target explicit |
-//! | `on_piece`, from the far end | [`FarEndReading`]: the bytes relayed unchanged, and the units the far end reported |
+//! | `on_piece`, ATTEMPT (from the kernel) | [`attempt_request`]: the request bound for the far end, verb and target explicit |
+//! | `on_piece`, from the far end | [`FarEndReading`]: the bytes relayed unchanged, and the units the answer bills |
 //! | `refusal` | [`refusal_body`]: the kernel's status and text, in this dialect's error shape |
+//! | `project` | [`project`]: the hook view of a request; [`rewritten`]: a hook's rewrite applied in the dialect |
 //!
 //! Every answer is plain data. Nothing here holds a byte across calls: [`FarEndReading`] is a value
 //! the caller owns for the length of one unit, in fixed space, and it is the only accumulating
@@ -47,8 +48,9 @@
 //! ([`FarEndReading::for_dialect`]): `/execution/states`, required.
 //!
 //! WHAT THIS PLANE DOES NOT CLAIM: `GET /v1/models`. That path keeps its 1.5.5 bytes (the model
-//! list busbar already serves there), so [`tail::CLAIMS`] and [`tail::OP_CLASSES`] carry `systemone` alone and
-//! [`arrive`] answers the models operation as unclaimed.
+//! list busbar already serves there, which appends this plane's listed models), so
+//! [`tail::CLAIMS`] and [`tail::OP_CLASSES`] carry each dialect's decision call (`systemone`,
+//! `evaluate`) and no models operation, and [`arrive`] answers `GET /v1/models` as unclaimed.
 //!
 //! Money-blind, like the rest of the crate: the plane reports what a successful answer bills, in its
 //! billable classes, and never what it is worth (THE DESIGN section 7, the owner money rulings
@@ -228,6 +230,27 @@ impl Unrouted {
     }
 }
 
+/// The most bytes of a requested model's name an unknown-model refusal echoes. The name comes from
+/// the caller's body, which may be as long as the deployment's body ceiling; the refusal's words
+/// are bounded (`busbar_contract::abi::plane::MAX_REFUSAL_TEXT`, past which the `arrive` is a
+/// FAULT), so a longer name is cut on a character boundary and marked cut. Every name up to this
+/// length is echoed whole, in the words 1.5.5's unknown-model refusal spoke.
+pub const MAX_ECHOED_MODEL: usize = 1024;
+
+/// What an unknown-model refusal echoes of `name`: the whole name up to [`MAX_ECHOED_MODEL`] bytes,
+/// else its first bytes to a character boundary, followed by `...`.
+#[must_use]
+pub fn echoed(name: &str) -> String {
+    if name.len() <= MAX_ECHOED_MODEL {
+        return name.to_string();
+    }
+    let mut cut = MAX_ECHOED_MODEL;
+    while !name.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}...", &name[..cut])
+}
+
 /// The top-level `model` a request body names: `Ok(None)` when it names none, and
 /// [`Unrouted::NotAName`] when the member is there but is not a string.
 ///
@@ -266,7 +289,7 @@ pub fn route_model<'m, V>(
             .get_key_value(name.as_ref())
             .filter(|(_, v)| serves(v))
             .map(|(k, v)| (k.as_str(), v))
-            .ok_or_else(|| Unrouted::Unknown(name.into_owned())),
+            .ok_or_else(|| Unrouted::Unknown(echoed(&name))),
         None => {
             let mut all = models.iter().filter(|(_, v)| serves(v));
             match (all.next(), all.next()) {
@@ -297,6 +320,150 @@ pub fn spliced(body: &[u8], upstream: &str) -> Option<Vec<u8>> {
     out.extend_from_slice(body.get(..span.start)?);
     out.extend_from_slice(value.as_bytes());
     out.extend_from_slice(body.get(span.end..)?);
+    Some(out)
+}
+
+/// The dialect whose claim `target` names (its path; a query is not the path), where one does.
+#[must_use]
+pub fn dialect_at(target: &str) -> Option<u32> {
+    let path = target.split_once('?').map_or(target, |(path, _)| path);
+    tail::CLAIMS
+        .iter()
+        .find(|(_, t, _)| *t == path)
+        .map(|(_, _, dialect)| *dialect)
+}
+
+/// The role the one turn of a projected request is shown under: the caller's.
+pub const PROJECTED_ROLE: &str = "user";
+
+/// What a hook is shown of one request ([`project`]): the entry it routes over, its dialect's name
+/// and the characters of the request document, which is the view's one turn and its body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Projected<'r> {
+    /// The configured model the request routes over; empty when it routes over none.
+    pub entry: &'r str,
+    /// The dialect's name ([`tail::DIALECTS`]).
+    pub dialect: &'static str,
+    /// The request document's characters.
+    pub chars: usize,
+}
+
+/// PROJECT one request of `dialect` for the hooks: the model it routes over among the `routes` of
+/// that dialect ([`route_model`]; `dialect_of` reads a route's dialect), the dialect's name and the
+/// size of the document. The document itself is the view's one turn and its body, as the caller
+/// sent it (or as a rewrite left it); the plane reads nothing of it for itself beyond its top-level
+/// `model`, and mints no fact from it.
+#[must_use]
+pub fn project<'r, V>(
+    request: &[u8],
+    dialect: u32,
+    routes: &'r std::collections::BTreeMap<String, V>,
+    dialect_of: impl Fn(&V) -> u32,
+) -> Projected<'r> {
+    let entry = route_model(request, routes, |r| dialect_of(r) == dialect)
+        .map_or("", |(name, _)| name);
+    let chars = match core::str::from_utf8(request) {
+        Ok(text) => text.chars().count(),
+        Err(_) => String::from_utf8_lossy(request).chars().count(),
+    };
+    Projected {
+        entry,
+        dialect: tail::DIALECTS
+            .get(dialect as usize)
+            .copied()
+            .unwrap_or_default(),
+        chars,
+    }
+}
+
+/// The document a request-stage hook's rewrite names (1.5.5's rewrite JSON, `{"messages": [...],
+/// "tools": [...]}`, as the kernel hands it): the last message whose `content` is a JSON object,
+/// or a string holding one, or a message with no `role` that is itself an object. `None` when no
+/// message names one.
+fn rewrite_document(rewrite: &[u8]) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let reply: serde_json::Value = serde_json::from_slice(rewrite).ok()?;
+    let mut document = None;
+    for message in reply.get("messages")?.as_array()? {
+        let candidate = match message.get("content") {
+            Some(content) => content,
+            None if message.get("role").is_none() => message,
+            None => continue,
+        };
+        let resolved = match candidate {
+            serde_json::Value::Object(map) => Some(map.clone()),
+            serde_json::Value::String(text) => serde_json::from_str(text).ok(),
+            _ => None,
+        };
+        if resolved.is_some() {
+            document = resolved;
+        }
+    }
+    document
+}
+
+/// THE REWRITE, APPLIED IN THE DIALECT: `body` (a decision request, one JSON object) with every
+/// top-level member the rewrite's document ([`rewrite_document`]) states set to the document's
+/// value. A member whose value already equals the document's keeps the caller's bytes; a member
+/// the document changes has its value's span replaced, by span splice as `upstream_model` is
+/// ([`spliced`]); a member the body lacks is appended before the closing brace. Every byte outside
+/// the changed spans is the caller's: member order, whitespace and every member the document does
+/// not name. `None` when the rewrite names no document, the body is not one JSON object, or the
+/// document changes nothing: the request goes on as it was (1.5.5: a rewrite that cannot be applied
+/// leaves the request unmodified).
+#[must_use]
+pub fn rewritten(body: &[u8], rewrite: &[u8]) -> Option<Vec<u8>> {
+    let document = rewrite_document(rewrite)?;
+    let current: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(body).ok()?;
+    let busbar_contract::spans::Resolved::Found(whole) =
+        busbar_contract::spans::resolve_pointer(body, "")
+    else {
+        return None;
+    };
+    // The closing brace of the top-level object: the last byte of its span.
+    let close = whole.end.checked_sub(1)?;
+    if body.get(close) != Some(&b'}') {
+        return None;
+    }
+    let mut replaced: Vec<(usize, usize, Vec<u8>)> = Vec::new();
+    let mut appended: Vec<u8> = Vec::new();
+    let mut members = current.len();
+    for (key, value) in &document {
+        if current.get(key) == Some(value) {
+            continue;
+        }
+        let raw = serde_json::to_vec(value).ok()?;
+        if current.contains_key(key) {
+            let pointer = format!("/{}", key.replace('~', "~0").replace('/', "~1"));
+            let busbar_contract::spans::Resolved::Found(span) =
+                busbar_contract::spans::resolve_pointer(body, &pointer)
+            else {
+                return None;
+            };
+            replaced.push((span.start, span.end, raw));
+        } else {
+            if members != 0 {
+                appended.push(b',');
+            }
+            appended.extend_from_slice(&serde_json::to_vec(key).ok()?);
+            appended.push(b':');
+            appended.extend_from_slice(&raw);
+            members += 1;
+        }
+    }
+    if replaced.is_empty() && appended.is_empty() {
+        return None;
+    }
+    replaced.sort_by_key(|(start, _, _)| *start);
+    let mut out = Vec::with_capacity(body.len() + appended.len());
+    let mut at = 0;
+    for (start, end, raw) in &replaced {
+        out.extend_from_slice(body.get(at..*start)?);
+        out.extend_from_slice(raw);
+        at = *end;
+    }
+    out.extend_from_slice(body.get(at..close)?);
+    out.extend_from_slice(&appended);
+    out.extend_from_slice(body.get(close..)?);
     Some(out)
 }
 
@@ -398,13 +565,25 @@ pub fn attempt_request(dialect: u32, caller_body: &[u8]) -> FarEndRequest<'_> {
     }
 }
 
+/// Where a count the plane reports comes from (THE DESIGN section 7 keeps the far end's own counts
+/// apart from the plane's floor; both bill).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// The far end's answer states it (`UNITS_REPORTED`); the request fee is reported so too, as
+    /// the contract reports a fee unit incurred (0 or 1 on its class).
+    Reported,
+    /// The plane's own floor for a success whose answer states no count (`UNITS_FLOOR`): one
+    /// decision.
+    Floor,
+}
+
 /// One unit count, as the plane reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Units {
     /// Index into [`tail::BILLABLE_CLASSES`].
     pub class: u32,
-    /// Reported by the far end. The plane never estimates a decision count.
-    pub reported: bool,
+    /// Where the count comes from.
+    pub source: Source,
     /// The cumulative count.
     pub amount: u64,
 }
@@ -695,7 +874,8 @@ impl FarEndReading {
     }
 
     /// WHAT THE ANSWER BILLS, read at the last piece (THE DESIGN section 7, the owner money rulings):
-    /// a non-success bills nothing; a success bills one `decision`, or the whole count its
+    /// a non-success bills nothing; a success bills one `decision` (the plane's floor,
+    /// [`Source::Floor`]), or the whole count its
     /// `/usage/units` reports (the hosted provider's count, DECISIONS D9), its `/usage/input_tokens`
     /// and `/usage/output_tokens` where it reports them, and the request fee (`1` of
     /// [`tail::FEE_PER_REQUEST`]: a refused or failed unit owes none).
@@ -721,11 +901,21 @@ impl FarEndReading {
         }
         let reported = |class: u32, amount: u64| Units {
             class,
-            reported: true,
+            source: Source::Reported,
             amount,
         };
+        // A success whose answer states no decision count bills the plane's floor, one decision,
+        // stated as the plane's, never as the far end's.
+        let decisions = whole[0].map_or(
+            Units {
+                class: tail::CLASS_DECISION_INDEX,
+                source: Source::Floor,
+                amount: 1,
+            },
+            |n| reported(tail::CLASS_DECISION_INDEX, n),
+        );
         Ok([
-            Some(reported(tail::CLASS_DECISION_INDEX, whole[0].unwrap_or(1))),
+            Some(decisions),
             whole[1].map(|n| reported(tail::CLASS_INPUT_TOKENS_INDEX, n)),
             whole[2].map(|n| reported(tail::CLASS_OUTPUT_TOKENS_INDEX, n)),
             Some(reported(tail::CLASS_FEE_INDEX, 1)),

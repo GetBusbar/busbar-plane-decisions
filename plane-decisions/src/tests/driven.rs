@@ -17,9 +17,8 @@ fn systemone_arrives_as_the_first_op_class_with_a_principal() {
 
 #[test]
 fn models_is_not_claimed() {
-    assert_eq!(arrive("GET", ops::PATH_MODELS), None);
-    assert!(!tail::CLAIMS.iter().any(|(_, t, _)| *t == ops::PATH_MODELS));
-    assert!(!tail::OP_CLASSES.contains(&ops::OP_MODELS));
+    assert_eq!(arrive("GET", "/v1/models"), None);
+    assert!(!tail::CLAIMS.iter().any(|(_, t, _)| *t == "/v1/models"));
 }
 
 #[test]
@@ -113,7 +112,7 @@ fn far_end_pieces_are_relayed_unchanged_and_the_count_read_over_the_whole_answer
         counts[0],
         Some(Units {
             class: DECISION,
-            reported: true,
+            source: Source::Reported,
             amount: 42
         })
     );
@@ -365,7 +364,10 @@ fn the_request_fee_is_counted_on_a_success_alone() {
     let mut ok = FarEndReading::new();
     ok.piece(br#"{"usage":{"units":3}}"#);
     let fee = ok.counts(Some(200)).expect("a success")[3].expect("a success owes its fee");
-    assert_eq!((fee.class, fee.amount, fee.reported), (FEE, 1, true));
+    assert_eq!(
+        (fee.class, fee.amount, fee.source),
+        (FEE, 1, Source::Reported)
+    );
     // RED ARMS.
     assert_eq!(
         ok.counts(Some(422)),
@@ -580,4 +582,137 @@ fn a_model_of_the_other_dialect_is_this_dialects_unknown_model() {
     );
     assert_eq!(route_model(br#"{}"#, &models, jev).map(|r| r.0), Ok("j"));
     assert_eq!(route_model(br#"{}"#, &models, nano).map(|r| r.0), Ok("n"));
+}
+
+/// RED (audit plane-decisions R3, the count's source): a success whose answer states no decision
+/// count bills the plane's floor of one decision, stated as the plane's (`UNITS_FLOOR`), never as a
+/// count the far end reported (THE DESIGN section 7 keeps the two apart); a stated count, and the
+/// request fee, stay reported.
+#[test]
+fn a_success_with_no_count_bills_the_planes_floor_not_a_far_end_count() {
+    let mut none = FarEndReading::new();
+    none.piece(br#"{"answers":{}}"#);
+    let counts = none.counts(Some(200)).expect("a success");
+    assert_eq!(
+        counts[0],
+        Some(Units {
+            class: DECISION,
+            source: Source::Floor,
+            amount: 1
+        })
+    );
+    assert_eq!(counts[3].map(|f| f.source), Some(Source::Reported));
+    let mut stated = FarEndReading::new();
+    stated.piece(br#"{"usage":{"units":5}}"#);
+    let counts = stated.counts(Some(200)).expect("a success");
+    assert_eq!(counts[0].map(|d| d.source), Some(Source::Reported));
+}
+
+/// RED (audit plane-decisions R3, the unbounded echo): an unknown model's name is echoed into the
+/// refusal whole up to `MAX_ECHOED_MODEL` bytes, in 1.5.5's words, and cut there past it, so the
+/// refusal's words never outgrow what an `arrive` may answer.
+#[test]
+fn an_unknown_models_echoed_name_is_bounded() {
+    let models = std::collections::BTreeMap::from([("jev".to_string(), ())]);
+    let short = route_model(br#"{"model":"zz"}"#, &models, |_| true).expect_err("unknown");
+    assert_eq!(
+        short.text(),
+        "The model 'zz' does not exist or you do not have access to it."
+    );
+    let long = "é".repeat(600_000);
+    let body = format!("{{\"model\":\"{long}\"}}");
+    let unknown = route_model(body.as_bytes(), &models, |_| true).expect_err("unknown");
+    assert_eq!(unknown.status(), 404);
+    let text = unknown.text();
+    assert!(
+        text.len() < MAX_ECHOED_MODEL + 128,
+        "the refusal echoes {} bytes",
+        text.len()
+    );
+    assert!(
+        text.starts_with("The model 'éé") && text.contains("...' does not exist"),
+        "{}",
+        text.chars().take(40).collect::<String>()
+    );
+    let exact = "m".repeat(MAX_ECHOED_MODEL);
+    assert_eq!(echoed(&exact), exact, "a name at the bound is echoed whole");
+}
+
+#[test]
+fn a_target_names_its_claims_dialect() {
+    assert_eq!(dialect_at("/v1/systemone"), Some(tail::DIALECT_JEV));
+    assert_eq!(dialect_at("/v1/systemone?x=1"), Some(tail::DIALECT_JEV));
+    assert_eq!(dialect_at("/api/evaluate"), Some(tail::DIALECT_NANOJEV));
+    assert_eq!(dialect_at("/v1/models"), None);
+}
+
+/// A hook's rewrite (1.5.5's rewrite JSON) as the kernel hands it: one message whose content is
+/// `document`.
+fn rewrite_of(document: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "messages": [{ "role": "user", "content": document }],
+        "tools": [],
+    }))
+    .expect("JSON")
+}
+
+/// THE REWRITE, BY SPAN SPLICE: a member the document changes has its value replaced, a member the
+/// body lacks is appended, and every other byte is the caller's.
+#[test]
+fn a_rewrite_sets_the_members_its_document_states_and_keeps_every_other_byte() {
+    let body = b"{ \"state\" : {\"amount\": 7},\n  \"model\":\"jev\" }";
+    let out = rewritten(body, &rewrite_of(r#"{"state":{"amount":0}}"#)).expect("applied");
+    assert_eq!(
+        String::from_utf8(out).expect("UTF-8"),
+        "{ \"state\" : {\"amount\":0},\n  \"model\":\"jev\" }"
+    );
+    let added = rewritten(br#"{"state":{}}"#, &rewrite_of(r#"{"context":{"k":1}}"#))
+        .expect("applied");
+    assert_eq!(added, br#"{"state":{},"context":{"k":1}}"#);
+    let into_empty = rewritten(b"{}", &rewrite_of(r#"{"state":1}"#)).expect("applied");
+    assert_eq!(into_empty, br#"{"state":1}"#);
+    // An object message itself, with no role, is a document too.
+    let bare = br#"{"messages":[{"state":2}],"tools":[]}"#;
+    assert_eq!(
+        rewritten(br#"{"state":1}"#, bare).expect("applied"),
+        br#"{"state":2}"#
+    );
+}
+
+/// A rewrite that changes nothing, names no document, or meets a body that is no object, leaves the
+/// request as it was (1.5.5).
+#[test]
+fn a_rewrite_that_does_not_apply_leaves_the_request() {
+    let body = br#"{"state":{"amount":7}}"#;
+    assert_eq!(rewritten(body, &rewrite_of(r#"{"state":{"amount":7}}"#)), None);
+    assert_eq!(rewritten(body, br#"{"messages":[],"tools":[]}"#), None);
+    assert_eq!(rewritten(body, &rewrite_of("not a document")), None);
+    assert_eq!(rewritten(body, b"not json"), None);
+    assert_eq!(rewritten(b"[1,2]", &rewrite_of(r#"{"state":1}"#)), None);
+}
+
+/// The projection names the entry the request routes over among its dialect's models, the
+/// dialect's name and the document's characters.
+#[test]
+fn a_request_is_projected_over_its_dialects_models() {
+    let routes = std::collections::BTreeMap::from([
+        ("a".to_string(), tail::DIALECT_JEV),
+        ("n".to_string(), tail::DIALECT_NANOJEV),
+    ]);
+    let body = br#"{"model":"a","state":"é"}"#;
+    let view = project(body, tail::DIALECT_JEV, &routes, |d| *d);
+    assert_eq!(
+        view,
+        Projected {
+            entry: "a",
+            dialect: "jev",
+            chars: body.len() - 1,
+        }
+    );
+    // The only model of its dialect is the default; a model of the other dialect is none.
+    assert_eq!(project(b"{}", tail::DIALECT_NANOJEV, &routes, |d| *d).entry, "n");
+    assert_eq!(
+        project(br#"{"model":"n"}"#, tail::DIALECT_JEV, &routes, |d| *d).entry,
+        ""
+    );
 }

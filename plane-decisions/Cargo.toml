@@ -1,12 +1,11 @@
-# busbar-plane-decisions — THE DECISIONS PLANE (jev), as an ADAPTER and nothing else.
+# busbar-plane-decisions — THE DECISIONS PLANE, as one door over its two dialects.
 #
 # WHAT THIS CRATE IS. One implementation of the plugin contract's plane kind for the "decision"
-# protocol surface, dialect `jev` — a byte-identity passthrough to api.typesafe.ai's two operations:
-# POST /v1/systemone and GET /v1/models. The signed design (DECISION #39, jev v5 sign-off) rules
-# this the ONE crate for the whole plane: unlike busbar-plane-mcp/busbar-plane-a2a, which are pure
-# adapters over a separate "impure host" crate (busbar-mcp/busbar-a2a) that carries the config
-# section, the admin wiring and the registry declaration, jev is deliberately a SINGLE crate that
-# holds the pure plane AND its own typed config section.
+# protocol surface: a request routed by its model to a decision provider in either of the two
+# dialects the plane speaks, `jev` (POST /v1/systemone) and `nanojev` (POST /api/evaluate), its
+# body relayed as the caller wrote it but for the governed top-level `model`. The signed design
+# (DECISION #39, jev v5 sign-off) rules this the ONE crate for the whole plane: it holds the door
+# AND its own typed config section.
 #
 # THE SECOND NON-CONTRACT EDGE IS GONE TOO, AND WITH IT THE ONE BANNED-SOURCE PATH ANY PURE PLANE
 # HAD. This was the only pure plane whose manifest named the legacy plugin-facing crate — 1
@@ -29,12 +28,10 @@
 # this plane is wired, it is written against whatever seam exists then, not against a kernel type
 # resurrected from a constant nobody read.
 #
-# WHAT THIS CRATE IS NOT. There is no governance here, no breaker, no hook seat, no approval
-# decision and no metering arithmetic. Those are units, and a unit is on the other side of the
-# kernel from a plane. The metering method returns LOCATORS — where the numbers are — and never a
-# number the ledger would post. The routing method returns a plan, never a connection. jev holds no
-# durable state of its own (it is a stateless request/response passthrough, provider-scoped), so it
-# declares no record schemas.
+# WHAT THIS CRATE IS NOT. There is no governance here, no breaker, no approval decision and no
+# metering arithmetic: those are the kernel's. The door states counts, never a price; it projects a
+# request for the deployment's hooks and applies their rewrites, as every plane does, and never
+# decides on the content itself. It keeps no durable state, so it declares no record schemas.
 [package]
 name = "busbar-plane-decisions"
 version = "1.6.0"
