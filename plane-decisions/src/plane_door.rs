@@ -1060,11 +1060,12 @@ slot!(
         let body = input.field(|i| &i.body).bytes();
         let rewrite = input.field(|i| &i.rewrite).bytes();
         let routes: &Routes = &plane.routes();
+        // The request is judged and routed once: a rewrite keeps its `model`, so the entry stands.
+        let mut view = driven::project(body, dialect, routes, |r| r.dialect);
         let rewritten = if rewrite.is_empty() {
             None
         } else {
-            let routed = driven::project(body, dialect, routes, |r| r.dialect).entry;
-            match driven::rewritten(body, rewrite, routed) {
+            match driven::rewritten(body, rewrite, view.entry) {
                 Ok(rewritten) => rewritten,
                 // A rewrite naming another model is the hook's failure, never a switch of provider:
                 // REFUSED, and the kernel answers it by that hook's `on_error`.
@@ -1072,7 +1073,9 @@ slot!(
             }
         };
         let request = rewritten.as_deref().unwrap_or(body);
-        let view = driven::project(request, dialect, routes, |r| r.dialect);
+        if let Some(rewritten) = rewritten.as_deref() {
+            view.chars = driven::chars_of(rewritten);
+        }
         let (signals, mut arena, mut turns) =
             (input.signals_buf(), input.arena_buf(), input.messages_buf());
         let pool = arena.span(view.entry.as_bytes());

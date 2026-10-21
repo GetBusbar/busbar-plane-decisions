@@ -228,7 +228,8 @@ impl Unrouted {
             Self::Unnamed => "the request names no model, and several decisions models are \
                               configured: name one in `model`"
                 .to_string(),
-            Self::NotAName => "`model` must be a string naming a decisions model".to_string(),
+            // 1.5.5 read a `model` that is not a string as none (v1.5.5 ingress/dispatch.rs:130-152).
+            Self::NotAName => MISSING_MODEL.to_string(),
             Self::Unknown(model) => format!("{UNKNOWN_HEAD}{model}{UNKNOWN_TAIL}"),
             Self::Unparsable => UNPARSABLE.to_string(),
             Self::EmptyModel => MISSING_MODEL.to_string(),
@@ -288,8 +289,10 @@ pub fn parsed(body: &[u8]) -> Result<serde_json::Value, Unrouted> {
     if exceeds_depth(body, MAX_PARSE_DEPTH) {
         return Err(Unrouted::Unparsable);
     }
+    // 1.5.5 validated the whole input as UTF-8 before it parsed it (sonic-rs `from_slice`).
+    let text = core::str::from_utf8(body).map_err(|_| Unrouted::Unparsable)?;
     // The depth is bounded by the scan above, at 1.5.5's own; serde's limit stops one level short.
-    let mut de = serde_json::Deserializer::from_slice(body);
+    let mut de = serde_json::Deserializer::from_str(text);
     de.disable_recursion_limit();
     let value = serde::Deserialize::deserialize(&mut de).map_err(|_| Unrouted::Unparsable)?;
     de.end().map_err(|_| Unrouted::Unparsable)?;
@@ -329,10 +332,11 @@ pub fn echoed(name: &str) -> String {
     format!("{}{CUT_MARK}", &name[..cut])
 }
 
-/// Whether `body` is a JSON document 1.5.5 read: at most [`MAX_PARSE_DEPTH`] deep, then a full,
-/// validating parse that builds no document (trailing bytes, a bad number, a bad escape, invalid
-/// UTF-8 or a truncated document all refuse), as 1.5.5's `LazyBody::parse` refused them (v1.5.5
-/// `crates/busbar/src/ingress/dispatch.rs:101-116`).
+/// Whether `body` is a JSON document 1.5.5 read: at most [`MAX_PARSE_DEPTH`] deep, UTF-8 throughout,
+/// then a full, validating parse that builds no document (trailing bytes, a bad number, a bad
+/// escape or a truncated document all refuse), as 1.5.5's `LazyBody::parse` refused them (v1.5.5
+/// `crates/busbar/src/ingress/dispatch.rs:101-116`). A top-level object's keys are decoded as
+/// 1.5.5's head projection decoded them (`HeadKey`), so a lone surrogate escape in one refuses too.
 ///
 /// # Errors
 ///
@@ -341,11 +345,72 @@ pub fn readable(body: &[u8]) -> Result<(), Unrouted> {
     if exceeds_depth(body, MAX_PARSE_DEPTH) {
         return Err(Unrouted::Unparsable);
     }
-    let mut de = serde_json::Deserializer::from_slice(body);
+    let text = core::str::from_utf8(body).map_err(|_| Unrouted::Unparsable)?;
+    let mut de = serde_json::Deserializer::from_str(text);
     de.disable_recursion_limit();
-    <serde::de::IgnoredAny as serde::Deserialize>::deserialize(&mut de)
-        .map_err(|_| Unrouted::Unparsable)?;
+    serde::Deserializer::deserialize_any(&mut de, TopLevel).map_err(|_| Unrouted::Unparsable)?;
     de.end().map_err(|_| Unrouted::Unparsable)
+}
+
+/// [`readable`]'s walk of the top-level value: an object's keys decoded, every value skipped.
+struct TopLevel;
+
+impl<'de> serde::de::Visitor<'de> for TopLevel {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a JSON document")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        while map.next_key::<std::borrow::Cow<'de, str>>()?.is_some() {
+            map.next_value::<serde::de::IgnoredAny>()?;
+        }
+        Ok(())
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+        Ok(())
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
+        Ok(())
+    }
+}
+
+/// The name a `model` member's `raw` bytes spell: a string's, decoded; [`Unrouted::NotAName`] for
+/// another value, and [`Unrouted::Unparsable`] for a string 1.5.5 could not decode (a lone
+/// surrogate escape).
+fn model_named(raw: &[u8]) -> Result<std::borrow::Cow<'_, str>, Unrouted> {
+    if let Ok(name) = serde_json::from_slice::<&str>(raw) {
+        return Ok(std::borrow::Cow::Borrowed(name));
+    }
+    match serde_json::from_slice::<String>(raw) {
+        Ok(name) => Ok(std::borrow::Cow::Owned(name)),
+        Err(_) if raw.first() == Some(&b'"') => Err(Unrouted::Unparsable),
+        Err(_) => Err(Unrouted::NotAName),
+    }
 }
 
 /// The top-level `model` a request body names: `Ok(None)` when it names none. Every body is first
@@ -361,12 +426,7 @@ pub fn requested_model(body: &[u8]) -> Result<Option<std::borrow::Cow<'_, str>>,
         busbar_contract::spans::Resolved::Found(span) => {
             readable(body)?;
             let raw = body.get(span.start..span.end).ok_or(Unrouted::Unparsable)?;
-            match serde_json::from_slice::<&str>(raw) {
-                Ok(name) => std::borrow::Cow::Borrowed(name),
-                Err(_) => serde_json::from_slice::<String>(raw)
-                    .map(std::borrow::Cow::Owned)
-                    .map_err(|_| Unrouted::NotAName)?,
-            }
+            model_named(raw)?
         }
         busbar_contract::spans::Resolved::Missing => {
             readable(body)?;
@@ -424,22 +484,30 @@ pub fn route_model<'m, V>(
 /// the document are the caller's.
 #[must_use]
 pub fn spliced(body: &[u8], upstream: &str) -> Option<Vec<u8>> {
-    let named = requested_model(body).ok().flatten()?;
+    // The body was held to the document 1.5.5 read at `arrive`: it is not judged again here.
+    let span = match busbar_contract::spans::resolve_pointer(body, codec::PTR_MODEL) {
+        busbar_contract::spans::Resolved::Found(span) => span,
+        busbar_contract::spans::Resolved::Missing => return None,
+        busbar_contract::spans::Resolved::Malformed
+        | busbar_contract::spans::Resolved::NeedMore => {
+            // The scanner cannot walk the body: the model is set in the document as 1.5.5 read
+            // it, every other member keeping its value.
+            let mut document = parsed(body).ok()?;
+            let named = document.get("model")?.as_str()?;
+            if named == upstream {
+                return None;
+            }
+            document.as_object_mut()?.insert(
+                "model".to_string(),
+                serde_json::Value::String(upstream.to_string()),
+            );
+            return Some(document.to_string().into_bytes());
+        }
+    };
+    let named = model_named(body.get(span.start..span.end)?).ok()?;
     if named == upstream {
         return None;
     }
-    let busbar_contract::spans::Resolved::Found(span) =
-        busbar_contract::spans::resolve_pointer(body, codec::PTR_MODEL)
-    else {
-        // The scanner cannot walk the body: the model is set in the document as 1.5.5 read it,
-        // every other member keeping its value.
-        let mut document = parsed(body).ok()?;
-        document.as_object_mut()?.insert(
-            "model".to_string(),
-            serde_json::Value::String(upstream.to_string()),
-        );
-        return Some(document.to_string().into_bytes());
-    };
     let value = serde_json::to_string(upstream).ok()?;
     let mut out = Vec::with_capacity(body.len() - (span.end - span.start) + value.len());
     out.extend_from_slice(body.get(..span.start)?);
@@ -487,10 +555,7 @@ pub fn project<'r, V>(
 ) -> Projected<'r> {
     let entry =
         route_model(request, routes, |r| dialect_of(r) == dialect).map_or("", |(name, _)| name);
-    let chars = match core::str::from_utf8(request) {
-        Ok(text) => text.chars().count(),
-        Err(_) => String::from_utf8_lossy(request).chars().count(),
-    };
+    let chars = chars_of(request);
     Projected {
         entry,
         dialect: tail::DIALECTS
@@ -498,6 +563,15 @@ pub fn project<'r, V>(
             .copied()
             .unwrap_or_default(),
         chars,
+    }
+}
+
+/// The characters of a request document, as the hook view counts them.
+#[must_use]
+pub fn chars_of(request: &[u8]) -> usize {
+    match core::str::from_utf8(request) {
+        Ok(text) => text.chars().count(),
+        Err(_) => String::from_utf8_lossy(request).chars().count(),
     }
 }
 
@@ -560,8 +634,11 @@ pub fn rewritten(
     let Some(mut document) = rewrite_document(rewrite) else {
         return Ok(None);
     };
-    let Ok(current) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(body)
-    else {
+    // Read to 1.5.5's depth (the request was held to it at `arrive`), not serde's one short.
+    let Some(current) = parsed(body).ok().and_then(|v| match v {
+        serde_json::Value::Object(map) => Some(map),
+        _ => None,
+    }) else {
         return Ok(None);
     };
     const MODEL: &str = "model";

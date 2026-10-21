@@ -779,3 +779,66 @@ fn an_empty_model_is_refused_as_1_5_5_refused_it() {
         );
     }
 }
+
+/// RED (review of the routing, 1.5.5 parity): 1.5.5 validated the whole body as UTF-8 before it
+/// parsed it (sonic-rs `from_slice`) and refused invalid UTF-8 inside a string, or a stray byte past
+/// the document, with its parse 400. Both routed.
+#[test]
+fn a_body_that_is_not_utf8_is_refused_as_1_5_5_refused_it() {
+    let two = open(TWO);
+    let in_string: &[u8] = b"{\"model\":\"a\",\"x\":\"\xff\"}";
+    let trailing: &[u8] = b"{\"model\":\"a\"}\xc3";
+    for (unit, body) in [(1, in_string), (2, trailing)] {
+        let refused = two.arrive(unit, body);
+        assert_eq!(
+            (refused.outcome, refused.status, refused.text.as_str()),
+            (
+                Outcome::Refused,
+                400,
+                "We could not parse the JSON body of your request."
+            ),
+            "{body:?}: {refused:?}"
+        );
+    }
+}
+
+/// RED (1.5.5 parity): a `model` that is not a string was no model to 1.5.5, refused 400 "Missing
+/// required parameter: 'model'." (v1.5.5 ingress/dispatch.rs:130-152).
+#[test]
+fn a_model_that_is_not_a_string_is_refused_as_1_5_5_refused_it() {
+    let two = open(TWO);
+    for (unit, body) in [(1, &br#"{"model":7}"#[..]), (2, br#"{"model":{"a":1}}"#)] {
+        let refused = two.arrive(unit, body);
+        assert_eq!(
+            (refused.outcome, refused.status, refused.text.as_str()),
+            (
+                Outcome::Refused,
+                400,
+                "Missing required parameter: 'model'."
+            ),
+            "{refused:?}"
+        );
+    }
+}
+
+/// RED (1.5.5 parity): a lone surrogate escape in a top-level key, or in the `model` value, is no
+/// string 1.5.5's head projection could decode: its parse 400. Both routed.
+#[test]
+fn a_lone_surrogate_in_a_top_level_key_or_the_model_is_refused() {
+    let two = open(TWO);
+    for (unit, body) in [
+        (1, &br#"{"model":"a","\ud800":1}"#[..]),
+        (2, br#"{"model":"a\ud800"}"#),
+    ] {
+        let refused = two.arrive(unit, body);
+        assert_eq!(
+            (refused.outcome, refused.status, refused.text.as_str()),
+            (
+                Outcome::Refused,
+                400,
+                "We could not parse the JSON body of your request."
+            ),
+            "{refused:?}"
+        );
+    }
+}

@@ -205,3 +205,25 @@ fn a_target_the_plane_does_not_claim_is_not_projected() {
         Some(Outcome::Refused)
     );
 }
+
+/// RED (review of the rewrite, 1.5.5's depth): a hook's rewrite applies to a request exactly as
+/// deep as 1.5.5 read (128): the request was read one level short of it, and the rewrite did not
+/// apply, the field the hook omitted going upstream.
+#[test]
+fn a_redaction_applies_at_1_5_5s_parse_depth() {
+    let door = open(TWO);
+    // `{"deep":` is one level; 127 more make 128.
+    let deep = format!("{}{}", "[".repeat(127), "]".repeat(127));
+    let body = format!(r#"{{"model":"a","deep":{deep},"pii":"123-45-6789","state":{{}}}}"#);
+    let view = door.project(
+        1,
+        SYSTEMONE,
+        body.as_bytes(),
+        Some(&rewrite_of(r#"{"state":{},"deep":[]}"#)),
+    );
+    assert_eq!(view.outcome, Some(Outcome::Ready), "{view:?}");
+    let kept = view
+        .rewritten
+        .expect("the hook's rewrite applies at 128 deep");
+    assert!(!String::from_utf8_lossy(&kept).contains("123-45-6789"));
+}
