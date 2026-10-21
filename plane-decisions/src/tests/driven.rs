@@ -824,7 +824,8 @@ fn a_request_is_projected_over_its_dialects_models() {
 #[test]
 fn the_head_read_matches_sonic_rs_0_5_8_on_escapes() {
     let a = || Ok(Some(serde_json::json!("a")));
-    let table: &[(&str, &[u8], Result<Option<serde_json::Value>, Unrouted>)] = &[
+    type Read = Result<Option<serde_json::Value>, Unrouted>;
+    let table: &[(&str, &[u8], Read)] = &[
         // A skipped value's \u escape is never checked: invalid hex, lone surrogates (either half).
         (
             "invalid hex, skipped",

@@ -641,6 +641,7 @@ impl Skip<'_> {
 /// [`Unrouted::Unparsable`] for a body 1.5.5 could not parse, [`Unrouted::NotAName`] for a
 /// `model` that is not a string, and [`Unrouted::EmptyModel`] for an empty one (both 1.5.5's
 /// missing-model 400).
+#[cfg(test)]
 pub fn requested_model(body: &[u8]) -> Result<Option<std::borrow::Cow<'_, str>>, Unrouted> {
     named_in(&Ok(readable(body)?))
 }
@@ -675,6 +676,7 @@ pub fn named_in<'a>(
 ///
 /// [`Unrouted`]: several configured and none named, a `model` that is not a string, or a name none
 /// of the dialect's models has.
+#[cfg(test)]
 pub fn route_model<'m, V>(
     body: &[u8],
     models: &'m std::collections::BTreeMap<String, V>,
@@ -772,6 +774,7 @@ pub fn spliced(body: &[u8], upstream: &str) -> Option<Vec<u8>> {
 /// (v1.5.5 `crates/busbar/src/proxy/engine/mod.rs:1499-1520`, `DETAIL_INTERNAL_ERROR` at
 /// `proxy/wire.rs:726`). `arrive` answers it so, never relaying the caller's model unspliced. A body
 /// naming no model, or `upstream` itself, needs no rewrite.
+#[cfg(test)]
 #[must_use]
 pub fn spliceable(body: &[u8], upstream: &str) -> bool {
     match readable(body) {
@@ -893,6 +896,7 @@ pub struct Projected<'r> {
 /// size of the document. The document itself is the view's one turn and its body, as the caller
 /// sent it (or as a rewrite left it); the plane reads nothing of it for itself beyond its top-level
 /// `model`, and mints no fact from it.
+#[cfg(test)]
 #[must_use]
 pub fn project<'r, V>(
     request: &[u8],
@@ -1001,6 +1005,7 @@ pub enum NotApplied {
 ///
 /// [`NotApplied::Model`]: the document names a model other than `routed`; [`NotApplied::Fault`]:
 /// the body's document does not parse.
+#[cfg(test)]
 pub fn rewritten(body: &[u8], rewrite: &[u8], routed: &str) -> Result<Option<Vec<u8>>, NotApplied> {
     rewritten_read(body, &readable(body), rewrite, routed)
 }

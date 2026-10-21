@@ -679,12 +679,10 @@ slot!(
             let body = input.field(|i| &i.body).bytes();
             let routes: &Routes = &plane.routes();
             let routed = driven::route_named(body, routes, |r| r.dialect == arrived.dialect);
-            let mut named = None;
-            let upstream = match routed {
+            let (upstream, named) = match routed {
                 Ok((model, routed, requested)) => {
-                    named = requested;
                     out.route(ROUTE_DIRECT, model);
-                    routed.upstream.clone()
+                    (routed.upstream.clone(), requested)
                 }
                 Err(unrouted) => {
                     out.set(|o| &o.refusal, UNROUTED);
