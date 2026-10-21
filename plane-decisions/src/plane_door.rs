@@ -678,9 +678,11 @@ slot!(
         if let Some(plane) = instance.get() {
             let body = input.field(|i| &i.body).bytes();
             let routes: &Routes = &plane.routes();
-            let routed = driven::route_model(body, routes, |r| r.dialect == arrived.dialect);
+            let routed = driven::route_named(body, routes, |r| r.dialect == arrived.dialect);
+            let mut named = None;
             let upstream = match routed {
-                Ok((model, routed)) => {
+                Ok((model, routed, requested)) => {
+                    named = requested;
                     out.route(ROUTE_DIRECT, model);
                     routed.upstream.clone()
                 }
@@ -693,7 +695,7 @@ slot!(
             // A request whose model the far end could not be sent as the routed one is refused
             // here, as 1.5.5 refused it, never relayed with the caller's model.
             if let Some(up) = upstream.as_deref() {
-                if !driven::spliceable(body, up) {
+                if !driven::spliceable_named(body, named.as_deref(), up) {
                     out.set(|o| &o.refusal, UNSPLICEABLE);
                     out.set(|o| &o.refusal_status, STATUS_INTERNAL);
                     return out.fail(Refusal::refused(driven::INTERNAL_ERROR));
@@ -1059,7 +1061,8 @@ slot!(
     /// its own (THE DESIGN section 1: "the hook tap and gate ... apply to every plane the same
     /// way"). A request-stage hook's rewrite is applied first, in the request's dialect
     /// ([`driven::rewritten`], wholesale, as 1.5.5 replaced the body; a rewrite naming another
-    /// model is REFUSED, the hook's failure): the rewritten request is answered in `rewritten`
+    /// model is REFUSED, the hook's failure; a rewrite with a document over a body whose whole
+    /// document does not parse is FAULT, the kernel's shared 500): the rewritten request is answered in `rewritten`
     /// (the body the kernel keeps and re-pushes on every attempt from then on) and is the request
     /// projected; a rewrite that does not apply leaves the request as it was (1.5.5). The view's
     /// pool is the entry the request routes over, its dialect the claim's, and its one turn the
@@ -1078,15 +1081,20 @@ slot!(
         let rewrite = input.field(|i| &i.rewrite).bytes();
         let routes: &Routes = &plane.routes();
         // The request is judged and routed once: a rewrite keeps its `model`, so the entry stands.
-        let mut view = driven::project(body, dialect, routes, |r| r.dialect);
+        let read = driven::readable(body);
+        let mut view = driven::project_read(body, &read, dialect, routes, |r| r.dialect);
         let rewritten = if rewrite.is_empty() {
             None
         } else {
-            match driven::rewritten(body, rewrite, view.entry) {
+            match driven::rewritten_read(body, &read, rewrite, view.entry) {
                 Ok(rewritten) => rewritten,
                 // A rewrite naming another model is the hook's failure, never a switch of provider:
                 // REFUSED, and the kernel answers it by that hook's `on_error`.
-                Err(driven::ModelRewritten { .. }) => return Outcome::Refused,
+                Err(driven::NotApplied::Model(_)) => return Outcome::Refused,
+                // The body's whole document does not parse: the kernel always answers 500 `request
+                // rewrite could not be applied`, whatever the hook's `on_error`, and the body is
+                // never forwarded (1.5.5 `proxy/engine/mod.rs:749-755`).
+                Err(driven::NotApplied::Fault) => return Outcome::Fault,
             }
         };
         let request = rewritten.as_deref().unwrap_or(body);

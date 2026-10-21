@@ -228,18 +228,26 @@ fn a_redaction_applies_at_1_5_5s_parse_depth() {
     assert!(!String::from_utf8_lossy(&kept).contains("123-45-6789"));
 }
 
-/// RED (review of the rewrite): a request whose document does not parse (a member 1.5.5's head
-/// never decoded carrying a lone surrogate escape) passes `arrive`; a redaction hook's rewrite of it
-/// answered "does not apply", and the request went upstream un-redacted. The rewrite now applies:
-/// the hook's document replaces the request, the caller's model kept.
+/// A request whose document does not parse (a member 1.5.5's head never decoded, carrying a lone
+/// surrogate escape or a bad `\u` escape) passes `arrive`, as 1.5.5's head scan passed it. A
+/// request-stage hook's rewrite WITH a document over it is a FAULT: 1.5.5 materialized the
+/// document for its rewrite pass, could not, and failed closed with 500 `request rewrite could not
+/// be applied` (`proxy/engine/mod.rs:749-755`). The plane never applies the hook's document over a
+/// body it cannot read and never answers "does not apply": its `project` answers FAULT, which the
+/// kernel always answers 500 whatever the hook's `on_error` (RED kernel test
+/// `a_faulted_rewrite_project_is_always_the_shared_500_under_every_on_error`), the body never
+/// forwarded. This harness drives the plane alone, so what it shows is the FAULT and that no
+/// rewritten body is answered.
 #[test]
-fn a_redaction_applies_over_a_body_whose_document_does_not_parse() {
+fn a_rewrite_over_a_body_whose_document_does_not_parse_is_a_fault() {
     let door = open(TWO);
-    let body = br#"{"model":"a","pii":"123-45-6789","x":"\ud800"}"#;
-    assert_eq!(door.arrive(1, body).outcome, Outcome::Ready);
-    let view = door.project(1, SYSTEMONE, body, Some(&rewrite_of(r#"{"state":{}}"#)));
-    assert_eq!(view.outcome, Some(Outcome::Ready), "{view:?}");
-    let kept = view.rewritten.expect("the hook's rewrite applies");
-    let kept: serde_json::Value = serde_json::from_slice(&kept).expect("JSON");
-    assert_eq!(kept, serde_json::json!({"model": "a", "state": {}}));
+    for body in [
+        &br#"{"model":"a","pii":"123-45-6789","x":"\ud800"}"#[..],
+        br#"{"model":"a","pii":"123-45-6789","x":"\uZZZZ"}"#,
+    ] {
+        assert_eq!(door.arrive(1, body).outcome, Outcome::Ready);
+        let view = door.project(1, SYSTEMONE, body, Some(&rewrite_of(r#"{"state":{}}"#)));
+        assert_eq!(view.outcome, Some(Outcome::Fault), "{view:?}");
+        assert_eq!(view.rewritten, None, "the hook's document is never applied");
+    }
 }

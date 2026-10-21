@@ -899,3 +899,47 @@ fn a_request_that_cannot_take_its_upstream_model_is_refused_as_1_5_5_refused_it(
     let unnamed = door.arrive(2, br#"{"x":"\ud800"}"#);
     assert_eq!(unnamed.outcome, Outcome::Ready, "{unnamed:?}");
 }
+
+/// RED (1.5.5 parity, sonic-rs 0.5.8's skip): an invalid `\u` hex escape inside a value 1.5.5 only
+/// SKIPPED is accepted and the request is served; inside a value it DECODED (`system`, the `model`,
+/// a key) it is the parse 400; and where the request's `model` must be spliced to an `upstream_model`
+/// its DOM parse refused it, 500. The swallowed bytes of a skipped `\u` may hold the closing quote.
+#[test]
+fn an_invalid_hex_escape_in_a_skipped_value_is_served_as_1_5_5_served_it() {
+    let two = open(TWO);
+    let served = two.arrive(1, br#"{"model":"a","x":"\uZZZZ"}"#);
+    assert_eq!(
+        (served.outcome, served.entry.as_str()),
+        (Outcome::Ready, "a"),
+        "{served:?}"
+    );
+    let swallowed = two.arrive(2, br#"{"model":"a","x":"\u"   "}"#);
+    assert_eq!(swallowed.outcome, Outcome::Ready, "{swallowed:?}");
+    for (unit, body) in [
+        (3, &br#"{"model":"a","system":"\uZZZZ"}"#[..]),
+        (4, br#"{"model":"a","\uZZZZ":1}"#),
+        (5, br#"{"model":"\uZZZZ"}"#),
+    ] {
+        let refused = two.arrive(unit, body);
+        assert_eq!(
+            (refused.outcome, refused.status, refused.text.as_str()),
+            (
+                Outcome::Refused,
+                400,
+                "We could not parse the JSON body of your request."
+            ),
+            "{refused:?}"
+        );
+    }
+    let upstream = r#"{"models":{"jev":{"provider":"typesafe","upstream_model":"jev-1.13.0"}}}"#;
+    let refused = open(upstream).arrive(1, br#"{"model":"jev","x":"\uZZZZ"}"#);
+    assert_eq!(
+        (refused.outcome, refused.status, refused.text.as_str()),
+        (
+            Outcome::Refused,
+            500,
+            "We received an unexpected internal error. Please try again."
+        ),
+        "{refused:?}"
+    );
+}

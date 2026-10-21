@@ -348,8 +348,10 @@ const HEAD_KEYS: &[&str] = &[
 /// `LazyBody::parse`): at most [`MAX_PARSE_DEPTH`] deep, UTF-8 throughout, then one validating
 /// parse that builds no document (trailing bytes, a bad number, a bad escape or a truncated document
 /// refuse), decoding the top-level keys and the values of [`HEAD_KEYS`] (`lazy_body.rs:122-127`,
-/// `Head`). Answers the top-level `model`'s value, the last one where it repeats (1.5.5's map
-/// insert); `None` when the body names none or is no object.
+/// `Head`) and only SKIPPING every other value, as sonic-rs 0.5.8 skipped it ([`Skip`]): a
+/// `\u` escape inside a skipped value is not checked for its hex digits. Answers the top-level
+/// `model`'s value, the last one where it repeats (1.5.5's map insert); `None` when the body names
+/// none or is no object.
 ///
 /// # Errors
 ///
@@ -358,67 +360,276 @@ pub fn readable(body: &[u8]) -> Result<Option<serde_json::Value>, Unrouted> {
     if exceeds_depth(body, MAX_PARSE_DEPTH) {
         return Err(Unrouted::Unparsable);
     }
-    let text = core::str::from_utf8(body).map_err(|_| Unrouted::Unparsable)?;
-    let mut de = serde_json::Deserializer::from_str(text);
-    de.disable_recursion_limit();
-    let model = serde::Deserializer::deserialize_any(&mut de, TopLevel)
-        .map_err(|_| Unrouted::Unparsable)?;
-    de.end().map_err(|_| Unrouted::Unparsable)?;
+    core::str::from_utf8(body).map_err(|_| Unrouted::Unparsable)?;
+    let mut skip = Skip { bytes: body, at: 0 };
+    let model = skip.top_level().map_err(|()| Unrouted::Unparsable)?;
+    if skip.next_non_space().is_some() {
+        return Err(Unrouted::Unparsable);
+    }
     Ok(model)
 }
 
-/// [`readable`]'s walk of the top-level value: an object's keys decoded, the values of
-/// [`HEAD_KEYS`] decoded, every other value scanned. Answers the `model` value.
-struct TopLevel;
+/// One decoded value, strictly: what 1.5.5 DECODED (a top-level key, a value of [`HEAD_KEYS`], a
+/// root string), where an escape must be whole and a surrogate must pair.
+fn decoded(span: &[u8]) -> Result<serde_json::Value, ()> {
+    let mut de = serde_json::Deserializer::from_slice(span);
+    de.disable_recursion_limit();
+    let value = serde::Deserialize::deserialize(&mut de).map_err(|_| ())?;
+    de.end().map_err(|_| ())?;
+    Ok(value)
+}
 
-impl<'de> serde::de::Visitor<'de> for TopLevel {
-    type Value = Option<serde_json::Value>;
+/// sonic-rs 0.5.8's CHECKED SKIP (`Parser::skip_one(true)`, what `serde::de::IgnoredAny` ran in
+/// 1.5.5's head parse), over a body: structure, numbers, literals, control characters and the
+/// simple escapes are validated, and a `\u` escape is skipped WITHOUT looking at its hex
+/// (`skip_escaped_chars`: after a backslash it consumes the next byte, and for `u` four more, which
+/// may be anything but the buffer's end). So a value 1.5.5 only skipped accepts `\uZZZZ` and a lone
+/// surrogate, while one it decoded refuses them ([`decoded`]).
+struct Skip<'b> {
+    bytes: &'b [u8],
+    at: usize,
+}
 
-    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("a JSON document")
+/// The bytes a backslash may be followed by (sonic-rs 0.5.8 `ESCAPED_TAB`), `u` apart.
+const SIMPLE_ESCAPES: &[u8] = b"\"\\/bfnrt";
+
+impl Skip<'_> {
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.at).copied()
     }
 
-    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        let mut model = None;
-        while let Some(key) = map.next_key::<std::borrow::Cow<'de, str>>()? {
-            if key == "model" {
-                model = Some(map.next_value::<serde_json::Value>()?);
-            } else if HEAD_KEYS.contains(&&*key) {
-                map.next_value::<serde_json::Value>()?;
-            } else {
-                map.next_value::<serde::de::IgnoredAny>()?;
+    fn bump(&mut self) -> Option<u8> {
+        let b = self.peek()?;
+        self.at += 1;
+        Some(b)
+    }
+
+    fn eat_spaces(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+            self.at += 1;
+        }
+    }
+
+    /// Past any whitespace, the next byte, consumed.
+    fn next_non_space(&mut self) -> Option<u8> {
+        self.eat_spaces();
+        self.bump()
+    }
+
+    /// The root value: an object's keys and head values decoded, an array's elements skipped, a
+    /// root string decoded, any other scalar checked. Answers the `model` value.
+    fn top_level(&mut self) -> Result<Option<serde_json::Value>, ()> {
+        self.eat_spaces();
+        match self.peek() {
+            Some(b'{') => {
+                self.at += 1;
+                self.head_object()
+            }
+            Some(b'"') => {
+                let start = self.at;
+                self.skip_one(0)?;
+                decoded(&self.bytes[start..self.at])?;
+                Ok(None)
+            }
+            _ => {
+                self.skip_one(0)?;
+                Ok(None)
             }
         }
-        Ok(model)
     }
 
-    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-        while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
-        Ok(None)
+    /// The root object's members, its `{` consumed.
+    fn head_object(&mut self) -> Result<Option<serde_json::Value>, ()> {
+        let mut model = None;
+        match self.next_non_space() {
+            Some(b'}') => return Ok(None),
+            Some(b'"') => {}
+            _ => return Err(()),
+        }
+        loop {
+            let key_start = self.at - 1;
+            self.skip_string()?;
+            let serde_json::Value::String(key) = decoded(&self.bytes[key_start..self.at])? else {
+                return Err(());
+            };
+            if self.next_non_space() != Some(b':') {
+                return Err(());
+            }
+            self.eat_spaces();
+            let start = self.at;
+            self.skip_one(1)?;
+            if HEAD_KEYS.contains(&key.as_str()) {
+                let value = decoded(&self.bytes[start..self.at])?;
+                if key == "model" {
+                    model = Some(value);
+                }
+            }
+            match self.next_non_space() {
+                Some(b'}') => return Ok(model),
+                Some(b',') if self.next_non_space() == Some(b'"') => {}
+                _ => return Err(()),
+            }
+        }
     }
 
-    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
-        Ok(None)
+    /// One value skipped (`skip_one(true)`). `depth` is this value's nesting: this skipper and
+    /// 1.5.5's depth scan ([`exceeds_depth`]) can read a `\u` escape's payload differently, so a
+    /// body nested past [`MAX_PARSE_DEPTH`] in this reading is refused here too.
+    fn skip_one(&mut self, depth: usize) -> Result<(), ()> {
+        match self.next_non_space().ok_or(())? {
+            first @ (b'-' | b'0'..=b'9') => self.skip_number(first),
+            b'"' => self.skip_string(),
+            b'{' if depth < MAX_PARSE_DEPTH => self.skip_object(depth + 1),
+            b'[' if depth < MAX_PARSE_DEPTH => self.skip_array(depth + 1),
+            b't' => self.skip_literal(b"rue"),
+            b'f' => self.skip_literal(b"alse"),
+            b'n' => self.skip_literal(b"ull"),
+            _ => Err(()),
+        }
     }
 
-    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
-        Ok(None)
+    fn skip_literal(&mut self, rest: &[u8]) -> Result<(), ()> {
+        let end = self.at.checked_add(rest.len()).ok_or(())?;
+        if self.bytes.get(self.at..end) != Some(rest) {
+            return Err(());
+        }
+        self.at = end;
+        Ok(())
     }
 
-    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
-        Ok(None)
+    fn skip_digit(&mut self) -> Result<u8, ()> {
+        self.bump().filter(u8::is_ascii_digit).ok_or(())
     }
 
-    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
-        Ok(None)
+    fn skip_digits(&mut self) {
+        while self.peek().is_some_and(|b| b.is_ascii_digit()) {
+            self.at += 1;
+        }
     }
 
-    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
-        Ok(None)
+    fn skip_exponent(&mut self) -> Result<(), ()> {
+        if matches!(self.peek(), Some(b'-' | b'+')) {
+            self.at += 1;
+        }
+        self.skip_digit()?;
+        self.skip_digits();
+        Ok(())
     }
 
-    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-        Ok(None)
+    /// `do_skip_number`: an optional `-`, a digit (no leading zero before another), at most one
+    /// fraction (a digit required) and an exponent (a digit required).
+    fn skip_number(&mut self, mut first: u8) -> Result<(), ()> {
+        if first == b'-' {
+            first = self.skip_digit()?;
+        }
+        let second = self.peek();
+        if first == b'0' && second.is_some_and(|b| b.is_ascii_digit()) {
+            return Err(());
+        }
+        let mut fraction = false;
+        match second {
+            Some(b'0'..=b'9') => self.at += 1,
+            Some(b'.') => {
+                fraction = true;
+                self.at += 1;
+                self.skip_digit()?;
+            }
+            Some(b'e' | b'E') => {
+                self.at += 1;
+                return self.skip_exponent();
+            }
+            _ => return Ok(()),
+        }
+        self.skip_digits();
+        match self.peek() {
+            Some(b'.') if !fraction => {
+                self.at += 1;
+                self.skip_digit()?;
+                self.skip_digits();
+                if matches!(self.peek(), Some(b'e' | b'E')) {
+                    self.at += 1;
+                    return self.skip_exponent();
+                }
+                Ok(())
+            }
+            Some(b'e' | b'E') => {
+                self.at += 1;
+                self.skip_exponent()
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// `skip_string`, the opening quote consumed: a control character refuses, a backslash is
+    /// followed by [`Self::skip_escape`].
+    fn skip_string(&mut self) -> Result<(), ()> {
+        loop {
+            match self.bump().ok_or(())? {
+                b'\\' => self.skip_escape()?,
+                b'"' => return Ok(()),
+                0..=0x1f => return Err(()),
+                _ => {}
+            }
+        }
+    }
+
+    /// `skip_escaped_chars`, the backslash consumed. `u` needs six bytes left (itself, four more and
+    /// the byte after) and eats five, unchecked; any other byte is eaten and must be a simple
+    /// escape.
+    fn skip_escape(&mut self) -> Result<(), ()> {
+        match self.peek().ok_or(())? {
+            b'u' if self.bytes.len() - self.at < 6 => Err(()),
+            b'u' => {
+                self.at += 5;
+                Ok(())
+            }
+            c => {
+                self.at += 1;
+                SIMPLE_ESCAPES.contains(&c).then_some(()).ok_or(())
+            }
+        }
+    }
+
+    /// `skip_object`, the `{` consumed.
+    fn skip_object(&mut self, depth: usize) -> Result<(), ()> {
+        match self.next_non_space() {
+            Some(b'}') => return Ok(()),
+            Some(b'"') => {}
+            _ => return Err(()),
+        }
+        loop {
+            self.skip_string()?;
+            if self.next_non_space() != Some(b':') {
+                return Err(());
+            }
+            self.skip_one(depth)?;
+            match self.next_non_space() {
+                Some(b'}') => return Ok(()),
+                Some(b',') if self.next_non_space() == Some(b'"') => {}
+                _ => return Err(()),
+            }
+        }
+    }
+
+    /// `skip_array`, the `[` consumed.
+    fn skip_array(&mut self, depth: usize) -> Result<(), ()> {
+        self.eat_spaces();
+        match self.peek() {
+            Some(b']') => {
+                self.at += 1;
+                return Ok(());
+            }
+            None => return Err(()),
+            Some(_) => {}
+        }
+        loop {
+            self.skip_one(depth)?;
+            match self.next_non_space() {
+                Some(b']') => return Ok(()),
+                Some(b',') => {}
+                _ => return Err(()),
+            }
+        }
     }
 }
 
@@ -431,11 +642,26 @@ impl<'de> serde::de::Visitor<'de> for TopLevel {
 /// `model` that is not a string, and [`Unrouted::EmptyModel`] for an empty one (both 1.5.5's
 /// missing-model 400).
 pub fn requested_model(body: &[u8]) -> Result<Option<std::borrow::Cow<'_, str>>, Unrouted> {
-    match readable(body)? {
-        None => Ok(None),
-        Some(serde_json::Value::String(name)) if name.is_empty() => Err(Unrouted::EmptyModel),
-        Some(serde_json::Value::String(name)) => Ok(Some(std::borrow::Cow::Owned(name))),
-        Some(_) => Err(Unrouted::NotAName),
+    named_in(&Ok(readable(body)?))
+}
+
+/// What a read of the body ([`readable`], once) names as its model: [`requested_model`] over a
+/// read already made.
+///
+/// # Errors
+///
+/// As [`requested_model`].
+pub fn named_in<'a>(
+    read: &Result<Option<serde_json::Value>, Unrouted>,
+) -> Result<Option<std::borrow::Cow<'a, str>>, Unrouted> {
+    match read {
+        Err(unrouted) => Err(unrouted.clone()),
+        Ok(None) => Ok(None),
+        Ok(Some(serde_json::Value::String(name))) if name.is_empty() => Err(Unrouted::EmptyModel),
+        Ok(Some(serde_json::Value::String(name))) => {
+            Ok(Some(std::borrow::Cow::Owned(name.clone())))
+        }
+        Ok(Some(_)) => Err(Unrouted::NotAName),
     }
 }
 
@@ -454,12 +680,42 @@ pub fn route_model<'m, V>(
     models: &'m std::collections::BTreeMap<String, V>,
     serves: impl Fn(&V) -> bool,
 ) -> Result<(&'m str, &'m V), Unrouted> {
-    match requested_model(body)? {
+    route_named(body, models, serves).map(|(name, entry, _)| (name, entry))
+}
+
+/// [`route_model`], also answering the `model` the body named (the head's read, once), for a caller
+/// that needs it again ([`spliceable_named`]) without reading the body a second time.
+///
+/// # Errors
+///
+/// As [`route_model`].
+#[allow(clippy::type_complexity)]
+pub fn route_named<'m, 'b, V>(
+    body: &'b [u8],
+    models: &'m std::collections::BTreeMap<String, V>,
+    serves: impl Fn(&V) -> bool,
+) -> Result<(&'m str, &'m V, Option<std::borrow::Cow<'b, str>>), Unrouted> {
+    route_read(&readable(body), models, serves)
+}
+
+/// [`route_named`] over a read of the body already made ([`readable`], once).
+///
+/// # Errors
+///
+/// As [`route_model`].
+#[allow(clippy::type_complexity)]
+pub fn route_read<'m, 'b, V>(
+    read: &Result<Option<serde_json::Value>, Unrouted>,
+    models: &'m std::collections::BTreeMap<String, V>,
+    serves: impl Fn(&V) -> bool,
+) -> Result<(&'m str, &'m V, Option<std::borrow::Cow<'b, str>>), Unrouted> {
+    let requested = named_in(read)?;
+    match &requested {
         Some(name) => models
             .get_key_value(name.as_ref())
             .filter(|(_, v)| serves(v))
             .map(|(k, v)| (k.as_str(), v))
-            .ok_or_else(|| Unrouted::Unknown(echoed(&name))),
+            .ok_or_else(|| Unrouted::Unknown(echoed(name))),
         None => {
             let mut all = models.iter().filter(|(_, v)| serves(v));
             match (all.next(), all.next()) {
@@ -468,6 +724,7 @@ pub fn route_model<'m, V>(
             }
         }
     }
+    .map(|(name, entry)| (name, entry, requested))
 }
 
 /// THE `upstream_model` SPLICE: `body` with its top-level `model` value replaced by `upstream`, when
@@ -518,8 +775,87 @@ pub fn spliced(body: &[u8], upstream: &str) -> Option<Vec<u8>> {
 #[must_use]
 pub fn spliceable(body: &[u8], upstream: &str) -> bool {
     match readable(body) {
-        Ok(Some(serde_json::Value::String(named))) if named != upstream => parsed(body).is_ok(),
+        Ok(Some(serde_json::Value::String(named))) => {
+            spliceable_named(body, Some(&named), upstream)
+        }
         _ => true,
+    }
+}
+
+/// [`spliceable`] for a caller that already holds the `model` the body named (the head's read, as
+/// [`route_named`] answers it): the document is only VALIDATED ([`valid`]), never built.
+#[must_use]
+pub fn spliceable_named(body: &[u8], named: Option<&str>, upstream: &str) -> bool {
+    match named {
+        Some(named) if named != upstream => valid(body),
+        _ => true,
+    }
+}
+
+/// Whether the body's whole document parses, as 1.5.5's DOM parse read it (strings decoded, so a
+/// bad escape or a lone surrogate refuses), by a walk that builds no tree.
+#[must_use]
+pub fn valid(body: &[u8]) -> bool {
+    if exceeds_depth(body, MAX_PARSE_DEPTH) || core::str::from_utf8(body).is_err() {
+        return false;
+    }
+    let mut de = serde_json::Deserializer::from_slice(body);
+    de.disable_recursion_limit();
+    <Valid as serde::Deserialize>::deserialize(&mut de).is_ok() && de.end().is_ok()
+}
+
+/// [`valid`]'s walk: every value visited, none kept.
+struct Valid;
+
+impl<'de> serde::Deserialize<'de> for Valid {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(ValidVisitor)
+    }
+}
+
+struct ValidVisitor;
+
+impl<'de> serde::de::Visitor<'de> for ValidVisitor {
+    type Value = Valid;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a JSON document")
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Valid, E> {
+        Ok(Valid)
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Valid, E> {
+        Ok(Valid)
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Valid, E> {
+        Ok(Valid)
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Valid, E> {
+        Ok(Valid)
+    }
+
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Valid, E> {
+        Ok(Valid)
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Valid, E> {
+        Ok(Valid)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Valid, A::Error> {
+        while seq.next_element::<Valid>()?.is_some() {}
+        Ok(Valid)
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Valid, A::Error> {
+        while map.next_key::<Valid>()?.is_some() {
+            map.next_value::<Valid>()?;
+        }
+        Ok(Valid)
     }
 }
 
@@ -564,8 +900,20 @@ pub fn project<'r, V>(
     routes: &'r std::collections::BTreeMap<String, V>,
     dialect_of: impl Fn(&V) -> u32,
 ) -> Projected<'r> {
+    project_read(request, &readable(request), dialect, routes, dialect_of)
+}
+
+/// [`project`] over a read of the request already made ([`readable`], once).
+#[must_use]
+pub fn project_read<'r, V>(
+    request: &[u8],
+    read: &Result<Option<serde_json::Value>, Unrouted>,
+    dialect: u32,
+    routes: &'r std::collections::BTreeMap<String, V>,
+    dialect_of: impl Fn(&V) -> u32,
+) -> Projected<'r> {
     let entry =
-        route_model(request, routes, |r| dialect_of(r) == dialect).map_or("", |(name, _)| name);
+        route_read(read, routes, |r| dialect_of(r) == dialect).map_or("", |(name, _, _)| name);
     let chars = chars_of(request);
     Projected {
         entry,
@@ -621,61 +969,84 @@ pub struct ModelRewritten {
     pub named: String,
 }
 
+/// A rewrite that cannot be applied, and how the plane answers it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotApplied {
+    /// The document names another model: REFUSED, the hook's failure (its `on_error`).
+    Model(ModelRewritten),
+    /// The rewrite has a document and the body's whole document does not parse (a member 1.5.5's
+    /// head only skipped, carrying a bad escape or a lone surrogate): FAULT, which the kernel always
+    /// answers 500 `request rewrite could not be applied`, whatever the hook's `on_error`, the body
+    /// never forwarded. 1.5.5 materialized the document for its rewrite pass and failed closed when
+    /// it could not (`proxy/engine/mod.rs:749-755`).
+    Fault,
+}
+
 /// THE REWRITE, APPLIED IN THE DIALECT, as 1.5.5 applied one: the rewrite's document
 /// ([`rewrite_document`]) REPLACES the request wholesale (v1.5.5 `RewriteReply`: "the replacement
 /// message body"). A member the document omits is dropped, so a hook redacts by omission; a
 /// member it states is set to its value, the caller's own bytes kept for a value it leaves as it
 /// was; a member the caller did not send is added after the caller's. The top-level `model` alone
 /// is not the document's: it stays the caller's whether or not the document repeats it, and a
-/// document naming another model is refused ([`ModelRewritten`]), never a silent switch of
+/// document naming another model is refused ([`NotApplied::Model`]), never a silent switch of
 /// provider. `routed` is the model entry the request is routed over.
 ///
 /// `Ok(None)` when the rewrite names no document, the body is not one JSON object, or the document
 /// is the request as it stands: the request goes on byte for byte as it was (1.5.5: a rewrite that
-/// cannot be applied leaves the request unmodified).
+/// cannot be applied leaves the request unmodified). A rewrite WITH a document over a body whose
+/// whole document does not parse is never applied wholesale and never skipped: it is
+/// [`NotApplied::Fault`].
 ///
 /// # Errors
 ///
-/// [`ModelRewritten`]: the document names a model other than `routed`.
-pub fn rewritten(
+/// [`NotApplied::Model`]: the document names a model other than `routed`; [`NotApplied::Fault`]:
+/// the body's document does not parse.
+pub fn rewritten(body: &[u8], rewrite: &[u8], routed: &str) -> Result<Option<Vec<u8>>, NotApplied> {
+    rewritten_read(body, &readable(body), rewrite, routed)
+}
+
+/// [`rewritten`] over a read of the body already made ([`readable`], once).
+///
+/// # Errors
+///
+/// As [`rewritten`].
+pub fn rewritten_read(
     body: &[u8],
+    read: &Result<Option<serde_json::Value>, Unrouted>,
     rewrite: &[u8],
     routed: &str,
-) -> Result<Option<Vec<u8>>, ModelRewritten> {
-    let Some(mut document) = rewrite_document(rewrite) else {
-        return Ok(None);
-    };
+) -> Result<Option<Vec<u8>>, NotApplied> {
     const MODEL: &str = "model";
     // The caller's `model`, as `arrive` read it (1.5.5's head).
-    let Ok(caller_model) = readable(body) else {
+    let Ok(caller_model) = read else {
+        return Ok(None);
+    };
+    // THE BODY'S WHOLE DOCUMENT FIRST, before anything the hook answered is read: 1.5.5 materialized
+    // it for its rewrite pass before any hook ran, and failed closed when it could not. A body whose
+    // document does not parse (an array too) is a FAULT whatever the hook's rewrite says or whether
+    // the rewrite can be read at all (a hook that echoes the bad member back answers a rewrite that
+    // does not read either): never "does not apply", never applied over it, never forwarded.
+    // Read to 1.5.5's depth (the request was held to it at `arrive`), not serde's one short.
+    let current = match parsed(body) {
+        Ok(serde_json::Value::Object(map)) => Some(map),
+        Ok(_) => None,
+        Err(_) => return Err(NotApplied::Fault),
+    };
+    let Some(mut document) = rewrite_document(rewrite) else {
         return Ok(None);
     };
     if let Some(named) = document.remove(MODEL) {
         let same = named.as_str() == Some(routed) || caller_model.as_ref() == Some(&named);
         if !same {
-            return Err(ModelRewritten {
+            return Err(NotApplied::Model(ModelRewritten {
                 named: named
                     .as_str()
                     .map_or_else(|| named.to_string(), str::to_string),
-            });
+            }));
         }
     }
-    // Read to 1.5.5's depth (the request was held to it at `arrive`), not serde's one short.
-    let current = match parsed(body) {
-        Ok(serde_json::Value::Object(map)) => map,
-        Ok(_) => return Ok(None),
-        // The request's document does not parse (a string 1.5.5's head never decoded, which the
-        // document parse refuses): the rewrite still applies, and the request is never forwarded
-        // un-rewritten. The hook's document replaces it whole, the caller's `model` kept.
-        Err(_) => {
-            let mut whole = document;
-            if let Some(model) = caller_model {
-                whole.insert(MODEL.to_string(), model);
-            }
-            return Ok(Some(
-                serde_json::Value::Object(whole).to_string().into_bytes(),
-            ));
-        }
+    let Some(current) = current else {
+        return Ok(None);
     };
     // The document as it replaces the request: the caller's `model`, then the document's members.
     let unchanged = current.len() == document.len() + usize::from(current.contains_key(MODEL))

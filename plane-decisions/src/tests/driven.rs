@@ -733,9 +733,9 @@ fn a_rewrite_naming_another_model_is_refused() {
     let body = br#"{"model":"m","state":{}}"#;
     assert_eq!(
         rewritten(body, &rewrite_of(r#"{"model":"other","state":{}}"#), "m"),
-        Err(ModelRewritten {
+        Err(NotApplied::Model(ModelRewritten {
             named: "other".to_string()
-        })
+        }))
     );
     let same = rewritten(body, &rewrite_of(r#"{"model":"m","state":{"a":1}}"#), "m")
         .expect("the routed model")
@@ -813,4 +813,283 @@ fn a_request_is_projected_over_its_dialects_models() {
         project(br#"{"model":"n"}"#, tail::DIALECT_JEV, &routes, |d| *d).entry,
         ""
     );
+}
+
+/// THE 1.5.5 PARITY TABLE FOR THE HEAD READ (`readable`): what 1.5.5's validating parse (sonic-rs
+/// 0.5.8: top-level keys and the values of `HEAD_KEYS` decoded, every other value SKIPPED by
+/// `skip_one(true)`) answered for each body. `Ok(model)` = accepted; `Err` = its 400. Derived from
+/// sonic-rs 0.5.8 `parser.rs` (`skip_escaped_chars`: after a backslash the next byte is consumed and
+/// for `u` four more, unchecked, with six bytes needed from the `u`; the other escapes come from
+/// `ESCAPED_TAB`; control bytes refuse) and `lazy_body.rs` (`Head`, `HeadKey`).
+#[test]
+fn the_head_read_matches_sonic_rs_0_5_8_on_escapes() {
+    let a = || Ok(Some(serde_json::json!("a")));
+    let table: &[(&str, &[u8], Result<Option<serde_json::Value>, Unrouted>)] = &[
+        // A skipped value's \u escape is never checked: invalid hex, lone surrogates (either half).
+        (
+            "invalid hex, skipped",
+            br#"{"model":"a","x":"\uZZZZ"}"#,
+            a(),
+        ),
+        ("short hex, skipped", br#"{"model":"a","x":"\u12G4"}"#, a()),
+        ("lone high, skipped", br#"{"model":"a","x":"\ud800"}"#, a()),
+        ("lone low, skipped", br#"{"model":"a","x":"\udc00"}"#, a()),
+        (
+            "reversed pair, skipped",
+            br#"{"model":"a","x":"\udc00\ud800"}"#,
+            a(),
+        ),
+        (
+            "valid pair, skipped",
+            br#"{"model":"a","x":"\ud83d\ude00"}"#,
+            a(),
+        ),
+        (
+            "nested in an array",
+            br#"{"model":"a","x":["\uXYZW",1]}"#,
+            a(),
+        ),
+        (
+            "a skipped object's key",
+            br#"{"model":"a","x":{"\ud800":"\uZZZZ"}}"#,
+            a(),
+        ),
+        (
+            "a skipped key before the model",
+            br#"{"x":"\uZZZZ","model":"a"}"#,
+            a(),
+        ),
+        ("root array element", br#"["\uZZZZ"]"#, Ok(None)),
+        // The four swallowed bytes may hold the closing quote, or an escaped one.
+        ("quote swallowed", br#"{"model":"a","x":"\u12\"}"}"#, a()),
+        (
+            "quote swallowed, then more",
+            br#"{"model":"a","x":"\u"   "}"#,
+            a(),
+        ),
+        ("escaped quote", br#"{"model":"a","x":"q\"uote"}"#, a()),
+        (
+            "escaped backslash then quote",
+            br#"{"model":"a","x":"q\\"}"#,
+            a(),
+        ),
+        (
+            "every simple escape",
+            br#"{"model":"a","x":"\"\\\/\b\f\n\r\t"}"#,
+            a(),
+        ),
+        // Refused in a skipped value all the same: a bad simple escape, a control byte.
+        (
+            "bad simple escape",
+            br#"{"model":"a","x":"\q"}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "bad escape x",
+            br#"{"model":"a","x":"\x41"}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "raw newline",
+            b"{\"model\":\"a\",\"x\":\"a\nb\"}",
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "raw tab",
+            b"{\"model\":\"a\",\"x\":\"a\tb\"}",
+            Err(Unrouted::Unparsable),
+        ),
+        // A backslash at the buffer's end: nothing to escape, or fewer than six bytes from the `u`.
+        (
+            "backslash at the end",
+            br#"{"model":"a","x":"\"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "u at the end",
+            br#"{"model":"a","x":"\u"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "u1234 at the end",
+            br#"["\u1234"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "five bytes from the u",
+            br#"["\u12"]"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "six bytes from the u, quote eaten",
+            br#"["\u123"]"#,
+            Err(Unrouted::Unparsable),
+        ),
+        ("valid, six bytes from the u", br#"["\u1234"]"#, Ok(None)),
+        // The values 1.5.5 DECODED refuse the same escapes: keys, the `HEAD_KEYS` values, a root string.
+        (
+            "invalid hex in a key",
+            br#"{"\uZZZZ":1}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "lone surrogate in a key",
+            br#"{"model":"a","\ud800":1}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "invalid hex in the model",
+            br#"{"model":"\uZZZZ"}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "lone surrogate in the model",
+            br#"{"model":"a\ud800"}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "invalid hex in system",
+            br#"{"model":"a","system":"\uZZZZ"}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "lone surrogate in system",
+            br#"{"model":"a","system":"\ud800"}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "lone surrogate in stream",
+            br#"{"model":"a","stream":"\ud800"}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "in stream_options",
+            br#"{"model":"a","stream_options":{"k":"\uZZZZ"}}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "in the shim key",
+            br#"{"model":"a","__busbar_gemini_json_array":["\ud800"]}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "in a non-string model",
+            br#"{"model":{"\ud800":1}}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        ("root string", br#""\uZZZZ""#, Err(Unrouted::Unparsable)),
+        // An escape decoded: a key spelled with one still names the model.
+        ("escaped key", br#"{"mod\u0065l":"a"}"#, a()),
+        // The rest of the grammar stays strict.
+        (
+            "trailing bytes",
+            br#"{"model":"a"} x"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "trailing comma",
+            br#"{"model":"a","x":[1,]}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "leading zero",
+            br#"{"model":"a","x":01}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "bare minus",
+            br#"{"model":"a","x":-}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "fraction needs a digit",
+            br#"{"model":"a","x":1.}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "exponent needs a digit",
+            br#"{"model":"a","x":1e}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        ("numbers", br#"{"model":"a","x":[-0,1.5e+3,2E-2,0.0]}"#, a()),
+        (
+            "bad literal",
+            br#"{"model":"a","x":tru}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "truncated",
+            br#"{"model":"a","x":[1,2"#,
+            Err(Unrouted::Unparsable),
+        ),
+        ("empty", b"", Err(Unrouted::Unparsable)),
+    ];
+    for (name, body, want) in table {
+        assert_eq!(
+            &readable(body),
+            want,
+            "{name}: {}",
+            String::from_utf8_lossy(body)
+        );
+    }
+}
+
+/// The skipped-escape cases 1.5.5 SERVED are the ones its DOM parse (a rewrite hook's pass) refused:
+/// the whole document does not parse, which is what a rewrite over such a body must FAULT on.
+#[test]
+fn a_body_the_head_read_accepts_may_not_parse_as_a_document() {
+    for body in [
+        &br#"{"model":"a","x":"\uZZZZ"}"#[..],
+        br#"{"model":"a","x":"\ud800"}"#,
+        br#"{"model":"a","x":"\u12\"}"}"#,
+        br#"["\uZZZZ"]"#,
+    ] {
+        assert!(readable(body).is_ok(), "{}", String::from_utf8_lossy(body));
+        assert!(parsed(body).is_err(), "{}", String::from_utf8_lossy(body));
+        assert!(!valid(body), "{}", String::from_utf8_lossy(body));
+    }
+    for body in [
+        &br#"{"model":"a","x":"\u00e9\ud83d\ude00"}"#[..],
+        br#"[1,{"a":null}]"#,
+    ] {
+        assert!(parsed(body).is_ok() && valid(body));
+    }
+}
+
+/// RED (review, B2): a rewrite over a body whose document does not parse is a FAULT, decided before
+/// the hook's own document is read: a hook that echoes the bad member back and drops `pii` answers a
+/// rewrite that does not read either, which was "does not apply" and let the body through
+/// un-redacted. A top-level array that does not parse is the same FAULT, never replaced by an
+/// object; an unreadable rewrite over a body that parses still leaves the request.
+#[test]
+fn a_rewrite_over_a_body_that_does_not_parse_is_a_fault_before_the_rewrite_is_read() {
+    let echo = br#"{"messages":[{"role":"user","content":"{\"x\":\"\\ud800\"}"}],"tools":[]}"#;
+    for body in [
+        &br#"{"model":"m","pii":"123-45-6789","x":"\ud800"}"#[..],
+        br#"["\ud800"]"#,
+    ] {
+        for rewrite in [&echo[..], &rewrite_of(r#"{"state":{}}"#)[..], b"not json"] {
+            assert_eq!(rewritten(body, rewrite, "m"), Err(NotApplied::Fault));
+        }
+    }
+    assert_eq!(rewritten(br#"{"model":"m"}"#, b"not json", "m"), Ok(None));
+}
+
+/// B3: the splice check reads the document without building it, as strictly as the DOM parse.
+#[test]
+fn spliceable_validates_without_a_second_head_read() {
+    let bad = br#"{"model":"jev","x":"\uZZZZ"}"#;
+    assert!(readable(bad).is_ok());
+    assert!(!spliceable(bad, "jev-1"));
+    assert!(
+        spliceable_named(bad, Some("jev"), "jev"),
+        "no rewrite needed"
+    );
+    assert!(spliceable_named(bad, None, "jev-1"), "no model named");
+    assert!(!spliceable_named(bad, Some("jev"), "jev-1"));
+    assert!(spliceable_named(
+        br#"{"model":"jev"}"#,
+        Some("jev"),
+        "jev-1"
+    ));
 }
