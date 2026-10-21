@@ -1123,6 +1123,49 @@ fn the_head_read_matches_1_5_5_on_root_numbers_and_unbounded_skips() {
             r#"{"model":"a","stream_options":{"k":-1e400}}"#.into(),
             refused(),
         ),
+        // sonic-number 0.1.2's own reading (`parse_exponent` stops at 1000 and drops the rest of
+        // the exponent; 19 significant digits are kept): where it parts from the true value, 1.5.5's
+        // answer stands (opus re-review, B2).
+        (
+            "a capped exponent on a long fraction, served",
+            format!("0.{}1e12300", "0".repeat(2000)),
+            served(),
+        ),
+        (
+            "the same, negative",
+            format!("-0.{}1e12300", "0".repeat(2000)),
+            served(),
+        ),
+        (
+            "a capped exponent on a long integer, refused",
+            format!("1{}e-14800", "0".repeat(15000)),
+            refused(),
+        ),
+        (
+            "the smallest capped case, 1e308, served",
+            format!("0.{}1e10000", "0".repeat(691)),
+            served(),
+        ),
+        (
+            "one zero fewer, 1e309, refused",
+            format!("0.{}1e10000", "0".repeat(690)),
+            refused(),
+        ),
+        (
+            "a capped exponent in stream, served",
+            format!(r#"{{"model":"a","stream":0.{}1e12300}}"#, "0".repeat(2000)),
+            a(),
+        ),
+        (
+            "a capped exponent in stream, refused",
+            format!(r#"{{"model":"a","stream":1{}e-14800}}"#, "0".repeat(15000)),
+            refused(),
+        ),
+        (
+            "a capped exponent in a skipped member, never read",
+            format!(r#"{{"model":"a","x":1{}e-14800}}"#, "0".repeat(15000)),
+            a(),
+        ),
         // Depth: the scan's own edge, without the escape.
         (
             "127 under the root",
@@ -1185,6 +1228,26 @@ fn the_head_read_matches_1_5_5_on_root_numbers_and_unbounded_skips() {
             body.get(..80).unwrap_or(body)
         );
     }
+}
+
+/// RED (opus re-review, B2): the document parse reads a number as 1.5.5's did
+/// (`crate::sonic_number`), wherever it sits: a capped exponent 1.5.5 read as in range is a
+/// document, one it read as out of range is none, whatever the number's true value.
+#[test]
+fn the_document_reads_a_number_as_1_5_5_read_it() {
+    let served = format!(r#"{{"model":"a","x":[0.{}1e12300]}}"#, "0".repeat(2000));
+    assert!(valid(served.as_bytes()));
+    let refused = format!(r#"{{"model":"a","x":[1{}e-14800]}}"#, "0".repeat(15000));
+    assert!(
+        readable(refused.as_bytes()).is_ok(),
+        "a skipped member is never read"
+    );
+    assert!(!valid(refused.as_bytes()));
+    assert!(parsed(refused.as_bytes()).is_err());
+    assert!(valid(
+        br#"{"model":"a","x":[1e308,-0,18446744073709551616]}"#
+    ));
+    assert!(!valid(br#"{"model":"a","x":[1e309]}"#));
 }
 
 /// The skipped-escape cases 1.5.5 SERVED are the ones its DOM parse (a rewrite hook's pass) refused:

@@ -8,7 +8,8 @@
 //! links it as a compiled-in row; the sibling `busbar-plane-decisions-plugin` cdylib exports the
 //! same function as its one symbol, so the linked and the dropped-in door cannot answer
 //! differently. The crate's one busbar dependency is `busbar-contract`; beside it, `serde` and
-//! `serde_json` read the `decisions:` section and the handful of pointers the plane reads.
+//! `serde_json` read the `decisions:` section and the handful of pointers the plane reads, and
+//! `sonic_number` (ported from sonic-number 0.1.2) reads a number exactly as 1.5.5 did.
 //!
 //! Each dialect has one exact claim, its decision call (`jev`'s `POST /v1/systemone`, `nanojev`'s
 //! `POST /api/evaluate`), published when a model of that dialect is configured. A request routes
@@ -55,6 +56,7 @@ mod driven;
 mod meta;
 mod ops;
 mod plane_door;
+mod sonic_number;
 
 /// THE DOOR: this plugin's one public item (BUSBAR-1.6.0.md l.3567, Crate shape).
 pub use plane_door::door;

@@ -286,10 +286,13 @@ fn exceeds_depth(bytes: &[u8], max: usize) -> bool {
 ///
 /// [`Unrouted::Unparsable`], as above.
 pub fn parsed(body: &[u8]) -> Result<serde_json::Value, Unrouted> {
-    if exceeds_depth(body, MAX_PARSE_DEPTH) {
+    // The document 1.5.5 would build ([`valid`]), and only then built, here by serde. A number
+    // 1.5.5's reader took as finite through its exponent cap but whose true value overflows
+    // ([`crate::sonic_number`]) is one serde refuses: that body is refused here though 1.5.5
+    // built it.
+    if !valid(body) {
         return Err(Unrouted::Unparsable);
     }
-    // 1.5.5 validated the whole input as UTF-8 before it parsed it (sonic-rs `from_slice`).
     let text = core::str::from_utf8(body).map_err(|_| Unrouted::Unparsable)?;
     // The depth is bounded by the scan above, at 1.5.5's own; serde's limit stops one level short.
     let mut de = serde_json::Deserializer::from_str(text);
@@ -373,7 +376,7 @@ pub fn readable(body: &[u8]) -> Result<Option<serde_json::Value>, Unrouted> {
         return Err(Unrouted::Unparsable);
     }
     core::str::from_utf8(body).map_err(|_| Unrouted::Unparsable)?;
-    let mut skip = Skip { bytes: body, at: 0 };
+    let mut skip = Skip::lenient(body);
     let model = skip.top_level().map_err(|()| Unrouted::Unparsable)?;
     if skip.next_non_space().is_some() {
         return Err(Unrouted::Unparsable);
@@ -381,15 +384,25 @@ pub fn readable(body: &[u8]) -> Result<Option<serde_json::Value>, Unrouted> {
     Ok(model)
 }
 
-/// One decoded value, strictly: what 1.5.5 DECODED (a top-level key, a value of [`HEAD_KEYS`], a
-/// root scalar), where an escape must be whole, a surrogate must pair and a number must be finite.
-/// The span was skipped first ([`Skip`]), its depth bounded by the caller.
+/// Whether `span` is one value as 1.5.5 DECODED it (a top-level key, a value of [`HEAD_KEYS`], a
+/// root scalar), read strictly ([`Skip::strict`]): every escape whole, every surrogate paired and
+/// every number one 1.5.5's reader took ([`crate::sonic_number`]). The span was skipped first
+/// ([`Skip`]), its depth bounded by the caller.
+fn decodes(span: &[u8]) -> bool {
+    let mut strict = Skip::strict(span);
+    strict.skip_one().is_ok() && strict.next_non_space().is_none()
+}
+
+/// [`decodes`], and the value built. A number serde reads as out of range where 1.5.5's reader did
+/// not (the exponent cap of [`crate::sonic_number`]) is built as `null`: only the `model` is kept,
+/// and a `model` that is no string is none ([`Unrouted::NotAName`]) either way.
 fn decoded(span: &[u8]) -> Result<serde_json::Value, ()> {
+    if !decodes(span) {
+        return Err(());
+    }
     let mut de = serde_json::Deserializer::from_slice(span);
     de.disable_recursion_limit();
-    let value = serde::Deserialize::deserialize(&mut de).map_err(|_| ())?;
-    de.end().map_err(|_| ())?;
-    Ok(value)
+    Ok(serde::Deserialize::deserialize(&mut de).unwrap_or(serde_json::Value::Null))
 }
 
 /// sonic-rs 0.5.8's CHECKED SKIP (`Parser::skip_one(true)`, what `serde::de::IgnoredAny` ran in
@@ -399,15 +412,38 @@ fn decoded(span: &[u8]) -> Result<serde_json::Value, ()> {
 /// may be anything but the buffer's end). So a value 1.5.5 only skipped accepts `\uZZZZ` and a lone
 /// surrogate, while one it decoded refuses them ([`decoded`]). sonic's skip has no depth bound; this
 /// one keeps its open containers on the heap, not the stack, so no depth overflows it.
+///
+/// STRICT ([`Skip::strict`]), the same walk reads a value as 1.5.5 DECODED it: each string is also
+/// decoded (an escape whole, a surrogate paired) and each number read by 1.5.5's own reader,
+/// [`crate::sonic_number`], which refuses one that overflows to infinity as 1.5.5 refused it.
 struct Skip<'b> {
     bytes: &'b [u8],
     at: usize,
+    strict: bool,
 }
 
 /// The bytes a backslash may be followed by (sonic-rs 0.5.8 `ESCAPED_TAB`), `u` apart.
 const SIMPLE_ESCAPES: &[u8] = b"\"\\/bfnrt";
 
-impl Skip<'_> {
+impl<'b> Skip<'b> {
+    /// sonic's checked skip over `bytes`.
+    const fn lenient(bytes: &'b [u8]) -> Self {
+        Skip {
+            bytes,
+            at: 0,
+            strict: false,
+        }
+    }
+
+    /// The walk of a value 1.5.5 decoded, over `bytes`.
+    const fn strict(bytes: &'b [u8]) -> Self {
+        Skip {
+            bytes,
+            at: 0,
+            strict: true,
+        }
+    }
+
     fn peek(&self) -> Option<u8> {
         self.bytes.get(self.at).copied()
     }
@@ -446,8 +482,9 @@ impl Skip<'_> {
             _ => {
                 let start = self.at;
                 self.skip_one()?;
-                decoded(&self.bytes[start..self.at])?;
-                Ok(None)
+                decodes(&self.bytes[start..self.at])
+                    .then_some(None)
+                    .ok_or(())
             }
         }
     }
@@ -476,9 +513,11 @@ impl Skip<'_> {
                 if deepest > HEAD_VALUE_DEPTH {
                     return Err(());
                 }
-                let value = decoded(&self.bytes[start..self.at])?;
+                let span = &self.bytes[start..self.at];
                 if key == "model" {
-                    model = Some(value);
+                    model = Some(decoded(span)?);
+                } else if !decodes(span) {
+                    return Err(());
                 }
             }
             match self.next_non_space() {
@@ -587,7 +626,17 @@ impl Skip<'_> {
 
     /// `do_skip_number`: an optional `-`, a digit (no leading zero before another), at most one
     /// fraction (a digit required) and an exponent (a digit required). Its range is not checked.
-    fn skip_number(&mut self, mut first: u8) -> Result<(), ()> {
+    fn skip_number(&mut self, first: u8) -> Result<(), ()> {
+        let start = self.at - 1;
+        self.skip_number_token(first)?;
+        if self.strict && !crate::sonic_number::finite(&self.bytes[start..self.at]) {
+            return Err(());
+        }
+        Ok(())
+    }
+
+    /// One number's grammar, its first byte consumed.
+    fn skip_number_token(&mut self, mut first: u8) -> Result<(), ()> {
         if first == b'-' {
             first = self.skip_digit()?;
         }
@@ -632,6 +681,16 @@ impl Skip<'_> {
     /// `skip_string`, the opening quote consumed: a control character refuses, a backslash is
     /// followed by [`Self::skip_escape`].
     fn skip_string(&mut self) -> Result<(), ()> {
+        let start = self.at - 1;
+        self.skip_string_token()?;
+        if self.strict && !string_decodes(&self.bytes[start..self.at]) {
+            return Err(());
+        }
+        Ok(())
+    }
+
+    /// One string's bytes, its opening quote consumed.
+    fn skip_string_token(&mut self) -> Result<(), ()> {
         loop {
             match self.bump().ok_or(())? {
                 b'\\' => self.skip_escape()?,
@@ -810,18 +869,24 @@ pub fn spliceable_named(body: &[u8], named: Option<&str>, upstream: &str) -> boo
 }
 
 /// Whether the body's whole document parses, as 1.5.5's DOM parse read it (strings decoded, so a
-/// bad escape or a lone surrogate refuses), by a walk that builds no tree.
+/// bad escape or a lone surrogate refuses; numbers read by 1.5.5's own reader,
+/// [`crate::sonic_number`]), by a walk that builds no tree ([`Skip::strict`]).
 #[must_use]
 pub fn valid(body: &[u8]) -> bool {
     if exceeds_depth(body, MAX_PARSE_DEPTH) || core::str::from_utf8(body).is_err() {
         return false;
     }
-    let mut de = serde_json::Deserializer::from_slice(body);
-    de.disable_recursion_limit();
+    decodes(body)
+}
+
+/// Whether `span`, one string with its quotes, decodes as 1.5.5 decoded a string: every escape
+/// whole and every surrogate paired. Borrowed where it has no escape: nothing is built.
+fn string_decodes(span: &[u8]) -> bool {
+    let mut de = serde_json::Deserializer::from_slice(span);
     <Valid as serde::Deserialize>::deserialize(&mut de).is_ok() && de.end().is_ok()
 }
 
-/// [`valid`]'s walk: every value visited, none kept.
+/// [`string_decodes`]'s visit: the value read, nothing kept.
 struct Valid;
 
 impl<'de> serde::Deserialize<'de> for Valid {
