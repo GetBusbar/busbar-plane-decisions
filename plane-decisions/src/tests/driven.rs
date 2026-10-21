@@ -1035,6 +1035,158 @@ fn the_head_read_matches_sonic_rs_0_5_8_on_escapes() {
     }
 }
 
+/// THE 1.5.5 PARITY TABLE FOR A ROOT SCALAR'S RANGE AND A SKIPPED VALUE'S DEPTH (`readable`), each
+/// outcome what 1.5.5's head parse answered (v1.5.5 `lazy_body.rs`, `Head`, over sonic-rs 0.5.8).
+///
+/// RED (opus review, B2): a root number 1.5.5 DECODED (`deserialize_any`, `parse_number`) refuses
+/// when it overflows to infinity (sonic-number 0.1.2 `FloatMustBeFinite`), where the head read only
+/// skipped it and served it. An integer past `u64` or `i64` is read as a finite double, served; a
+/// number inside a skipped value is never ranged; one inside a head value is.
+///
+/// RED (opus review, B3): sonic's checked skip has no depth bound, and a `\u` escape that swallows
+/// the closing quote leaves 1.5.5's depth scan reading the rest of the body as a string, so a body
+/// nested past 128 behind one was served, where the head read refused it at 128. A head value is
+/// held to the 253 levels sonic's deserializer left it (255, less one for the root object, less the
+/// level that refuses).
+#[test]
+fn the_head_read_matches_1_5_5_on_root_numbers_and_unbounded_skips() {
+    type Read = Result<Option<serde_json::Value>, Unrouted>;
+    let a = || Ok(Some(serde_json::json!("a")));
+    let served = || Ok(None);
+    let refused = || Err(Unrouted::Unparsable);
+    let nested = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
+    // `"\uAAA\"`: sonic eats `uAAA\` after the backslash and the next quote closes the string; the
+    // depth scan reads `\"` as an escaped quote, and the string as still open.
+    let trick = r#"{"model":"a","x":"\uAAA\","#;
+    let one_then_zeros = |n: usize| format!("1{}", "0".repeat(n));
+    let table: Vec<(&str, String, Read)> = vec![
+        ("1e400", "1e400".into(), refused()),
+        ("-1e400", "-1e400".into(), refused()),
+        ("1e308", "1e308".into(), served()),
+        ("1e309", "1e309".into(), refused()),
+        ("-1e309", "-1e309".into(), refused()),
+        (
+            "the largest double",
+            "1.7976931348623157e308".into(),
+            served(),
+        ),
+        (
+            "rounds to the largest double",
+            "1.7976931348623158e308".into(),
+            served(),
+        ),
+        ("rounds past it", "1.7976931348623159e308".into(), refused()),
+        ("u64::MAX", "18446744073709551615".into(), served()),
+        ("past u64", "18446744073709551616".into(), served()),
+        ("i64::MIN", "-9223372036854775808".into(), served()),
+        ("past i64", "-9223372036854775809".into(), served()),
+        ("309 digits", one_then_zeros(308), served()),
+        ("310 digits", one_then_zeros(309), refused()),
+        ("401 digits", one_then_zeros(400), refused()),
+        (
+            "-401 digits",
+            format!("-{}", one_then_zeros(400)),
+            refused(),
+        ),
+        ("underflow", "1e-400".into(), served()),
+        ("zero, a large exponent", "0e99999".into(), served()),
+        (
+            "zero fraction, a large exponent",
+            "0.0e99999".into(),
+            served(),
+        ),
+        (
+            "exponent past i32",
+            "1e99999999999999999999".into(),
+            refused(),
+        ),
+        ("spaced", " 7 ".into(), served()),
+        ("literal", "true".into(), served()),
+        ("in a root array, skipped", "[1e400]".into(), served()),
+        (
+            "in a skipped member",
+            r#"{"model":"a","x":1e400}"#.into(),
+            a(),
+        ),
+        (
+            "401 digits in a skipped member",
+            format!(r#"{{"model":"a","x":[{}]}}"#, one_then_zeros(400)),
+            a(),
+        ),
+        (
+            "in stream, decoded",
+            r#"{"model":"a","stream":1e400}"#.into(),
+            refused(),
+        ),
+        (
+            "in stream_options, decoded",
+            r#"{"model":"a","stream_options":{"k":-1e400}}"#.into(),
+            refused(),
+        ),
+        // Depth: the scan's own edge, without the escape.
+        (
+            "127 under the root",
+            format!(r#"{{"model":"a","y":{}}}"#, nested(127)),
+            a(),
+        ),
+        (
+            "128 under the root",
+            format!(r#"{{"model":"a","y":{}}}"#, nested(128)),
+            refused(),
+        ),
+        // Behind the escape: a skipped value has no bound.
+        (
+            "200 behind the escape",
+            format!(r#"{trick}"y":{}}}"#, nested(200)),
+            a(),
+        ),
+        (
+            "1000 behind the escape",
+            format!(r#"{trick}"y":{}}}"#, nested(1000)),
+            a(),
+        ),
+        (
+            "1000 behind the escape, unclosed",
+            format!(r#"{trick}"y":{}}}"#, &nested(1000)[1..]),
+            refused(),
+        ),
+        (
+            "1000 in a root array",
+            format!(r#"["\uAAA\",{}]"#, nested(1000)),
+            served(),
+        ),
+        // A head value behind the escape: 253 levels, not 254.
+        (
+            "system, 253",
+            format!(r#"{trick}"system":{}}}"#, nested(253)),
+            a(),
+        ),
+        (
+            "system, 254",
+            format!(r#"{trick}"system":{}}}"#, nested(254)),
+            refused(),
+        ),
+        (
+            "system object, 253",
+            format!(r#"{trick}"system":{{"a":{}}}}}"#, nested(252)),
+            a(),
+        ),
+        (
+            "system object, 254",
+            format!(r#"{trick}"system":{{"a":{}}}}}"#, nested(253)),
+            refused(),
+        ),
+    ];
+    for (name, body, want) in &table {
+        assert_eq!(
+            &readable(body.as_bytes()),
+            want,
+            "{name}: {}",
+            body.get(..80).unwrap_or(body)
+        );
+    }
+}
+
 /// The skipped-escape cases 1.5.5 SERVED are the ones its DOM parse (a rewrite hook's pass) refused:
 /// the whole document does not parse, which is what a rewrite over such a body must FAULT on.
 #[test]

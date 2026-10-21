@@ -344,14 +344,26 @@ const HEAD_KEYS: &[&str] = &[
     "system",
 ];
 
+/// THE DEEPEST VALUE OF [`HEAD_KEYS`] 1.5.5 DECODED (sonic-rs 0.5.8 `serde/de.rs`,
+/// `MAX_ALLOWED_DEPTH` and `with_depth_limit`): its deserializer starts with `u8::MAX` (255) levels,
+/// each object or array it builds takes one and the 255th refuses `RecursionLimitExceeded`; the root
+/// object takes the first, so a head value may nest 253 deep. 1.5.5's depth scan ([`exceeds_depth`])
+/// holds a body to 128 first, but a skipped value whose `\u` escape swallows the closing quote
+/// ([`Skip::skip_escape`]) leaves the scan reading the rest of the body as a string, so a head value
+/// after it reaches its decode however deep it nests. Held to this, the decode's recursion is
+/// bounded where 1.5.5's was.
+const HEAD_VALUE_DEPTH: usize = 253;
+
 /// THE BODY AS 1.5.5 READ IT AT INGRESS (v1.5.5 `crates/busbar/src/ingress/dispatch.rs:101-116`,
-/// `LazyBody::parse`): at most [`MAX_PARSE_DEPTH`] deep, UTF-8 throughout, then one validating
-/// parse that builds no document (trailing bytes, a bad number, a bad escape or a truncated document
-/// refuse), decoding the top-level keys and the values of [`HEAD_KEYS`] (`lazy_body.rs:122-127`,
-/// `Head`) and only SKIPPING every other value, as sonic-rs 0.5.8 skipped it ([`Skip`]): a
-/// `\u` escape inside a skipped value is not checked for its hex digits. Answers the top-level
-/// `model`'s value, the last one where it repeats (1.5.5's map insert); `None` when the body names
-/// none or is no object.
+/// `LazyBody::parse`): at most [`MAX_PARSE_DEPTH`] deep by 1.5.5's scan, UTF-8 throughout, then one
+/// validating parse that builds no document (trailing bytes, a bad number, a bad escape or a
+/// truncated document refuse), decoding the top-level keys, the values of [`HEAD_KEYS`] and a root
+/// scalar (`lazy_body.rs:122-127`, `Head`: `deserialize_any`, so a root number that overflows to
+/// infinity refuses, sonic-number 0.1.2 `FloatMustBeFinite`) and only SKIPPING every other value, as
+/// sonic-rs 0.5.8 skipped it ([`Skip`]): a `\u` escape inside a skipped value is not checked for its
+/// hex digits, a skipped number is not checked for its range and a skipped value has no depth bound.
+/// Answers the top-level `model`'s value, the last one where it repeats (1.5.5's map insert); `None`
+/// when the body names none or is no object.
 ///
 /// # Errors
 ///
@@ -370,7 +382,8 @@ pub fn readable(body: &[u8]) -> Result<Option<serde_json::Value>, Unrouted> {
 }
 
 /// One decoded value, strictly: what 1.5.5 DECODED (a top-level key, a value of [`HEAD_KEYS`], a
-/// root string), where an escape must be whole and a surrogate must pair.
+/// root scalar), where an escape must be whole, a surrogate must pair and a number must be finite.
+/// The span was skipped first ([`Skip`]), its depth bounded by the caller.
 fn decoded(span: &[u8]) -> Result<serde_json::Value, ()> {
     let mut de = serde_json::Deserializer::from_slice(span);
     de.disable_recursion_limit();
@@ -384,7 +397,8 @@ fn decoded(span: &[u8]) -> Result<serde_json::Value, ()> {
 /// simple escapes are validated, and a `\u` escape is skipped WITHOUT looking at its hex
 /// (`skip_escaped_chars`: after a backslash it consumes the next byte, and for `u` four more, which
 /// may be anything but the buffer's end). So a value 1.5.5 only skipped accepts `\uZZZZ` and a lone
-/// surrogate, while one it decoded refuses them ([`decoded`]).
+/// surrogate, while one it decoded refuses them ([`decoded`]). sonic's skip has no depth bound; this
+/// one keeps its open containers on the heap, not the stack, so no depth overflows it.
 struct Skip<'b> {
     bytes: &'b [u8],
     at: usize,
@@ -417,7 +431,7 @@ impl Skip<'_> {
     }
 
     /// The root value: an object's keys and head values decoded, an array's elements skipped, a
-    /// root string decoded, any other scalar checked. Answers the `model` value.
+    /// root scalar (string, number or literal) decoded. Answers the `model` value.
     fn top_level(&mut self) -> Result<Option<serde_json::Value>, ()> {
         self.eat_spaces();
         match self.peek() {
@@ -425,14 +439,14 @@ impl Skip<'_> {
                 self.at += 1;
                 self.head_object()
             }
-            Some(b'"') => {
-                let start = self.at;
-                self.skip_one(0)?;
-                decoded(&self.bytes[start..self.at])?;
+            Some(b'[') => {
+                self.skip_one()?;
                 Ok(None)
             }
             _ => {
-                self.skip_one(0)?;
+                let start = self.at;
+                self.skip_one()?;
+                decoded(&self.bytes[start..self.at])?;
                 Ok(None)
             }
         }
@@ -457,8 +471,11 @@ impl Skip<'_> {
             }
             self.eat_spaces();
             let start = self.at;
-            self.skip_one(1)?;
+            let deepest = self.skip_one()?;
             if HEAD_KEYS.contains(&key.as_str()) {
+                if deepest > HEAD_VALUE_DEPTH {
+                    return Err(());
+                }
                 let value = decoded(&self.bytes[start..self.at])?;
                 if key == "model" {
                     model = Some(value);
@@ -472,19 +489,71 @@ impl Skip<'_> {
         }
     }
 
-    /// One value skipped (`skip_one(true)`). `depth` is this value's nesting: this skipper and
-    /// 1.5.5's depth scan ([`exceeds_depth`]) can read a `\u` escape's payload differently, so a
-    /// body nested past [`MAX_PARSE_DEPTH`] in this reading is refused here too.
-    fn skip_one(&mut self, depth: usize) -> Result<(), ()> {
-        match self.next_non_space().ok_or(())? {
-            first @ (b'-' | b'0'..=b'9') => self.skip_number(first),
-            b'"' => self.skip_string(),
-            b'{' if depth < MAX_PARSE_DEPTH => self.skip_object(depth + 1),
-            b'[' if depth < MAX_PARSE_DEPTH => self.skip_array(depth + 1),
-            b't' => self.skip_literal(b"rue"),
-            b'f' => self.skip_literal(b"alse"),
-            b'n' => self.skip_literal(b"ull"),
-            _ => Err(()),
+    /// One value skipped (`skip_one(true)`, with sonic's `skip_object` and `skip_array`), without
+    /// recursion: the containers still open are kept innermost last (`true` an object). Answers the
+    /// deepest nesting the value reached: `0` for a scalar, `1` for `[]`.
+    fn skip_one(&mut self) -> Result<usize, ()> {
+        let mut open: Vec<bool> = Vec::new();
+        let mut deepest = 0;
+        loop {
+            match self.next_non_space().ok_or(())? {
+                first @ (b'-' | b'0'..=b'9') => self.skip_number(first)?,
+                b'"' => self.skip_string()?,
+                b't' => self.skip_literal(b"rue")?,
+                b'f' => self.skip_literal(b"alse")?,
+                b'n' => self.skip_literal(b"ull")?,
+                b'{' => {
+                    deepest = deepest.max(open.len() + 1);
+                    match self.next_non_space() {
+                        Some(b'}') => {}
+                        Some(b'"') => {
+                            open.push(true);
+                            self.skip_key()?;
+                            continue;
+                        }
+                        _ => return Err(()),
+                    }
+                }
+                b'[' => {
+                    deepest = deepest.max(open.len() + 1);
+                    self.eat_spaces();
+                    match self.peek().ok_or(())? {
+                        b']' => self.at += 1,
+                        _ => {
+                            open.push(false);
+                            continue;
+                        }
+                    }
+                }
+                _ => return Err(()),
+            }
+            // A value ended: close every container it was the last of, up to one it is not.
+            loop {
+                let Some(&object) = open.last() else {
+                    return Ok(deepest);
+                };
+                match (self.next_non_space(), object) {
+                    (Some(b','), false) => break,
+                    (Some(b','), true) if self.next_non_space() == Some(b'"') => {
+                        self.skip_key()?;
+                        break;
+                    }
+                    (Some(b']'), false) | (Some(b'}'), true) => {
+                        open.pop();
+                    }
+                    _ => return Err(()),
+                }
+            }
+        }
+    }
+
+    /// A skipped object's key and its colon, the key's opening quote consumed.
+    fn skip_key(&mut self) -> Result<(), ()> {
+        self.skip_string()?;
+        if self.next_non_space() == Some(b':') {
+            Ok(())
+        } else {
+            Err(())
         }
     }
 
@@ -517,7 +586,7 @@ impl Skip<'_> {
     }
 
     /// `do_skip_number`: an optional `-`, a digit (no leading zero before another), at most one
-    /// fraction (a digit required) and an exponent (a digit required).
+    /// fraction (a digit required) and an exponent (a digit required). Its range is not checked.
     fn skip_number(&mut self, mut first: u8) -> Result<(), ()> {
         if first == b'-' {
             first = self.skip_digit()?;
@@ -586,48 +655,6 @@ impl Skip<'_> {
             c => {
                 self.at += 1;
                 SIMPLE_ESCAPES.contains(&c).then_some(()).ok_or(())
-            }
-        }
-    }
-
-    /// `skip_object`, the `{` consumed.
-    fn skip_object(&mut self, depth: usize) -> Result<(), ()> {
-        match self.next_non_space() {
-            Some(b'}') => return Ok(()),
-            Some(b'"') => {}
-            _ => return Err(()),
-        }
-        loop {
-            self.skip_string()?;
-            if self.next_non_space() != Some(b':') {
-                return Err(());
-            }
-            self.skip_one(depth)?;
-            match self.next_non_space() {
-                Some(b'}') => return Ok(()),
-                Some(b',') if self.next_non_space() == Some(b'"') => {}
-                _ => return Err(()),
-            }
-        }
-    }
-
-    /// `skip_array`, the `[` consumed.
-    fn skip_array(&mut self, depth: usize) -> Result<(), ()> {
-        self.eat_spaces();
-        match self.peek() {
-            Some(b']') => {
-                self.at += 1;
-                return Ok(());
-            }
-            None => return Err(()),
-            Some(_) => {}
-        }
-        loop {
-            self.skip_one(depth)?;
-            match self.next_non_space() {
-                Some(b']') => return Ok(()),
-                Some(b',') => {}
-                _ => return Err(()),
             }
         }
     }

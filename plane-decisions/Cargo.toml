@@ -69,7 +69,10 @@ busbar-contract = { workspace = true }
 # this crate parses ONLY the handful of declared pointers (never `state`/`answers`) to build facts.
 # `unbounded_depth`: a body the span scanner cannot walk is read as 1.5.5 read it, to its parse depth
 # of 128 (`driven::MAX_PARSE_DEPTH`, scanned first); serde's own limit stops one level short of it.
-serde_json = { workspace = true, features = ["unbounded_depth"] }
+# `float_roundtrip`: a number is read to the nearest double, as sonic-rs 0.5.8 (sonic-number 0.1.2)
+# read it in 1.5.5, so a value 1.5.5 decoded is finite or overflows exactly where 1.5.5's did
+# (`1.7976931348623158e308` is the largest double; `1.7976931348623159e308` is out of range).
+serde_json = { workspace = true, features = ["unbounded_depth", "float_roundtrip"] }
 serde = { workspace = true }
 
 [dev-dependencies]

@@ -943,3 +943,49 @@ fn an_invalid_hex_escape_in_a_skipped_value_is_served_as_1_5_5_served_it() {
         "{refused:?}"
     );
 }
+
+/// RED (opus review, B2 and B3; 1.5.5 parity, v1.5.5 `lazy_body.rs` `Head` over sonic-rs 0.5.8): a
+/// root number 1.5.5 decoded and found out of range (sonic-number 0.1.2 `FloatMustBeFinite`) is the
+/// parse 400, where one in range is served over the one model; and a value nested past 128 behind a
+/// `\u` escape that swallows its string's closing quote (which 1.5.5's depth scan reads as still
+/// open) is served, as sonic's unbounded skip served it.
+#[test]
+fn a_root_number_out_of_range_is_refused_and_a_skipped_value_has_no_depth_bound() {
+    let one = open(ONE);
+    for (unit, body) in [
+        (1, &b"1e400"[..]),
+        (2, b"-1e309"),
+        (3, b"1.7976931348623159e308"),
+    ] {
+        let refused = one.arrive(unit, body);
+        assert_eq!(
+            (refused.outcome, refused.status, refused.text.as_str()),
+            (
+                Outcome::Refused,
+                400,
+                "We could not parse the JSON body of your request."
+            ),
+            "{refused:?}"
+        );
+    }
+    for (unit, body) in [
+        (4, &b"1e308"[..]),
+        (5, b"18446744073709551616"),
+        (6, b"[1e400]"),
+    ] {
+        let served = one.arrive(unit, body);
+        assert_eq!(
+            (served.outcome, served.entry.as_str()),
+            (Outcome::Ready, "jev"),
+            "{served:?}"
+        );
+    }
+    let two = open(TWO);
+    let deep = format!(r#"{{"model":"a","x":"\uAAA\","y":{}}}"#, nested(200));
+    let served = two.arrive(1, deep.as_bytes());
+    assert_eq!(
+        (served.outcome, served.entry.as_str()),
+        (Outcome::Ready, "a"),
+        "{served:?}"
+    );
+}
