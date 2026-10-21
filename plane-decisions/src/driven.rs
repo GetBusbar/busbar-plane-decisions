@@ -633,12 +633,12 @@ impl Skip<'_> {
     }
 }
 
-/// What a read of the body ([`readable`], once) names as its model: [`requested_model`] over a
+/// What a read of the body ([`readable`], once) names as its model: the model of a
 /// read already made.
 ///
 /// # Errors
 ///
-/// As [`requested_model`].
+/// [`Unrouted::Unparsable`], [`Unrouted::NotAName`], [`Unrouted::EmptyModel`].
 pub fn named_in<'a>(
     read: &Result<Option<serde_json::Value>, Unrouted>,
 ) -> Result<Option<std::borrow::Cow<'a, str>>, Unrouted> {
