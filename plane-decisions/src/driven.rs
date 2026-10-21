@@ -633,19 +633,6 @@ impl Skip<'_> {
     }
 }
 
-/// The top-level `model` a request body names, read as 1.5.5 read it ([`readable`]): `Ok(None)`
-/// when it names none.
-///
-/// # Errors
-///
-/// [`Unrouted::Unparsable`] for a body 1.5.5 could not parse, [`Unrouted::NotAName`] for a
-/// `model` that is not a string, and [`Unrouted::EmptyModel`] for an empty one (both 1.5.5's
-/// missing-model 400).
-#[cfg(test)]
-pub fn requested_model(body: &[u8]) -> Result<Option<std::borrow::Cow<'_, str>>, Unrouted> {
-    named_in(&Ok(readable(body)?))
-}
-
 /// What a read of the body ([`readable`], once) names as its model: [`requested_model`] over a
 /// read already made.
 ///
