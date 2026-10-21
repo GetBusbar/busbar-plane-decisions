@@ -251,3 +251,26 @@ fn a_rewrite_over_a_body_whose_document_does_not_parse_is_a_fault() {
         assert_eq!(view.rewritten, None, "the hook's document is never applied");
     }
 }
+
+/// 1.5.5 materialized the request's document before any rewrite hook ran (`proxy/engine/mod.rs:728`,
+/// `:749`): the kernel's first `project`, made with NO rewrite before any hook runs, is a FAULT for a
+/// body whose document does not parse (a skipped member the head accepted), so the shared 500 comes
+/// whether the hook would have abstained, failed or rejected. A body that parses projects as always.
+#[test]
+fn a_project_with_no_rewrite_over_a_body_whose_document_does_not_parse_is_a_fault() {
+    let door = open(TWO);
+    for body in [
+        &br#"{"model":"a","x":"\ud800"}"#[..],
+        br#"{"model":"a","x":"\uZZZZ"}"#,
+    ] {
+        assert_eq!(door.arrive(1, body).outcome, Outcome::Ready);
+        let view = door.project(1, SYSTEMONE, body, None);
+        assert_eq!(view.outcome, Some(Outcome::Fault), "{view:?}");
+    }
+    let ok = br#"{"model":"a","x":"\u00e9"}"#;
+    assert_eq!(door.arrive(2, ok).outcome, Outcome::Ready);
+    assert_eq!(
+        door.project(2, SYSTEMONE, ok, None).outcome,
+        Some(Outcome::Ready)
+    );
+}

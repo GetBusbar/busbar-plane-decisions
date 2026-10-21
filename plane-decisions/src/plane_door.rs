@@ -1078,6 +1078,14 @@ slot!(
         let body = input.field(|i| &i.body).bytes();
         let rewrite = input.field(|i| &i.rewrite).bytes();
         let routes: &Routes = &plane.routes();
+        // The unit's first `project` is made before any rewrite hook runs, and only where one is
+        // configured or a hook needs the view: 1.5.5 materialized the document before any rewrite
+        // hook ran (`proxy/engine/mod.rs:728`, `:749`) and failed closed on a body that would not
+        // parse. FAULT, which busbar answers 500 `request rewrite could not be applied`, the body
+        // never forwarded and no hook invoked.
+        if rewrite.is_empty() && !driven::valid(body) {
+            return Outcome::Fault;
+        }
         // The request is judged and routed once: a rewrite keeps its `model`, so the entry stands.
         let read = driven::readable(body);
         let mut view = driven::project_read(body, &read, dialect, routes, |r| r.dialect);
