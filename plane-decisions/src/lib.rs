@@ -33,23 +33,33 @@
 //! `codec.rs`, and neither `state` nor `answers` is on that list. The body is still forwarded
 //! byte-identically (the point of a passthrough dialect), but nothing this plane READS — no fact,
 //! no record leg, no content fact — can ever carry those bytes, because it never looked at them.
-//! `tests/jev.rs::pii_witness_never_surfaces_state_or_answers_in_any_fact` drives a fixture whose
+//! `src/tests/jev.rs::pii_witness_never_surfaces_state_or_answers_in_any_fact` drives a fixture whose
 //! body echoes both and asserts no fact this plane emits contains either value.
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(test), forbid(unsafe_code))]
+#![cfg_attr(test, deny(unsafe_code))]
 #![deny(missing_docs)]
 
-pub mod claims;
-pub mod codec;
-pub mod config;
-pub mod driven;
-pub mod facts;
-pub mod meta;
-pub mod ops;
-pub mod plane;
-pub mod plane_door;
-pub mod records;
+mod claims;
+mod codec;
+mod config;
+mod driven;
+// The plane's facts, its `Plane` methods and its record schemas: the crate's tests' (the plane is
+// served through its door alone, which builds no `DecisionPlane`).
+#[cfg(test)]
+mod facts;
+mod meta;
+mod ops;
+#[cfg(test)]
+mod plane;
+mod plane_door;
+#[cfg(test)]
+mod records;
 
+/// THE DOOR: this plugin's one public item (BUSBAR-1.6.0.md l.3567, Crate shape).
+pub use plane_door::door;
+
+#[cfg(test)]
 use busbar_contract::plugin::{AbiVersion, Kind, Plugin};
 
 /// One configured decision provider this plane may name.
@@ -62,8 +72,9 @@ use busbar_contract::plugin::{AbiVersion, Kind, Plugin};
 /// Nothing does that: the plane is served through its door ([`plane_door`]), which answers the plane
 /// driver from [`driven`] and never builds a `DecisionPlane`, so outside this crate's own tests no
 /// `DecisionProvider` is constructed.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DecisionProvider {
+pub(crate) struct DecisionProvider {
     /// The name the operator gave this provider, and the resource the scope unit judges.
     pub id: &'static str,
     /// The priced lane this provider is reached on.
@@ -78,11 +89,13 @@ pub struct DecisionProvider {
 ///
 /// The one field is a borrowed, immutable list. There is no cell here, no lock and no atomic: the
 /// purity test asserts that by walking the type, not by trusting this sentence.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DecisionPlane {
+pub(crate) struct DecisionPlane {
     providers: &'static [DecisionProvider],
 }
 
+#[cfg(test)]
 impl DecisionPlane {
     /// A plane with a configured provider set.
     #[must_use]
@@ -104,12 +117,14 @@ impl DecisionPlane {
     }
 }
 
+#[cfg(test)]
 impl Default for DecisionPlane {
     fn default() -> Self {
         Self::EMPTY
     }
 }
 
+#[cfg(test)]
 impl Plugin for DecisionPlane {
     fn key(&self) -> &'static str {
         <Self as busbar_contract::plane::PlaneMeta>::KEY
@@ -124,6 +139,21 @@ impl Plugin for DecisionPlane {
     }
 }
 
+/// The crate's tests that reach past [`door`]: once integration tests, now in-crate because the
+/// crate's only public item is the door.
 #[cfg(test)]
-#[path = "tests/lib.rs"]
-mod tests;
+mod tests {
+    /// The crate root's prose, held to the tree it describes.
+    mod lib;
+
+    /// The crate's one `#[global_allocator]` and its count, every in-crate allocation gate's.
+    #[allow(unsafe_code)]
+    mod alloc_counter;
+    mod alloc_gate;
+    mod byte_fixtures;
+    /// The scaffolding one plane call needs.
+    mod common;
+    mod durable_strings;
+    mod jev;
+    mod purity;
+}

@@ -8,15 +8,24 @@
 //! nothing ever read, and carrying it cost this plugin crate a `busbar-kernel` dependency the
 //! dep-wall forbids.
 
-use busbar_contract::grammar::Claim;
-use busbar_contract::ids::{
-    AdminVerbId, ClassDirection, MeterClassDecl, MeterClassId, OpClassId, RecordSchemaId,
-};
-use busbar_contract::plane::PlaneMeta;
+use busbar_contract::ids::MeterClassId;
 
+#[cfg(test)]
+use busbar_contract::{
+    grammar::Claim,
+    ids::{AdminVerbId, ClassDirection, MeterClassDecl, OpClassId, RecordSchemaId},
+    plane::PlaneMeta,
+};
+
+#[cfg(test)]
 use crate::{claims, facts, ops, records, DecisionPlane};
 
+/// THE PLANE'S KEY: the durable string its Statement names it by (a stored meter row, a rate-card
+/// class and a registry key written under it keep meaning this plane).
+pub const PLANE_KEY: &str = "decision";
+
 /// The family the billable-decision class rolls up into.
+#[cfg(test)]
 const DECISION_FAMILY: &str = "decision";
 
 /// The class key jev meters under.
@@ -31,6 +40,7 @@ const DECISION_FAMILY: &str = "decision";
 pub const CLASS_DECISION: MeterClassId = MeterClassId::new("decision");
 
 /// The meter classes this plane declares.
+#[cfg(test)]
 const METER_CLASSES: &[MeterClassDecl] = &[MeterClassDecl {
     key: CLASS_DECISION,
     family: DECISION_FAMILY,
@@ -45,6 +55,7 @@ const METER_CLASSES: &[MeterClassDecl] = &[MeterClassDecl {
 /// required, `upstream_model` optional — the shape `busbar_contract::config::ModelCfg`
 /// already parses, see `config.rs`), plus the two reserved members every model-serving section
 /// carries. Nothing here is a credential and nothing here is a price.
+#[cfg(test)]
 const CONFIG_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
@@ -73,8 +84,9 @@ const CONFIG_SCHEMA: &str = r#"{
   }
 }"#;
 
+#[cfg(test)]
 impl PlaneMeta for DecisionPlane {
-    const KEY: &'static str = "decision";
+    const KEY: &'static str = PLANE_KEY;
     const CLAIMS: &'static [Claim] = claims::CLAIMS;
     const OP_CLASSES: &'static [OpClassId] = ops::OP_CLASSES;
     const METER_CLASSES: &'static [MeterClassDecl] = METER_CLASSES;

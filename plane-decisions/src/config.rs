@@ -44,7 +44,9 @@
 //! in no kind list. The type moved to the contract beside `ModelCfg`, so both reserved shapes now
 //! arrive from the one crate a plugin may name, and the edge is deleted rather than waived.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
 
 use serde::Deserialize;
 
@@ -67,12 +69,18 @@ pub struct DecisionsSection {
     /// hook it resolves to is one this plane may run is a boot-time concern this crate does not
     /// perform standalone (it has no `HookCfg` to check a kind against) — the same posture
     /// `busbar-plane-a2a`'s own reserved `hooks` member takes.
+    ///
+    /// The grammar accepts it; the kernel reads it off the folded section, and the door never does.
     #[serde(default)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub hooks: Vec<String>,
     /// The reserved upstream-credential override: `own` (this deployment's own credential, the
     /// default) or `passthrough` (relay the caller's). `None` means inherit whatever the
     /// deployment-wide default is.
+    ///
+    /// The grammar accepts it; the kernel reads it off the folded section, and the door never does.
     #[serde(default)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub upstream_credentials: Option<UpstreamCreds>,
 }
 
@@ -128,6 +136,7 @@ pub const SECTION: &str = "decisions";
 /// `config_validate`). Each message NAMES THE KEY PATH (`decisions.models.<m>.provider`,
 /// `decisions.hooks`) and the valid choices, in the same style as the existing
 /// `config_validate::validate` refusals it mirrors ("model '{}' references unknown provider '{}'").
+#[cfg(test)]
 pub fn validate_cross_refs(
     section: &DecisionsSection,
     provider_protocols: &HashMap<String, String>,

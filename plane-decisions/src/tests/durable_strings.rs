@@ -7,8 +7,8 @@
 //! row, a rate-card class and a registry key written under that string must keep meaning this
 //! plane. A change to either string, or a crate that is no longer the renamed one, is red here.
 
+use crate::{meta::CLASS_DECISION, DecisionPlane};
 use busbar_contract::plane::PlaneMeta;
-use busbar_plane_decisions::{meta::CLASS_DECISION, DecisionPlane};
 
 #[test]
 fn the_crate_is_the_renamed_one() {

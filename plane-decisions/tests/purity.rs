@@ -12,14 +12,14 @@
 //! anywhere: `src/registry.rs` and its sibling `src/tests/registry.rs` were the only two lines of
 //! source that did, and both files are gone — an unreachable generation-1 `PlaneDecl` constant that
 //! nothing outside this crate ever read.
+//!
+//! These are the SOURCE scans: they read files, never the crate, so they stay an integration test.
+//! The plane's type-level purity (its decode and encode steps, its clock independence and its key)
+//! is held in-crate, in `src/tests/purity.rs`, since the crate's only public item is its door.
+//! The crate's test modules (`src/tests`) are exempt from the scans: they are compiled only when
+//! the tests are, never shipped, and hold the one allocation counter the gates read.
 
-use busbar_contract::plane::{Ingress, Plane, PlaneMeta};
-use busbar_contract::wire::FrameCursor;
-use busbar_plane_decisions::DecisionPlane;
 use std::path::{Path, PathBuf};
-
-mod common;
-use common::{frame, Scaffold};
 
 fn src_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -32,6 +32,9 @@ fn walk(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
     {
         let path = entry.path();
         if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == "tests") {
+                continue;
+            }
             walk(&path, f);
         } else if path.extension().is_some_and(|e| e == "rs") {
             let text = std::fs::read_to_string(&path).expect("a source file is readable");
@@ -192,95 +195,6 @@ fn the_plane_names_no_kernel_side_crate() {
     );
 }
 
-/// The decode step gives the same answer every time it is asked the same question.
-#[test]
-fn the_decode_step_is_deterministic() {
-    let plane = DecisionPlane::EMPTY;
-    let body = br#"{"state":{"a":1},"context":{}}"#;
-    let mut answers = Vec::new();
-    for _ in 0..8 {
-        let scaffold = Scaffold::new("http")
-            .with_method("POST")
-            .on_path("/v1/systemone");
-        let ctx = scaffold.ctx();
-        let frames = vec![frame(body)];
-        let mut cursor = FrameCursor::new(&frames);
-        let ingress = plane
-            .decode_ingress(&mut cursor, None, &ctx)
-            .expect("a known surface decodes");
-        let summary = match ingress {
-            Ingress::OneShot(d) => format!("{:?}/{}", d.op, d.facts.len()),
-            other => format!("{other:?}"),
-        };
-        answers.push(summary);
-    }
-    assert!(
-        answers.windows(2).all(|w| w[0] == w[1]),
-        "the decode step varied over one body: {answers:?}"
-    );
-}
-
-/// The encode step writes the same bytes every time it is asked the same question.
-#[test]
-fn the_encode_step_is_deterministic() {
-    let plane = DecisionPlane::EMPTY;
-    let answer = br#"{"request_id":"r1","usage":{"units":1}}"#;
-    let mut written = Vec::new();
-    for _ in 0..8 {
-        let scaffold = Scaffold::new("http");
-        let ctx = scaffold.ctx();
-        let r = busbar_contract::plane::Response {
-            ir: busbar_contract::bounded::Ir::new(answer, &[]),
-            finish: busbar_contract::unit::FinishClass::Complete,
-            facts: busbar_contract::bounded::Facts::new(),
-        };
-        let out = plane
-            .encode_response(&r, None, &ctx)
-            .expect("it re-encodes");
-        written.push(out.as_slice().to_vec());
-    }
-    assert!(
-        written.windows(2).all(|w| w[0] == w[1]),
-        "the encode step varied over one answer"
-    );
-}
-
-/// The plane does not read the clock, so a call at a different time gives the same answer.
-#[test]
-fn the_answer_does_not_move_with_the_clock() {
-    let plane = DecisionPlane::EMPTY;
-    let body = br#"{"state":{"a":1}}"#;
-    let mut answers = Vec::new();
-    for unix_secs in [2_000_000_000_u64, 1_000_000_000] {
-        let scaffold = Scaffold::new("http")
-            .with_method("POST")
-            .on_path("/v1/systemone");
-        let ctx = busbar_contract::unit::Ctx::new(
-            busbar_contract::unit::Clock {
-                unix_secs,
-                monotonic_nanos: 0,
-            },
-            &scaffold.config,
-            Some(&scaffold.session),
-            &scaffold.transport,
-            &scaffold.labels,
-            &scaffold.arena,
-            &scaffold.host,
-        );
-        assert_eq!(ctx.clock().unix_secs, unix_secs);
-        let frames = vec![frame(body)];
-        let mut cursor = FrameCursor::new(&frames);
-        let Ok(Ingress::OneShot(draft)) = plane.decode_ingress(&mut cursor, None, &ctx) else {
-            panic!("a systemone POST with a body decodes as one shot");
-        };
-        answers.push(format!("{:?}", draft.op));
-    }
-    assert_eq!(
-        answers[0], answers[1],
-        "the decoded answer moved with the clock: {answers:?}"
-    );
-}
-
 /// The plane never hands back a decision, an amount or a credential.
 #[test]
 fn the_plane_names_no_money_and_no_decision() {
@@ -318,11 +232,4 @@ fn the_plane_names_no_money_and_no_decision() {
         offenders.is_empty(),
         "the plane names money or decisions: {offenders:?}"
     );
-}
-
-/// The PlaneMeta constants are actually reachable off the crate root — a smoke check that the
-/// crate wires its own trait impl where the other tests assume it does.
-#[test]
-fn plane_meta_key_is_decision() {
-    assert_eq!(<DecisionPlane as PlaneMeta>::KEY, "decision");
 }

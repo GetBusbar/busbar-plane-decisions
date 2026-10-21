@@ -300,15 +300,12 @@ pub fn spliced(body: &[u8], upstream: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Whether the kernel must verify a principal before the first piece.
+/// Whether the kernel must verify a principal before the first piece. Every claimed request of this
+/// plane needs one: a decision is billed to someone (see [`arrive`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrincipalNeed {
-    /// No principal.
-    None,
     /// A principal is verified before the first piece.
     Required,
-    /// A principal is used when one is presented.
-    Optional,
 }
 
 /// A claimed request, classified.
@@ -518,6 +515,7 @@ pub struct FarEndReading {
 
 impl FarEndReading {
     /// A `jev` reading with nothing received.
+    #[cfg(test)]
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -781,6 +779,7 @@ impl RelayedFields {
     }
 
     /// Whether no field is relayed.
+    #[cfg(test)]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.ends.is_empty()

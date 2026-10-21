@@ -9,14 +9,12 @@
 //! and the operation class + correlation/finish it produces is pinned; the encoder is pinned
 //! byte-for-byte against the same fixture, because byte-identity passthrough IS the dialect.
 
-mod common;
-
+use super::common::{self, frame, response_frame, Scaffold};
+use crate::{facts, ops, DecisionPlane};
 use busbar_contract::bounded::FactValue;
 use busbar_contract::plane::{Ingress, Plane, Progress, Response};
 use busbar_contract::unit::FinishClass;
 use busbar_contract::wire::FrameCursor;
-use busbar_plane_decisions::{facts, ops, DecisionPlane};
-use common::{frame, response_frame, Scaffold};
 
 /// `POST /v1/systemone` — a successful decision, billing 42 units.
 const SYSTEMONE_SUCCESS: &[u8] =

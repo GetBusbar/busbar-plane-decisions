@@ -105,6 +105,43 @@ fn a_request_routes_by_its_model() {
     );
 }
 
+/// THE DROPPED-IN TWIN NAMES A ROUTE AS THE LINKED DOOR DOES (THE DESIGN section 11.4, "compiled in
+/// or dropped in ... NOTHING CHANGES about the plugin itself"; section 11.2, "no allocation and no
+/// blocking on the hot path"). The twin's image is built from this workspace against its own
+/// busbar-contract pin, so the SDK compiled here is the SDK the shipped library carries. A READY
+/// arrival naming a model the instance has named before is answered from the instance's one kept
+/// copy of that name, read with no heap and no lock: every arrival over model `b` hands the host the
+/// same name at the same address. An SDK that keeps a fresh copy of the name per arrival (a heap
+/// allocation and a push under the instance's shared text lock) hands a new address each time.
+#[test]
+fn a_model_named_again_is_routed_by_the_instances_kept_name() {
+    let two = open(TWO);
+    let first = two.arrive(1, br#"{"model":"b","state":{}}"#);
+    assert_eq!(
+        (first.outcome, first.route, first.entry.as_str()),
+        (Outcome::Ready, ROUTE_DIRECT, "b"),
+        "{first:?}"
+    );
+    for unit in 2..=4 {
+        let again = two.arrive(unit, br#"{"state":{},"model":"b"}"#);
+        assert_eq!(
+            (again.outcome, again.entry.as_str()),
+            (Outcome::Ready, "b"),
+            "{again:?}"
+        );
+        assert_eq!(
+            again.entry_at, first.entry_at,
+            "arrival {unit} named model b from a fresh copy, not the instance's kept name"
+        );
+    }
+    let other = two.arrive(5, br#"{"model":"a","state":{}}"#);
+    assert_eq!(other.entry.as_str(), "a", "{other:?}");
+    assert_ne!(
+        other.entry_at, first.entry_at,
+        "each entry keeps its own name"
+    );
+}
+
 /// A refused arrival is answered in jev's error shape, the arrival's words and status.
 #[test]
 fn an_unrouted_arrival_renders_in_the_dialect_shape() {
@@ -159,9 +196,20 @@ fn answered(status: u32, answer: &[u8]) -> door_harness::Answered {
     door.piece(1, Given::whole(status, answer), &mut bufs)
 }
 
+/// The door's Statement tail, read off the Statement `door()` states, as the loader reads it.
+fn tail() -> &'static busbar_contract::abi::plane::PlaneTail {
+    // SAFETY: the door, its Statement and a plane Statement's kind tail (a `PlaneTail`) are
+    // `'static`.
+    unsafe {
+        &*(*(*busbar_plane_decisions::door()).statement)
+            .kind_tail
+            .cast::<busbar_contract::abi::plane::PlaneTail>()
+    }
+}
+
 /// The class index the tail names `name` at.
 fn class(name: &str) -> u32 {
-    let tail = busbar_plane_decisions::plane_door::TAIL;
+    let tail = tail();
     // SAFETY: the tail's billable classes are a `'static` list of `billable_classes_len` entries,
     // each naming `'static` strings.
     let classes =
@@ -235,7 +283,7 @@ fn a_success_with_an_unreadable_count_fails_loudly() {
 /// three in family `decision`, and a success's reported tokens are billed in them.
 #[test]
 fn the_tokens_a_success_reports_are_billed_in_family_decision() {
-    let tail = busbar_plane_decisions::plane_door::TAIL;
+    let tail = tail();
     // SAFETY: as in `class`.
     let classes =
         unsafe { std::slice::from_raw_parts(tail.billable_classes, tail.billable_classes_len) };
@@ -262,7 +310,9 @@ fn the_tokens_a_success_reports_are_billed_in_family_decision() {
     }
 }
 
-const MAX_UNITS: u64 = busbar_plane_decisions::plane_door::MAX_UNITS as u64;
+/// The most units the door keeps state for at once (its `MAX_UNITS`, pinned to this value in-crate by
+/// `the_unit_ceiling_is_the_one_the_door_tests_drive`).
+const MAX_UNITS: u64 = 4096;
 
 /// A live unit over [`ONE`]: arrived, its ATTEMPT crossed.
 fn live(door: &door_harness::Door, unit: u64, bufs: &mut Bufs) {

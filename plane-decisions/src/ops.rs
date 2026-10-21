@@ -22,6 +22,7 @@ pub const OP_MODELS: OpClassId = OpClassId::new("models");
 pub const OP_EVALUATE: OpClassId = OpClassId::new("evaluate");
 
 /// Every operation class this plane's units can be, in declaration order.
+#[cfg(test)]
 pub const OP_CLASSES: &[OpClassId] = &[OP_SYSTEMONE, OP_MODELS, OP_EVALUATE];
 
 /// The path jev's decision call is mounted on.

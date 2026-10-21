@@ -2,13 +2,11 @@
 //! round-trip byte-identity on both operations, the billable-success-only metering surface, and the
 //! PII witness — the whole reason this plane exists in the shape it does.
 
-mod common;
-
+use super::common::{self, Scaffold};
+use crate::{facts, meta::CLASS_DECISION, ops, DecisionPlane};
 use busbar_contract::bounded::{FactValue, Facts, Ir};
 use busbar_contract::plane::{Plane, Response};
 use busbar_contract::unit::FinishClass;
-use busbar_plane_decisions::{facts, meta::CLASS_DECISION, ops, DecisionPlane};
-use common::Scaffold;
 
 /// A successful `systemone` answer, billing 7 units.
 const SYSTEMONE_SUCCESS: &[u8] =
@@ -223,12 +221,9 @@ fn pii_witness_never_surfaces_state_or_answers_in_any_fact() {
 
     // The declared pointer lists themselves never name the two members — the structural guarantee
     // behind every assertion above.
-    assert!(!busbar_plane_decisions::codec::RESPONSE_PTRS.contains(&"/state"));
-    assert!(!busbar_plane_decisions::codec::RESPONSE_PTRS.contains(&"/answers"));
-    assert_eq!(
-        busbar_plane_decisions::codec::REQUEST_PTRS,
-        &[busbar_plane_decisions::codec::PTR_MODEL]
-    );
+    assert!(!crate::codec::RESPONSE_PTRS.contains(&"/state"));
+    assert!(!crate::codec::RESPONSE_PTRS.contains(&"/answers"));
+    assert_eq!(crate::codec::REQUEST_PTRS, &[crate::codec::PTR_MODEL]);
     assert!(!facts::CONTENT_FACTS
         .iter()
         .any(|k| *k == "state" || *k == "answers"));

@@ -4,7 +4,7 @@
 //! THE DECISIONS PLANE'S DOOR: the plane kind's memory-ABI table (`busbar_contract::abi::plane`)
 //! built with the SDK's `plugin_door!` on its safe surface, over this plane's answers to the plane
 //! driver ([`crate::driven`], `BUSBAR-1.6.0.md` Part 3, section 12). [`door`] is the LINKED door;
-//! the same function is the DROPPED door once a `cdylib` exports it (`examples/decisions_door.rs`,
+//! the same function is the DROPPED door once a `cdylib` exports it (`busbar-plane-decisions-plugin`,
 //! through `busbar_contract::export_door!`), so the two cannot answer differently.
 //! `tests/conformance.rs` loads both through the one loader and requires one transcript.
 //!
@@ -15,7 +15,8 @@
 //! the serve path composes the bound door and hands it its arrivals through the plane driver.
 //!
 //! * The Statement: the plane's key and version, `decisions:` declared and `providers:` consumed,
-//!   its one outbound need, and the tail [`TAIL`] (every list read off [`crate::driven::tail`]).
+//!   its one outbound need, the tail [`TAIL`] (every list read off [`crate::driven::tail`]), and
+//!   its extensions [`EXTENSIONS`]: the plugin's whole `declares` document.
 //! * `validate`, `open`, `refresh`: the settings blob read as the `decisions:` section
 //!   ([`crate::config::DecisionsSection`]), each model's dialect resolved ([`routes`]: its own
 //!   `protocol`, else its provider's as the host stated it at `open`); a generation's snapshot
@@ -62,8 +63,7 @@ use busbar_contract::abi::plane::{
     PlaneTail, ProjectIn, ProjectOut, RefusalIn, RefusalOut, ServeIn, ServeOut, UnitCount,
     ANSWER_LAYOUT, CANCEL_ABORTED, CANCEL_OK_PARTIAL, CLAIM_EXACT, EMIT_DONE, EMIT_TO_FAR_END,
     FROM_CALLER, FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE, PIECE_HAS_STATUS, PIECE_LAST,
-    PRINCIPAL_NONE, PRINCIPAL_OPTIONAL, PRINCIPAL_REQUIRED, ROUTE_DIRECT, SHAPE_WHOLE,
-    UNITS_REPORTED,
+    PRINCIPAL_REQUIRED, ROUTE_DIRECT, SHAPE_WHOLE, UNITS_REPORTED,
 };
 use busbar_contract::abi::plane::{PlaneCancelIn, PlaneCancelOut};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
@@ -72,12 +72,12 @@ use busbar_contract::abi::sdk::publish::{ClaimSpec, SnapshotSpec};
 use busbar_contract::abi::sdk::{
     open_failed, Generations, HostBuf, Instance, Keyed, Lent, Out, Safe, SafeSlot,
 };
-use busbar_contract::plane::PlaneMeta;
 
+use crate::claims;
 use crate::codec::{CONTENT_TYPE_JSON, FIELD_CONTENT_TYPE, FIELD_RETRY_AFTER};
 use crate::config::DecisionsSection;
 use crate::driven::{self, tail, CallerAnswer, FarEndReading, PrincipalNeed};
-use crate::{claims, DecisionPlane};
+use crate::meta::PLANE_KEY;
 
 /// The version the Statement names: the crate's (a test pins the two equal).
 pub const VERSION: &str = "1.6.0";
@@ -239,14 +239,24 @@ pub const TAIL: &PlaneTail = &PlaneTail {
     ..PlaneTail::ZERO
 };
 
-/// THE STATEMENT: the plane's key and version, its sections, its need and its tail.
+busbar_contract::statement_extensions!(
+    /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246).
+    EXTENSIONS: [(
+        busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
+        include_bytes!("../declares.json")
+    )]
+);
+
+/// THE STATEMENT: the plane's key and version, its sections, its need, its tail and its
+/// extensions.
 pub const STATEMENT: Statement = Statement {
     kind_tail: ptr::from_ref(TAIL).cast::<KindTailHead>(),
     sections: SECTIONS.as_ptr(),
     sections_len: SECTIONS.len(),
     needs: NEEDS.as_ptr(),
     needs_len: NEEDS.len(),
-    ..statement(<DecisionPlane as PlaneMeta>::KEY, VERSION, MAX_INFLIGHT)
+    extensions: EXTENSIONS,
+    ..statement(PLANE_KEY, VERSION, MAX_INFLIGHT)
 };
 
 /// The settings blob read as the `decisions:` section; an empty blob is the empty section.
@@ -592,9 +602,7 @@ slot!(
         out.set(
             |o| &o.principal_need,
             match arrived.principal {
-                PrincipalNeed::None => PRINCIPAL_NONE,
                 PrincipalNeed::Required => PRINCIPAL_REQUIRED,
-                PrincipalNeed::Optional => PRINCIPAL_OPTIONAL,
             },
         );
         if let Some(plane) = instance.get() {

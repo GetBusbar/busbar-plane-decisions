@@ -52,8 +52,9 @@ links = "busbar-door-cells-busbar-plane-decisions"
 [lib]
 name = "busbar_plane_decisions"
 path = "src/lib.rs"
-# rlib: the LINKED door, which a busbar build names as a compiled-in row (`plane_door::door`, the
-# root's `plane-decisions` row on the plane axis). The dropped-in door is the sibling
+# rlib: the LINKED door, which a busbar build names as a compiled-in row
+# (`busbar_plane_decisions::door`, the root's `plane-decisions` row on the plane axis). The
+# dropped-in door is the sibling
 # `busbar-plane-decisions-plugin` cdylib, which exports this same door as its one symbol; this crate
 # exports none.
 crate-type = ["rlib"]

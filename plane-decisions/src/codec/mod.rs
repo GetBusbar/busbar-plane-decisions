@@ -15,8 +15,11 @@
 //! the whole document; `Ir::pointer()` is a read into a handful of declared members of it, and
 //! nothing this plane does discards or rewrites the rest.
 
-use busbar_contract::bounded::{Ir, PlaneAlloc};
+#[cfg(test)]
+use busbar_contract::bounded::Ir;
+#[cfg(test)]
 use busbar_contract::unit::Ctx;
+#[cfg(test)]
 use busbar_contract::wire::Decode;
 
 /// The pointer a response carries its top-level error object at, where it errored.
@@ -24,14 +27,17 @@ use busbar_contract::wire::Decode;
 /// Presence alone is what this plane reads — never the error's own fields, which could echo
 /// caller-supplied content back (jev's error bodies are not exempted from the PII rule by being
 /// "just an error").
+#[cfg(test)]
 pub const PTR_ERROR: &str = "/error";
 
 /// The pointer a response carries its provider-assigned request identifier at, where it names one.
 /// Plain metadata: a correlation handle, never decision content.
+#[cfg(test)]
 pub const PTR_REQUEST_ID: &str = "/request_id";
 
 /// The pointer a `systemone` request or response body echoes a bare `id` at, where jev uses that
 /// spelling instead of `request_id`. Read as a fallback, same as `PTR_REQUEST_ID`.
+#[cfg(test)]
 pub const PTR_ID: &str = "/id";
 
 /// The pointer a SUCCESSFUL `systemone` response reports its billable usage count at.
@@ -56,6 +62,7 @@ pub const PTR_EXECUTION_STATES: &str = "/execution/states";
 /// Every pointer this plane resolves in a RESPONSE body (`systemone`, `evaluate` or `models`). Declared here
 /// once, so the "never resolves `/state` or `/answers`" claim is checkable by reading one list
 /// rather than auditing every call site.
+#[cfg(test)]
 pub const RESPONSE_PTRS: &[&str] = &[
     PTR_ERROR,
     PTR_REQUEST_ID,
@@ -75,6 +82,7 @@ pub const PTR_MODEL: &str = "/model";
 /// A `systemone` request carries the caller's `state`, which this plane never reads; jev names its
 /// operation in the path, so the top-level `model` is the one member routing needs
 /// (`driven::route_model`) and the one `upstream_model` rewrites (`driven::spliced`).
+#[cfg(test)]
 pub const REQUEST_PTRS: &[&str] = &[PTR_MODEL];
 
 /// The span view of a body, built from one of the two declared pointer lists above.
@@ -82,25 +90,15 @@ pub const REQUEST_PTRS: &[&str] = &[PTR_MODEL];
 /// One scan of one closed grammar, into the unit's own arena — the same seam `busbar-plane-a2a`
 /// reads through, named here rather than re-derived, so a declared-pointer list is the only way
 /// this plane's view of a body can ever widen.
+#[cfg(test)]
 pub fn view<'u>(body: &'u [u8], pointers: &[&'u str], ctx: &Ctx<'u>) -> Result<Ir<'u>, Decode> {
     let spans = busbar_contract::spans::resolve(body, pointers, ctx.arena())
         .map_err(|_| Decode::Oversize)?;
     Ok(Ir::new(body, spans))
 }
 
-/// The span view of a body against an arbitrary arena, for callers (tests, `encode_egress`'s own
-/// rebuild) that hold an arena without a full `Ctx`.
-pub fn view_with_arena<'u>(
-    body: &'u [u8],
-    pointers: &[&'u str],
-    arena: &'u dyn PlaneAlloc,
-) -> Result<Ir<'u>, Decode> {
-    let spans =
-        busbar_contract::spans::resolve(body, pointers, arena).map_err(|_| Decode::Oversize)?;
-    Ok(Ir::new(body, spans))
-}
-
 /// Whether a body has a member at one declared pointer at all.
+#[cfg(test)]
 #[must_use]
 pub fn has(body: &[u8], pointer: &str) -> bool {
     read_raw(body, pointer).is_some()
@@ -116,6 +114,7 @@ pub fn read_raw<'u>(body: &'u [u8], pointer: &str) -> Option<&'u [u8]> {
 }
 
 /// The string value at one declared pointer, with its quotes stripped.
+#[cfg(test)]
 #[must_use]
 pub fn read_str<'u>(body: &'u [u8], pointer: &str) -> Option<&'u str> {
     let raw = read_raw(body, pointer)?;
@@ -124,6 +123,7 @@ pub fn read_str<'u>(body: &'u [u8], pointer: &str) -> Option<&'u str> {
 }
 
 /// The integer value at one declared pointer, where it parses as a bare JSON number.
+#[cfg(test)]
 #[must_use]
 pub fn read_u64(body: &[u8], pointer: &str) -> Option<u64> {
     let raw = read_raw(body, pointer)?;

@@ -3,20 +3,19 @@
 const LIB_RS: &str = include_str!("../lib.rs");
 const FACTS_RS: &str = include_str!("../facts.rs");
 
-/// The crate's integration test files, by the path a doc cites them under. Read at compile time, so
-/// a cited file that does not exist is a file this table cannot name, and a test it cites is one
-/// whose definition can be searched for without the test reaching outside the crate at run time.
+/// The crate's test files, integration (`tests/`) and in-crate (`src/tests/`), by the path a doc
+/// cites them under. Read at compile time, so a cited file that does not exist is a file this table
+/// cannot name, and a test it cites is one whose definition can be searched for without the test
+/// reaching outside the crate at run time.
 const TEST_FILES: &[(&str, &str)] = &[
-    (
-        "tests/alloc_gate.rs",
-        include_str!("../../tests/alloc_gate.rs"),
-    ),
+    ("src/tests/alloc_gate.rs", include_str!("alloc_gate.rs")),
     (
         "tests/invariance.rs",
         include_str!("../../tests/invariance.rs"),
     ),
-    ("tests/jev.rs", include_str!("../../tests/jev.rs")),
+    ("src/tests/jev.rs", include_str!("jev.rs")),
     ("tests/purity.rs", include_str!("../../tests/purity.rs")),
+    ("src/tests/purity.rs", include_str!("purity.rs")),
 ];
 
 /// Item 403. Every `tests/<file>.rs` the crate root or the fact vocabulary cites as the home of a
@@ -27,7 +26,7 @@ fn every_cited_test_file_exists_and_defines_the_cited_test() {
     let mut cited = 0;
     for source in [LIB_RS, FACTS_RS] {
         for token in source.split('`').skip(1).step_by(2) {
-            if !token.starts_with("tests/") {
+            if !token.starts_with("tests/") && !token.starts_with("src/tests/") {
                 continue;
             }
             let (file, test) = match token.split_once("::") {

@@ -164,3 +164,10 @@ fn the_section_under_its_verb_reads_as_the_section() {
     // RED ARM: the verb beside another member is no wrapper; it is an unknown member.
     assert!(read_settings(br#"{"decisions":{},"models":{}}"#).is_err());
 }
+
+/// The unit ceiling `tests/door.rs` drives the door to, spelled there as a number because the
+/// crate's only public item is the door: the two are one value.
+#[test]
+fn the_unit_ceiling_is_the_one_the_door_tests_drive() {
+    assert_eq!(MAX_UNITS, 4096);
+}

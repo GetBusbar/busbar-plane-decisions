@@ -6,45 +6,11 @@
 //! body is borrowed where it already lives, and the only copy this call makes is the envelope's
 //! `content-type` field.
 
-mod common;
-
 use busbar_contract::plane::Plane;
-use busbar_plane_decisions::{ops, DecisionPlane};
-use common::{sealed_destination, Scaffold};
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 
-thread_local! {
-    static ALLOCS: Cell<u64> = const { Cell::new(0) };
-}
-
-struct Counting;
-
-// SAFETY: every call is forwarded verbatim to the system allocator; the counter is a thread-local
-// `Cell` of a plain integer, touched only on the allocating thread, and never reads or writes the
-// memory being handed out.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
-
-#[global_allocator]
-static ALLOC: Counting = Counting;
-
-fn allocations_of(f: impl FnOnce()) -> u64 {
-    let before = ALLOCS.with(Cell::get);
-    f();
-    ALLOCS.with(Cell::get) - before
-}
+use super::alloc_counter::allocations_of;
+use super::common::{self, sealed_destination, Scaffold};
+use crate::{ops, DecisionPlane};
 
 /// One well-formed `systemone` request body.
 const BODY: &[u8] = br#"{"state":{"a":1},"context":{}}"#;

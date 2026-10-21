@@ -22,7 +22,7 @@ use busbar_contract::abi::plane::{
     RefusalIn, RefusalOut, UnitCount, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END,
     FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, REFUSAL_ARRIVE, REFUSAL_KERNEL,
 };
-use busbar_plane_decisions::plane_door::door;
+use busbar_plane_decisions::door;
 
 pub fn z<T>() -> T {
     // SAFETY: every `in`/`out` here is plain C data; all-zero is a valid value of each.
@@ -204,6 +204,8 @@ pub struct Arrived {
     /// The route class and the entry it names.
     pub route: u8,
     pub entry: String,
+    /// Where the entry's name lives: the address of the copy the instance keeps for the answer.
+    pub entry_at: usize,
 }
 
 /// What one `on_piece` answered, re-called while it said `more`.
@@ -385,6 +387,7 @@ impl Door {
             text: read(o.head.error),
             route: o.route,
             entry: read(o.pool),
+            entry_at: o.pool.ptr as usize,
         }
     }
 
