@@ -315,9 +315,10 @@ fn a_request_routes_over_the_model_it_names() {
         route_model(br#"{"state":{}}"#, &one, |_| true).map(|r| r.0),
         Ok("jev")
     );
+    // A body 1.5.5 could not parse is refused as 1.5.5 refused it, never routed as naming none.
     assert_eq!(
         route_model(b"not json", &one, |_| true).map(|r| r.0),
-        Ok("jev")
+        Err(Unrouted::Unparsable)
     );
     assert_eq!(
         route_model(br#"{"model":"other"}"#, &one, |_| true),

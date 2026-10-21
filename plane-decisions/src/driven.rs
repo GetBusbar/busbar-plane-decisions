@@ -203,6 +203,9 @@ pub enum Unrouted {
     NotAName,
     /// The request names a model the generation does not configure.
     Unknown(String),
+    /// The request's `model` is the empty string: 1.5.5's missing-model refusal (v1.5.5
+    /// `crates/busbar/src/ingress/dispatch.rs:138-152`, a model that is empty is none).
+    EmptyModel,
     /// The body is no JSON document 1.5.5 would read: malformed, or nested past 1.5.5's parse depth
     /// ([`MAX_PARSE_DEPTH`]).
     Unparsable,
@@ -213,7 +216,7 @@ impl Unrouted {
     #[must_use]
     pub const fn status(&self) -> u16 {
         match self {
-            Self::Unnamed | Self::NotAName | Self::Unparsable => 400,
+            Self::Unnamed | Self::NotAName | Self::EmptyModel | Self::Unparsable => 400,
             Self::Unknown(_) => 404,
         }
     }
@@ -228,6 +231,7 @@ impl Unrouted {
             Self::NotAName => "`model` must be a string naming a decisions model".to_string(),
             Self::Unknown(model) => format!("{UNKNOWN_HEAD}{model}{UNKNOWN_TAIL}"),
             Self::Unparsable => UNPARSABLE.to_string(),
+            Self::EmptyModel => MISSING_MODEL.to_string(),
         }
     }
 }
@@ -235,6 +239,10 @@ impl Unrouted {
 /// The words 1.5.5 refused a body it could not parse in, at 400 (v1.5.5
 /// `crates/busbar/src/ingress/dispatch.rs:116` and `ingress/mod.rs:650`, kind `invalid_request`).
 pub const UNPARSABLE: &str = "We could not parse the JSON body of your request.";
+
+/// The words 1.5.5 refused a request with an empty `model` in, at 400 (v1.5.5
+/// `crates/busbar/src/ingress/dispatch.rs:152`).
+pub const MISSING_MODEL: &str = "Missing required parameter: 'model'.";
 
 /// THE PARSE DEPTH 1.5.5 READ A BODY TO (v1.5.5 `crates/busbar/src/json.rs`, `MAX_JSON_DEPTH`):
 /// a body nested deeper is refused before any document is built, as one that does not parse.
@@ -321,38 +329,62 @@ pub fn echoed(name: &str) -> String {
     format!("{}{CUT_MARK}", &name[..cut])
 }
 
-/// The top-level `model` a request body names: `Ok(None)` when it names none, and
-/// [`Unrouted::NotAName`] when the member is there but is not a string.
+/// Whether `body` is a JSON document 1.5.5 read: at most [`MAX_PARSE_DEPTH`] deep, then a full,
+/// validating parse that builds no document (trailing bytes, a bad number, a bad escape, invalid
+/// UTF-8 or a truncated document all refuse), as 1.5.5's `LazyBody::parse` refused them (v1.5.5
+/// `crates/busbar/src/ingress/dispatch.rs:101-116`).
 ///
 /// # Errors
 ///
-/// [`Unrouted::NotAName`], as above.
+/// [`Unrouted::Unparsable`]: 1.5.5's 400.
+pub fn readable(body: &[u8]) -> Result<(), Unrouted> {
+    if exceeds_depth(body, MAX_PARSE_DEPTH) {
+        return Err(Unrouted::Unparsable);
+    }
+    let mut de = serde_json::Deserializer::from_slice(body);
+    de.disable_recursion_limit();
+    <serde::de::IgnoredAny as serde::Deserialize>::deserialize(&mut de)
+        .map_err(|_| Unrouted::Unparsable)?;
+    de.end().map_err(|_| Unrouted::Unparsable)
+}
+
+/// The top-level `model` a request body names: `Ok(None)` when it names none. Every body is first
+/// held to the document 1.5.5 read ([`readable`]; [`parsed`] where the span scanner cannot walk
+/// it), so a body 1.5.5 refused is never routed.
+///
+/// # Errors
+///
+/// [`Unrouted::Unparsable`] for a body 1.5.5 could not parse, [`Unrouted::NotAName`] for a
+/// `model` that is not a string, and [`Unrouted::EmptyModel`] for an empty one (1.5.5's 400).
 pub fn requested_model(body: &[u8]) -> Result<Option<std::borrow::Cow<'_, str>>, Unrouted> {
-    let raw = match busbar_contract::spans::resolve_pointer(body, codec::PTR_MODEL) {
-        busbar_contract::spans::Resolved::Found(span) => body.get(span.start..span.end),
-        busbar_contract::spans::Resolved::Missing => None,
+    let named = match busbar_contract::spans::resolve_pointer(body, codec::PTR_MODEL) {
+        busbar_contract::spans::Resolved::Found(span) => {
+            readable(body)?;
+            let raw = body.get(span.start..span.end).ok_or(Unrouted::Unparsable)?;
+            match serde_json::from_slice::<&str>(raw) {
+                Ok(name) => std::borrow::Cow::Borrowed(name),
+                Err(_) => serde_json::from_slice::<String>(raw)
+                    .map(std::borrow::Cow::Owned)
+                    .map_err(|_| Unrouted::NotAName)?,
+            }
+        }
+        busbar_contract::spans::Resolved::Missing => {
+            readable(body)?;
+            return Ok(None);
+        }
         // THE SCANNER CANNOT WALK THE BODY (nested past its depth, or not a document): it is read
         // as 1.5.5 read it, whole, and an unreadable `model` is never taken to be an absent one.
         busbar_contract::spans::Resolved::Malformed
-        | busbar_contract::spans::Resolved::NeedMore => {
-            return match parsed(body)?.get("model") {
-                None => Ok(None),
-                Some(serde_json::Value::String(name)) => {
-                    Ok(Some(std::borrow::Cow::Owned(name.clone())))
-                }
-                Some(_) => Err(Unrouted::NotAName),
-            };
-        }
+        | busbar_contract::spans::Resolved::NeedMore => match parsed(body)?.get("model") {
+            None => return Ok(None),
+            Some(serde_json::Value::String(name)) => std::borrow::Cow::Owned(name.clone()),
+            Some(_) => return Err(Unrouted::NotAName),
+        },
     };
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    if let Ok(name) = serde_json::from_slice::<&str>(raw) {
-        return Ok(Some(std::borrow::Cow::Borrowed(name)));
+    if named.is_empty() {
+        return Err(Unrouted::EmptyModel);
     }
-    serde_json::from_slice::<String>(raw)
-        .map(|name| Some(std::borrow::Cow::Owned(name)))
-        .map_err(|_| Unrouted::NotAName)
+    Ok(Some(named))
 }
 
 /// THE MODEL A CLAIMED REQUEST ROUTES OVER among the `models` its claim's dialect `serves` (the

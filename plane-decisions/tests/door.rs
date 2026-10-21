@@ -694,3 +694,88 @@ fn a_body_past_the_parse_depth_is_refused_as_1_5_5_refused_it() {
     let at = format!(r#"{{"model":"a","deep":{}}}"#, nested(127));
     assert_eq!(two.arrive(2, at.as_bytes()).entry, "a");
 }
+
+/// RED (review of the routing, 1.5.5 parity): a body the span scanner walks can still be no JSON
+/// document, and 1.5.5 refused every such body before routing (v1.5.5 ingress/dispatch.rs:101-116,
+/// `LazyBody::parse`, a full validating parse): trailing bytes, a bad number, a bad escape, not
+/// JSON at all, a truncated body, and a deep body whose `model` is not a string (that one the
+/// `model` refusal). Each was routed.
+#[test]
+fn a_body_1_5_5_could_not_parse_is_refused_before_routing() {
+    let two = open(TWO);
+    for (unit, body) in [
+        (1, r#"{"model":"a"} garbage"#.to_string()),
+        (2, r#"{"model":"a","n":01}"#.to_string()),
+        (3, r#"{"model":"a","x":"\q"}"#.to_string()),
+        (4, "not json".to_string()),
+        (5, r#"{"model":"a","state":{"#.to_string()),
+    ] {
+        let refused = two.arrive(unit, body.as_bytes());
+        assert_eq!(
+            (refused.outcome, refused.status, refused.text.as_str()),
+            (
+                Outcome::Refused,
+                400,
+                "We could not parse the JSON body of your request."
+            ),
+            "{body}: {refused:?}"
+        );
+    }
+    let one = open(ONE);
+    let not_json = one.arrive(6, b"not json");
+    assert_eq!(
+        (not_json.outcome, not_json.status),
+        (Outcome::Refused, 400),
+        "one model configured routed a body that is not JSON: {not_json:?}"
+    );
+    let deep = format!(r#"{{"model":7,"deep":{}}}"#, nested(70));
+    let not_a_name = two.arrive(7, deep.as_bytes());
+    assert_eq!(
+        (not_a_name.outcome, not_a_name.status),
+        (Outcome::Refused, 400),
+        "{not_a_name:?}"
+    );
+    assert_ne!(
+        not_a_name.text, "We could not parse the JSON body of your request.",
+        "a document 1.5.5 read, with a model that is not a name"
+    );
+}
+
+/// The exact edge of 1.5.5's parse depth (128, v1.5.5 json.rs `MAX_JSON_DEPTH`): a body 128 deep is
+/// read, 129 and 130 are refused.
+#[test]
+fn the_parse_depth_edge_is_1_5_5s() {
+    let two = open(TWO);
+    // `{"model":"a","deep":` is one level; `nested(n)` adds n.
+    let at = |n: usize| format!(r#"{{"model":"a","deep":{}}}"#, nested(n));
+    assert_eq!(two.arrive(1, at(127).as_bytes()).entry, "a", "128 deep");
+    for (unit, n) in [(2, 128), (3, 129)] {
+        let refused = two.arrive(unit, at(n).as_bytes());
+        assert_eq!(
+            (refused.outcome, refused.status),
+            (Outcome::Refused, 400),
+            "{} deep",
+            n + 1
+        );
+    }
+}
+
+/// RED (1.5.5 parity): a request whose `model` is the empty string is refused 400 "Missing
+/// required parameter: 'model'." (v1.5.5 ingress/dispatch.rs:138-152: an empty model is none), not
+/// routed to the only model nor refused as an unknown one.
+#[test]
+fn an_empty_model_is_refused_as_1_5_5_refused_it() {
+    for settings in [ONE, TWO] {
+        let door = open(settings);
+        let refused = door.arrive(1, br#"{"model":"","state":{}}"#);
+        assert_eq!(
+            (refused.outcome, refused.status, refused.text.as_str()),
+            (
+                Outcome::Refused,
+                400,
+                "Missing required parameter: 'model'."
+            ),
+            "{settings}: {refused:?}"
+        );
+    }
+}
