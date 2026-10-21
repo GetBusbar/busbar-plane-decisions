@@ -1044,10 +1044,9 @@ slot!(
     /// ([`driven::rewritten`], wholesale, as 1.5.5 replaced the body; a rewrite naming another
     /// model is REFUSED, the hook's failure): the rewritten request is answered in `rewritten`
     /// (the body the kernel keeps and re-pushes on every attempt from then on) and is the request
-    /// projected; a
-    /// rewrite that does not apply leaves the request as it was (1.5.5). The view's pool is the
-    /// entry the request routes over, its dialect the claim's, and its one turn the request
-    /// document, shown only to a hook granted the prompt. The plane reads nothing of the content
+    /// projected; a rewrite that does not apply leaves the request as it was (1.5.5). The view's
+    /// pool is the entry the request routes over, its dialect the claim's, and its one turn the
+    /// request document, shown only to a hook granted the prompt. The plane reads nothing of the content
     /// for itself: the view carries the caller's bytes, and no fact is minted from them.
     Project, ProjectIn, ProjectOut, |instance, input, mut out| {
         let Some(plane) = instance.get() else {

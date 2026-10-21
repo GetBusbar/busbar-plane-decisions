@@ -466,13 +466,31 @@ pub fn rewritten(
     if unchanged {
         return Ok(None);
     }
-    Ok(replaced(body, &current, &document))
+    Ok(Some(replaced(body, &current, &document)))
 }
 
 /// [`rewritten`]'s request: the caller's members `document` keeps (the `model` always), in the
 /// caller's order, each the caller's own bytes where its value is unchanged, then the members the
-/// caller did not send. `None` when a member's bytes cannot be read back.
+/// caller did not send. A rewrite the hook answered ALWAYS applies: when a member's bytes cannot be
+/// read back (the span scanner refuses a body nested past its depth, which serde reads), the
+/// replacement is written from the document itself, as 1.5.5 wrote the rewritten value, and only
+/// the caller's exact bytes of the unchanged members are lost.
 fn replaced(
+    body: &[u8],
+    current: &serde_json::Map<String, serde_json::Value>,
+    document: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<u8> {
+    spliced_members(body, current, document).unwrap_or_else(|| {
+        let mut whole = document.clone();
+        if let Some(model) = current.get("model") {
+            whole.insert("model".to_string(), model.clone());
+        }
+        serde_json::Value::Object(whole).to_string().into_bytes()
+    })
+}
+
+/// [`replaced`] in the caller's bytes; `None` when a member's span cannot be read.
+fn spliced_members(
     body: &[u8],
     current: &serde_json::Map<String, serde_json::Value>,
     document: &serde_json::Map<String, serde_json::Value>,
@@ -490,17 +508,17 @@ fn replaced(
         let bytes = if key == "model" || document.get(key) == Some(value) {
             body.get(span.start..span.end)?.to_vec()
         } else if let Some(wanted) = document.get(key) {
-            serde_json::to_vec(wanted).ok()?
+            wanted.to_string().into_bytes()
         } else {
             continue;
         };
-        kept.push((span.start, member(key, &bytes)?));
+        kept.push((span.start, member(key, &bytes)));
     }
     kept.sort_by_key(|(at, _)| *at);
     let mut members: Vec<Vec<u8>> = kept.into_iter().map(|(_, m)| m).collect();
     for (key, value) in document {
         if !current.contains_key(key) {
-            members.push(member(key, &serde_json::to_vec(value).ok()?)?);
+            members.push(member(key, value.to_string().as_bytes()));
         }
     }
     let mut out = Vec::with_capacity(body.len());
@@ -511,11 +529,13 @@ fn replaced(
 }
 
 /// One member, `"key":value`, `value` as written.
-fn member(key: &str, value: &[u8]) -> Option<Vec<u8>> {
-    let mut m = serde_json::to_vec(key).ok()?;
+fn member(key: &str, value: &[u8]) -> Vec<u8> {
+    let mut m = serde_json::Value::String(key.to_string())
+        .to_string()
+        .into_bytes();
     m.push(b':');
     m.extend_from_slice(value);
-    Some(m)
+    m
 }
 
 /// Whether the kernel must verify a principal before the first piece. Every claimed request of this

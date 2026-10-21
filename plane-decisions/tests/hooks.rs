@@ -122,6 +122,34 @@ fn a_rewrite_redacts_by_omission() {
     assert_eq!(view.rewritten.as_deref(), Some(want), "{view:?}");
 }
 
+/// RED (review of the rewrite, the span scanner's depth): a caller cannot make a hook's rewrite
+/// silently not apply by nesting a member deeper than the span scanner reads (64): the field a
+/// redaction hook omits never reaches the far end.
+#[test]
+fn a_redaction_applies_over_a_deeply_nested_body() {
+    let door = open(TWO);
+    let deep = format!("{}{}", "[".repeat(70), "]".repeat(70));
+    let body =
+        format!(r#"{{"model":"a","deep":{deep},"pii":{{"ssn":"123-45-6789"}},"state":{{}}}}"#);
+    let view = door.project(
+        1,
+        SYSTEMONE,
+        body.as_bytes(),
+        Some(&rewrite_of(r#"{"state":{},"deep":[]}"#)),
+    );
+    assert_eq!(view.outcome, Some(Outcome::Ready), "{view:?}");
+    let kept = view.rewritten.expect("the hook's rewrite applies");
+    assert!(
+        !String::from_utf8_lossy(&kept).contains("123-45-6789"),
+        "the omitted field reaches the far end"
+    );
+    let mut bufs = Bufs::new(1 << 16);
+    assert_eq!(door.arrive(1, body.as_bytes()).outcome, Outcome::Ready);
+    door.piece(1, Given::attempt(1), &mut bufs);
+    let sent = door.piece(1, Given::caller(&kept), &mut bufs);
+    assert!(sent.far && !String::from_utf8_lossy(&sent.bytes).contains("123-45-6789"));
+}
+
 /// RED (coordinator ruling): a rewrite naming another model is no switch of provider: `project`
 /// REFUSES it, the hook's failure, which the kernel answers by that hook's `on_error`; naming the
 /// routed model applies.

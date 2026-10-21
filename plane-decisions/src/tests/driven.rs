@@ -751,6 +751,21 @@ fn a_rewrite_naming_another_model_is_refused() {
     );
 }
 
+/// RED (review of the rewrite, the span scanner's depth): a rewrite the hook answered ALWAYS
+/// applies. A caller member nested past the span scanner's depth (`MAX_JSON_DEPTH`, 64; serde reads
+/// to 128) left the caller's bytes unreadable, and the rewrite did not apply: the member a redaction
+/// hook omitted went upstream. Now the replacement is written from the hook's document itself.
+#[test]
+fn a_rewrite_applies_over_a_body_nested_past_the_span_scanners_depth() {
+    let deep = format!("{}{}", "[".repeat(70), "]".repeat(70));
+    let body = format!(r#"{{"model":"m","deep":{deep},"pii":"123-45-6789","state":{{}}}}"#);
+    let out = rewritten(body.as_bytes(), &rewrite_of(r#"{"state":{}}"#), "m")
+        .expect("no other model named")
+        .expect("the hook's rewrite applies");
+    let out: serde_json::Value = serde_json::from_slice(&out).expect("JSON");
+    assert_eq!(out, serde_json::json!({"model": "m", "state": {}}));
+}
+
 /// A rewrite that changes nothing, names no document, or meets a body that is no object, leaves the
 /// request as it was (1.5.5).
 #[test]
