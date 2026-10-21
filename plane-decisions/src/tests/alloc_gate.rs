@@ -6,11 +6,21 @@
 //! body is borrowed where it already lives, and the only copy this call makes is the envelope's
 //! `content-type` field.
 
+use busbar_contract::alloc_counter::Counting;
 use busbar_contract::plane::Plane;
 
-use super::alloc_counter::allocations_of;
 use super::common::{self, sealed_destination, Scaffold};
 use crate::{ops, DecisionPlane};
+
+/// The test build's one allocator: busbar-contract's counting allocator (`alloc-counter`, a
+/// dev-dependency feature), so this crate holds no `unsafe` of its own.
+#[global_allocator]
+static A: Counting = Counting::new();
+
+/// How many allocations `f` made on this thread, read off the contract's counter.
+fn allocations_of(f: impl FnOnce()) -> u64 {
+    A.allocations_of(f)
+}
 
 /// One well-formed `systemone` request body.
 const BODY: &[u8] = br#"{"state":{"a":1},"context":{}}"#;

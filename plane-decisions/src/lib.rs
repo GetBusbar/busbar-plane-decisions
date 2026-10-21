@@ -36,8 +36,7 @@
 //! `src/tests/jev.rs::pii_witness_never_surfaces_state_or_answers_in_any_fact` drives a fixture whose
 //! body echoes both and asserts no fact this plane emits contains either value.
 
-#![cfg_attr(not(test), forbid(unsafe_code))]
-#![cfg_attr(test, deny(unsafe_code))]
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 mod claims;
@@ -146,10 +145,10 @@ mod tests {
     /// The crate root's prose, held to the tree it describes.
     mod lib;
 
-    /// The crate's one `#[global_allocator]` and its count, every in-crate allocation gate's.
-    #[allow(unsafe_code)]
-    mod alloc_counter;
-    mod alloc_gate;
+    // `alloc_gate.rs` (the relay's allocation pin) is wired in when the busbar pin carries
+    // busbar-contract's `alloc-counter` feature (ARCHITECT addendum 2026-10-21 08:30Z): its
+    // `#[global_allocator]` is `busbar_contract::alloc_counter::Counting`, and this crate keeps the
+    // literal `forbid(unsafe_code)`.
     mod byte_fixtures;
     /// The scaffolding one plane call needs.
     mod common;
