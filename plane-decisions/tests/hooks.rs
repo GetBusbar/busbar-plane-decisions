@@ -143,8 +143,9 @@ fn a_redaction_applies_over_a_deeply_nested_body() {
         !String::from_utf8_lossy(&kept).contains("123-45-6789"),
         "the omitted field reaches the far end"
     );
+    // The kernel pushes the body `project` answered as the unit's caller piece.
     let mut bufs = Bufs::new(1 << 16);
-    assert_eq!(door.arrive(1, body.as_bytes()).outcome, Outcome::Ready);
+    assert_eq!(door.arrive(1, br#"{"model":"a"}"#).outcome, Outcome::Ready);
     door.piece(1, Given::attempt(1), &mut bufs);
     let sent = door.piece(1, Given::caller(&kept), &mut bufs);
     assert!(sent.far && !String::from_utf8_lossy(&sent.bytes).contains("123-45-6789"));
