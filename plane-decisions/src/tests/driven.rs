@@ -1074,6 +1074,11 @@ fn a_rewrite_over_a_body_that_does_not_parse_is_a_fault_before_the_rewrite_is_re
         }
     }
     assert_eq!(rewritten(br#"{"model":"m"}"#, b"not json", "m"), Ok(None));
+    // A body the head cannot read at all is a FAULT too, never "does not apply".
+    assert_eq!(
+        rewritten(b"{\"model\":", &rewrite_of(r#"{"state":{}}"#), "m"),
+        Err(NotApplied::Fault)
+    );
 }
 
 /// B3: the splice check reads the document without building it, as strictly as the DOM parse.
