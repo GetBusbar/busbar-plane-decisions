@@ -1,44 +1,25 @@
-//! The `jev` dialect: plain HTTP+JSON, byte-identity passthrough.
+//! The wire words both dialects share: plain HTTP+JSON, the body relayed as the caller and the far
+//! end wrote it.
 //!
-//! There is no envelope to read the way MCP/A2A read a JSON-RPC envelope — jev's two operations are
-//! named by the HTTP verb and path (`ops.rs`), and a request or response body is a bare JSON
-//! document forwarded UNCHANGED. This module's whole job is: name the small, closed set of pointers
-//! this plane ever resolves (never `state`, never `answers` — see `facts.rs`'s module note), and
-//! read them through the contract's own span grammar rather than a second parser.
+//! There is no envelope to read the way MCP/A2A read a JSON-RPC envelope: each dialect's decision
+//! call is named by its HTTP verb and path (`ops.rs`), and a request or an answer is one JSON
+//! document. This module names the small, closed set of pointers the plane reads (a request's
+//! top-level `model`; an answer's usage counts, by dialect), never `state` and never `answers`, and
+//! reads them through the contract's own span grammar rather than a second parser.
 //!
-//! ## Byte-identity passthrough, precisely
+//! ## What reaches the far end, precisely
 //!
-//! "Byte-identity" means the body bytes that arrive are the body bytes that leave, on both legs:
-//! `encode_egress` forwards the caller's request body to the provider unchanged, and
-//! `encode_response` forwards the provider's response body to the caller unchanged. The pointer
-//! list below is read ALONGSIDE that forwarding, never in place of it — `Ir::body()` always carries
-//! the whole document; `Ir::pointer()` is a read into a handful of declared members of it, and
-//! nothing this plane does discards or rewrites the rest.
-
-use busbar_contract::bounded::{Ir, PlaneAlloc};
-use busbar_contract::unit::Ctx;
-use busbar_contract::wire::Decode;
-
-/// The pointer a response carries its top-level error object at, where it errored.
-///
-/// Presence alone is what this plane reads — never the error's own fields, which could echo
-/// caller-supplied content back (jev's error bodies are not exempted from the PII rule by being
-/// "just an error").
-pub const PTR_ERROR: &str = "/error";
-
-/// The pointer a response carries its provider-assigned request identifier at, where it names one.
-/// Plain metadata: a correlation handle, never decision content.
-pub const PTR_REQUEST_ID: &str = "/request_id";
-
-/// The pointer a `systemone` request or response body echoes a bare `id` at, where jev uses that
-/// spelling instead of `request_id`. Read as a fallback, same as `PTR_REQUEST_ID`.
-pub const PTR_ID: &str = "/id";
+//! The caller's body reaches the far end as the caller sent it, with two exceptions. A configured
+//! `upstream_model` that differs from the name the caller used is spliced over the top-level
+//! `model` value (`driven::spliced`). A bound request-stage hook's rewrite replaces the request's
+//! members wholesale with its document, as 1.5.5 replaced the body (`driven::rewritten`). With
+//! neither, every byte is the caller's. The far end's answer
+//! reaches the caller unchanged; its counts are read as it passes, never in place of relaying it.
 
 /// The pointer a SUCCESSFUL `systemone` response reports its billable usage count at.
 ///
-/// This is the one number `plane.rs::meter` reads. Nested under `usage` rather than top-level so a
-/// provider that reports several billing dimensions in the future has somewhere to add a sibling
-/// without this plane growing a second top-level member to ignore.
+/// A `jev` success's decision count (`driven::FarEndReading::counts`; one decision, the plane's
+/// floor, when it states none).
 pub const PTR_USAGE_UNITS: &str = "/usage/units";
 
 /// The pointers a SUCCESSFUL `systemone` response reports its input and output tokens at, where it
@@ -53,81 +34,20 @@ pub const PTR_USAGE_OUTPUT_TOKENS: &str = "/usage/output_tokens";
 /// from the answer already read (`execution.states`; an answer with no count refuses loudly").
 pub const PTR_EXECUTION_STATES: &str = "/execution/states";
 
-/// Every pointer this plane resolves in a RESPONSE body (`systemone`, `evaluate` or `models`). Declared here
-/// once, so the "never resolves `/state` or `/answers`" claim is checkable by reading one list
-/// rather than auditing every call site.
-pub const RESPONSE_PTRS: &[&str] = &[
-    PTR_ERROR,
-    PTR_REQUEST_ID,
-    PTR_ID,
-    PTR_USAGE_UNITS,
-    PTR_USAGE_INPUT_TOKENS,
-    PTR_USAGE_OUTPUT_TOKENS,
-    PTR_EXECUTION_STATES,
-];
-
 /// The pointer a request names the model it is routed over at: its top-level `model` (THE DESIGN
 /// section 2, model resolution; DECISIONS D8b "REQUEST_PTRS += /model (metadata)"). Routing
 /// metadata, never decision content.
 pub const PTR_MODEL: &str = "/model";
 
-/// Every pointer this plane resolves in a REQUEST body: the model it routes over, and nothing else.
-/// A `systemone` request carries the caller's `state`, which this plane never reads; jev names its
-/// operation in the path, so the top-level `model` is the one member routing needs
-/// (`driven::route_model`) and the one `upstream_model` rewrites (`driven::spliced`).
-pub const REQUEST_PTRS: &[&str] = &[PTR_MODEL];
-
-/// The span view of a body, built from one of the two declared pointer lists above.
-///
-/// One scan of one closed grammar, into the unit's own arena — the same seam `busbar-plane-a2a`
-/// reads through, named here rather than re-derived, so a declared-pointer list is the only way
-/// this plane's view of a body can ever widen.
-pub fn view<'u>(body: &'u [u8], pointers: &[&'u str], ctx: &Ctx<'u>) -> Result<Ir<'u>, Decode> {
-    let spans = busbar_contract::spans::resolve(body, pointers, ctx.arena())
-        .map_err(|_| Decode::Oversize)?;
-    Ok(Ir::new(body, spans))
-}
-
-/// The span view of a body against an arbitrary arena, for callers (tests, `encode_egress`'s own
-/// rebuild) that hold an arena without a full `Ctx`.
-pub fn view_with_arena<'u>(
-    body: &'u [u8],
-    pointers: &[&'u str],
-    arena: &'u dyn PlaneAlloc,
-) -> Result<Ir<'u>, Decode> {
-    let spans =
-        busbar_contract::spans::resolve(body, pointers, arena).map_err(|_| Decode::Oversize)?;
-    Ok(Ir::new(body, spans))
-}
-
-/// Whether a body has a member at one declared pointer at all.
-#[must_use]
-pub fn has(body: &[u8], pointer: &str) -> bool {
-    read_raw(body, pointer).is_some()
-}
-
-/// The raw bytes at one declared pointer of a body.
+/// The raw bytes at one declared pointer of a body (the crate's tests' reference reader; the door
+/// resolves its pointers where it reads them, so an unreadable body is never taken to be absent).
+#[cfg(test)]
 #[must_use]
 pub fn read_raw<'u>(body: &'u [u8], pointer: &str) -> Option<&'u [u8]> {
     match busbar_contract::spans::resolve_pointer(body, pointer) {
         busbar_contract::spans::Resolved::Found(span) => body.get(span.start..span.end),
         _ => None,
     }
-}
-
-/// The string value at one declared pointer, with its quotes stripped.
-#[must_use]
-pub fn read_str<'u>(body: &'u [u8], pointer: &str) -> Option<&'u str> {
-    let raw = read_raw(body, pointer)?;
-    let inner = raw.strip_prefix(b"\"")?.strip_suffix(b"\"")?;
-    core::str::from_utf8(inner).ok()
-}
-
-/// The integer value at one declared pointer, where it parses as a bare JSON number.
-#[must_use]
-pub fn read_u64(body: &[u8], pointer: &str) -> Option<u64> {
-    let raw = read_raw(body, pointer)?;
-    core::str::from_utf8(raw).ok()?.parse().ok()
 }
 
 /// The egress-auth scheme an outbound hop to the provider is decorated under.

@@ -1,12 +1,11 @@
-# busbar-plane-decisions — THE DECISIONS PLANE (jev), as an ADAPTER and nothing else.
+# busbar-plane-decisions — THE DECISIONS PLANE, as one door over its two dialects.
 #
 # WHAT THIS CRATE IS. One implementation of the plugin contract's plane kind for the "decision"
-# protocol surface, dialect `jev` — a byte-identity passthrough to api.typesafe.ai's two operations:
-# POST /v1/systemone and GET /v1/models. The signed design (DECISION #39, jev v5 sign-off) rules
-# this the ONE crate for the whole plane: unlike busbar-plane-mcp/busbar-plane-a2a, which are pure
-# adapters over a separate "impure host" crate (busbar-mcp/busbar-a2a) that carries the config
-# section, the admin wiring and the registry declaration, jev is deliberately a SINGLE crate that
-# holds the pure plane AND its own typed config section.
+# protocol surface: a request routed by its model to a decision provider in either of the two
+# dialects the plane speaks, `jev` (POST /v1/systemone) and `nanojev` (POST /api/evaluate), its
+# body relayed as the caller wrote it but for the governed top-level `model`. The signed design
+# (DECISION #39, jev v5 sign-off) rules this the ONE crate for the whole plane: it holds the door
+# AND its own typed config section.
 #
 # THE SECOND NON-CONTRACT EDGE IS GONE TOO, AND WITH IT THE ONE BANNED-SOURCE PATH ANY PURE PLANE
 # HAD. This was the only pure plane whose manifest named the legacy plugin-facing crate — 1
@@ -29,12 +28,10 @@
 # this plane is wired, it is written against whatever seam exists then, not against a kernel type
 # resurrected from a constant nobody read.
 #
-# WHAT THIS CRATE IS NOT. There is no governance here, no breaker, no hook seat, no approval
-# decision and no metering arithmetic. Those are units, and a unit is on the other side of the
-# kernel from a plane. The metering method returns LOCATORS — where the numbers are — and never a
-# number the ledger would post. The routing method returns a plan, never a connection. jev holds no
-# durable state of its own (it is a stateless request/response passthrough, provider-scoped), so it
-# declares no record schemas.
+# WHAT THIS CRATE IS NOT. There is no governance here, no breaker, no approval decision and no
+# metering arithmetic: those are the kernel's. The door states counts, never a price; it projects a
+# request for the deployment's hooks and applies their rewrites, as every plane does, and never
+# decides on the content itself. It keeps no durable state, so it declares no record schemas.
 [package]
 name = "busbar-plane-decisions"
 version = "1.6.0"
@@ -52,8 +49,9 @@ links = "busbar-door-cells-busbar-plane-decisions"
 [lib]
 name = "busbar_plane_decisions"
 path = "src/lib.rs"
-# rlib: the LINKED door, which a busbar build names as a compiled-in row (`plane_door::door`, the
-# root's `plane-decisions` row on the plane axis). The dropped-in door is the sibling
+# rlib: the LINKED door, which a busbar build names as a compiled-in row
+# (`busbar_plane_decisions::door`, the root's `plane-decisions` row on the plane axis). The
+# dropped-in door is the sibling
 # `busbar-plane-decisions-plugin` cdylib, which exports this same door as its one symbol; this crate
 # exports none.
 crate-type = ["rlib"]
@@ -69,11 +67,17 @@ crate-type = ["rlib"]
 busbar-contract = { workspace = true }
 # The object notation the jev dialect speaks. Byte-identity passthrough of the body is the norm;
 # this crate parses ONLY the handful of declared pointers (never `state`/`answers`) to build facts.
-serde_json = { workspace = true }
+# `unbounded_depth`: a body the span scanner cannot walk is read as 1.5.5 read it, to its parse depth
+# of 128 (`driven::MAX_PARSE_DEPTH`, scanned first); serde's own limit stops one level short of it.
+# `float_roundtrip`: a document the plane builds (a rewrite's) holds each number at the nearest
+# double, as sonic-rs 0.5.8 built it in 1.5.5. Whether a number 1.5.5 decoded was in range at all is
+# not serde's to say: sonic-number 0.1.2 capped an exponent at 1000 and truncated long mantissas, so
+# the plane reads it with its port of that reader (`src/sonic_number`).
+serde_json = { workspace = true, features = ["unbounded_depth", "float_roundtrip"] }
 serde = { workspace = true }
 
 [dev-dependencies]
 # The TEST-ONLY seal (#65). `busbar_contract::plugin::TestKernelSeal` is the one blessed
 # fixture implementor of the SEALED `KernelSeal` trait. Dev-only and feature-gated, so it is absent
 # from every release build.
-busbar-contract = { workspace = true, features = ["test-seal"] }
+busbar-contract = { workspace = true, features = ["test-seal", "alloc-counter"] }

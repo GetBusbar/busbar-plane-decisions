@@ -1,9 +1,10 @@
 use super::*;
 use crate::ops;
 
-/// `section`'s routes with no provider facts stated.
+/// `section`'s routes, the host stating provider `typesafe`'s protocol `jev`.
 fn routed(section: &DecisionsSection) -> BTreeMap<String, ModelRoute> {
-    routes(section, &BTreeMap::new()).expect("every model's dialect is spoken")
+    let facts = BTreeMap::from([("typesafe".to_string(), "jev".to_string())]);
+    routes(section, &facts).expect("every model's dialect is spoken")
 }
 
 /// RED (audit plane-decisions#3): each dialect's claim is published when a model of it is
@@ -53,6 +54,30 @@ fn a_models_dialect_is_its_override_or_its_providers_protocol() {
     assert!(
         words.contains("bogus") && words.contains("jev, nanojev"),
         "{words}"
+    );
+}
+
+/// RED (audit plane-decisions R2 #3): #51, "Resolution: model override if present, else the
+/// provider/catalog default"; THE DESIGN section 2, "a model's dialect is its override or its
+/// provider's protocol". A model with no override whose provider the host stated no protocol for
+/// has no dialect: it is refused by name, never resolved to the first dialect.
+#[test]
+fn a_model_of_an_unstated_provider_is_refused_by_name() {
+    let facts = BTreeMap::from([("p".to_string(), "nanojev".to_string())]);
+    let section = read_settings(br#"{"models":{"m":{"provider":"ghost"},"n":{"provider":"p"}}}"#)
+        .expect("the section reads");
+    let words = routes(&section, &facts).expect_err("an unstated provider resolves no dialect");
+    assert!(
+        words.contains("decisions.models.m") && words.contains("'ghost'"),
+        "{words}"
+    );
+    // Its own `protocol` override still routes it.
+    let overridden =
+        read_settings(br#"{"models":{"m":{"provider":"ghost","protocol":"nanojev"}}}"#)
+            .expect("the section reads");
+    assert_eq!(
+        routes(&overridden, &facts).expect("the override routes")["m"].dialect,
+        tail::DIALECT_NANOJEV
     );
 }
 
@@ -163,4 +188,11 @@ fn the_section_under_its_verb_reads_as_the_section() {
     assert!(words.contains("modles"), "{words}");
     // RED ARM: the verb beside another member is no wrapper; it is an unknown member.
     assert!(read_settings(br#"{"decisions":{},"models":{}}"#).is_err());
+}
+
+/// The unit ceiling `tests/door.rs` drives the door to, spelled there as a number because the
+/// crate's only public item is the door: the two are one value.
+#[test]
+fn the_unit_ceiling_is_the_one_the_door_tests_drive() {
+    assert_eq!(MAX_UNITS, 4096);
 }

@@ -17,9 +17,8 @@ fn systemone_arrives_as_the_first_op_class_with_a_principal() {
 
 #[test]
 fn models_is_not_claimed() {
-    assert_eq!(arrive("GET", ops::PATH_MODELS), None);
-    assert!(!tail::CLAIMS.iter().any(|(_, t, _)| *t == ops::PATH_MODELS));
-    assert!(!tail::OP_CLASSES.contains(&ops::OP_MODELS));
+    assert_eq!(arrive("GET", "/v1/models"), None);
+    assert!(!tail::CLAIMS.iter().any(|(_, t, _)| *t == "/v1/models"));
 }
 
 #[test]
@@ -113,7 +112,7 @@ fn far_end_pieces_are_relayed_unchanged_and_the_count_read_over_the_whole_answer
         counts[0],
         Some(Units {
             class: DECISION,
-            reported: true,
+            source: Source::Reported,
             amount: 42
         })
     );
@@ -316,9 +315,10 @@ fn a_request_routes_over_the_model_it_names() {
         route_model(br#"{"state":{}}"#, &one, |_| true).map(|r| r.0),
         Ok("jev")
     );
+    // A body 1.5.5 could not parse is refused as 1.5.5 refused it, never routed as naming none.
     assert_eq!(
         route_model(b"not json", &one, |_| true).map(|r| r.0),
-        Ok("jev")
+        Err(Unrouted::Unparsable)
     );
     assert_eq!(
         route_model(br#"{"model":"other"}"#, &one, |_| true),
@@ -365,7 +365,10 @@ fn the_request_fee_is_counted_on_a_success_alone() {
     let mut ok = FarEndReading::new();
     ok.piece(br#"{"usage":{"units":3}}"#);
     let fee = ok.counts(Some(200)).expect("a success")[3].expect("a success owes its fee");
-    assert_eq!((fee.class, fee.amount, fee.reported), (FEE, 1, true));
+    assert_eq!(
+        (fee.class, fee.amount, fee.source),
+        (FEE, 1, Source::Reported)
+    );
     // RED ARMS.
     assert_eq!(
         ok.counts(Some(422)),
@@ -412,8 +415,8 @@ fn every_caller_field_but_the_governed_set_is_relayed() {
 /// The money rule's reading of a whole answer by its declared pointers, as the body would be read
 /// kept whole: the reference the piece-by-piece reading is held to.
 fn by_pointer(status: u32, body: &[u8]) -> Result<Vec<(u32, u64)>, UnreadableUsage> {
-    use crate::codec::{read_raw, PTR_ERROR};
-    let ok = (200..300).contains(&status) && read_raw(body, PTR_ERROR).is_none_or(|e| e == b"null");
+    use crate::codec::read_raw;
+    let ok = (200..300).contains(&status) && read_raw(body, "/error").is_none_or(|e| e == b"null");
     if !ok {
         return Ok(vec![]);
     }
@@ -580,4 +583,767 @@ fn a_model_of_the_other_dialect_is_this_dialects_unknown_model() {
     );
     assert_eq!(route_model(br#"{}"#, &models, jev).map(|r| r.0), Ok("j"));
     assert_eq!(route_model(br#"{}"#, &models, nano).map(|r| r.0), Ok("n"));
+}
+
+/// RED (audit plane-decisions R3, the count's source): a success whose answer states no decision
+/// count bills the plane's floor of one decision, stated as the plane's (`UNITS_FLOOR`), never as a
+/// count the far end reported (THE DESIGN section 7 keeps the two apart); a stated count, and the
+/// request fee, stay reported.
+#[test]
+fn a_success_with_no_count_bills_the_planes_floor_not_a_far_end_count() {
+    let mut none = FarEndReading::new();
+    none.piece(br#"{"answers":{}}"#);
+    let counts = none.counts(Some(200)).expect("a success");
+    assert_eq!(
+        counts[0],
+        Some(Units {
+            class: DECISION,
+            source: Source::Floor,
+            amount: 1
+        })
+    );
+    assert_eq!(counts[3].map(|f| f.source), Some(Source::Reported));
+    let mut stated = FarEndReading::new();
+    stated.piece(br#"{"usage":{"units":5}}"#);
+    let counts = stated.counts(Some(200)).expect("a success");
+    assert_eq!(counts[0].map(|d| d.source), Some(Source::Reported));
+}
+
+/// RED (audit plane-decisions R3, the unbounded echo): an unknown model's name is echoed into the
+/// refusal whole, in 1.5.5's and predev's words, however long, up to what the refusal's words may
+/// run (`MAX_REFUSAL_TEXT`); only a name past that is cut, so the refusal's words never outgrow
+/// what an `arrive` may answer.
+#[test]
+fn an_unknown_models_echoed_name_is_bounded() {
+    let models = std::collections::BTreeMap::from([("jev".to_string(), ())]);
+    let short = route_model(br#"{"model":"zz"}"#, &models, |_| true).expect_err("unknown");
+    assert_eq!(
+        short.text(),
+        "The model 'zz' does not exist or you do not have access to it."
+    );
+    // A name well past a kilobyte is echoed whole.
+    let kilobytes = "k".repeat(64 * 1024);
+    let body = format!("{{\"model\":\"{kilobytes}\"}}");
+    let whole = route_model(body.as_bytes(), &models, |_| true).expect_err("unknown");
+    assert_eq!(
+        whole.text(),
+        format!("The model '{kilobytes}' does not exist or you do not have access to it.")
+    );
+    let long = "é".repeat(600_000);
+    let body = format!("{{\"model\":\"{long}\"}}");
+    let unknown = route_model(body.as_bytes(), &models, |_| true).expect_err("unknown");
+    assert_eq!(unknown.status(), 404);
+    let text = unknown.text();
+    let cap = busbar_contract::abi::plane::MAX_REFUSAL_TEXT as usize;
+    assert!(
+        text.len() <= cap && text.len() > cap - 8,
+        "the refusal echoes {} bytes",
+        text.len()
+    );
+    assert!(
+        text.starts_with("The model 'éé") && text.contains("...' does not exist"),
+        "{}",
+        text.chars().take(40).collect::<String>()
+    );
+    let exact = "m".repeat(MAX_ECHOED_MODEL);
+    assert_eq!(echoed(&exact), exact, "a name at the bound is echoed whole");
+    assert_eq!(
+        Unrouted::Unknown(exact).text().len(),
+        cap,
+        "and its refusal runs exactly the cap"
+    );
+    let over = "m".repeat(MAX_ECHOED_MODEL + 1);
+    assert!(echoed(&over).ends_with("...") && echoed(&over).len() == MAX_ECHOED_MODEL);
+}
+
+#[test]
+fn a_target_names_its_claims_dialect() {
+    assert_eq!(dialect_at("/v1/systemone"), Some(tail::DIALECT_JEV));
+    assert_eq!(dialect_at("/v1/systemone?x=1"), Some(tail::DIALECT_JEV));
+    assert_eq!(dialect_at("/api/evaluate"), Some(tail::DIALECT_NANOJEV));
+    assert_eq!(dialect_at("/v1/models"), None);
+}
+
+/// A hook's rewrite (1.5.5's rewrite JSON) as the kernel hands it: one message whose content is
+/// `document`.
+fn rewrite_of(document: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "messages": [{ "role": "user", "content": document }],
+        "tools": [],
+    }))
+    .expect("JSON")
+}
+
+/// THE REWRITE REPLACES THE REQUEST WHOLESALE, as 1.5.5 replaced the body: the members the document
+/// states, the caller's own bytes kept where a value is unchanged, the caller's `model` kept, and a
+/// member the caller did not send added.
+#[test]
+fn a_rewrite_replaces_the_request_with_its_document() {
+    let body = b"{ \"state\" : {\"amount\": 7},\n  \"model\":\"m\", \"note\": [1, 2] }";
+    let out = rewritten(
+        body,
+        &rewrite_of(r#"{"state":{"amount":0},"note":[1,2]}"#),
+        "m",
+    )
+    .expect("the model is the routed one")
+    .expect("applied");
+    assert_eq!(
+        String::from_utf8(out).expect("UTF-8"),
+        r#"{"state":{"amount":0},"model":"m","note":[1, 2]}"#
+    );
+    let added = rewritten(
+        br#"{"state":{}}"#,
+        &rewrite_of(r#"{"state":{},"context":{"k":1}}"#),
+        "m",
+    )
+    .expect("no model named")
+    .expect("applied");
+    assert_eq!(added, br#"{"state":{},"context":{"k":1}}"#);
+    let into_empty = rewritten(b"{}", &rewrite_of(r#"{"state":1}"#), "m")
+        .expect("no model named")
+        .expect("applied");
+    assert_eq!(into_empty, br#"{"state":1}"#);
+    // An object message itself, with no role, is a document too.
+    let bare = br#"{"messages":[{"state":2}],"tools":[]}"#;
+    assert_eq!(
+        rewritten(br#"{"state":1}"#, bare, "m")
+            .expect("no model named")
+            .expect("applied"),
+        br#"{"state":2}"#
+    );
+}
+
+/// RED (coordinator ruling on the rewrite, 1.5.5 parity: v1.5.5 `RewriteReply` replaces the body):
+/// a member the document omits is DROPPED, never kept, so a hook redacts by omission.
+#[test]
+fn a_member_the_rewrite_omits_is_dropped() {
+    let body = br#"{"model":"m","state":{"amount":7},"pii":{"ssn":"123-45-6789"}}"#;
+    let out = rewritten(body, &rewrite_of(r#"{"state":{"amount":7}}"#), "m")
+        .expect("no other model named")
+        .expect("applied");
+    assert_eq!(out, br#"{"model":"m","state":{"amount":7}}"#);
+    assert!(!String::from_utf8_lossy(&out).contains("123-45-6789"));
+}
+
+/// RED (coordinator ruling on the rewrite): the `model` is no rewritable member. A document naming
+/// the routed model (or the caller's own) applies; one naming another is refused as the hook's
+/// failure, never a silent switch of provider.
+#[test]
+fn a_rewrite_naming_another_model_is_refused() {
+    let body = br#"{"model":"m","state":{}}"#;
+    assert_eq!(
+        rewritten(body, &rewrite_of(r#"{"model":"other","state":{}}"#), "m"),
+        Err(NotApplied::Model(ModelRewritten {
+            named: "other".to_string()
+        }))
+    );
+    let same = rewritten(body, &rewrite_of(r#"{"model":"m","state":{"a":1}}"#), "m")
+        .expect("the routed model")
+        .expect("applied");
+    assert_eq!(same, br#"{"model":"m","state":{"a":1}}"#);
+    // A request naming no model, routed over the only one: the document may name that one.
+    assert_eq!(
+        rewritten(
+            br#"{"state":{}}"#,
+            &rewrite_of(r#"{"model":"m","state":{}}"#),
+            "m"
+        ),
+        Ok(None)
+    );
+}
+
+/// RED (review of the rewrite, the span scanner's depth): a rewrite the hook answered ALWAYS
+/// applies. A caller member nested past the span scanner's depth (`MAX_JSON_DEPTH`, 64; serde reads
+/// to 128) left the caller's bytes unreadable, and the rewrite did not apply: the member a redaction
+/// hook omitted went upstream. Now the replacement is written from the hook's document itself.
+#[test]
+fn a_rewrite_applies_over_a_body_nested_past_the_span_scanners_depth() {
+    let deep = format!("{}{}", "[".repeat(70), "]".repeat(70));
+    let body = format!(r#"{{"model":"m","deep":{deep},"pii":"123-45-6789","state":{{}}}}"#);
+    let out = rewritten(body.as_bytes(), &rewrite_of(r#"{"state":{}}"#), "m")
+        .expect("no other model named")
+        .expect("the hook's rewrite applies");
+    let out: serde_json::Value = serde_json::from_slice(&out).expect("JSON");
+    assert_eq!(out, serde_json::json!({"model": "m", "state": {}}));
+}
+
+/// A rewrite that changes nothing, names no document, or meets a body that is no object, leaves the
+/// request as it was (1.5.5).
+#[test]
+fn a_rewrite_that_does_not_apply_leaves_the_request() {
+    let body = br#"{"state":{"amount":7}}"#;
+    for rewrite in [
+        &rewrite_of(r#"{"state":{"amount":7}}"#)[..],
+        br#"{"messages":[],"tools":[]}"#,
+        &rewrite_of("not a document")[..],
+        b"not json",
+    ] {
+        assert_eq!(rewritten(body, rewrite, "m"), Ok(None));
+    }
+    assert_eq!(
+        rewritten(b"[1,2]", &rewrite_of(r#"{"state":1}"#), "m"),
+        Ok(None)
+    );
+}
+
+/// The projection names the entry the request routes over among its dialect's models, the
+/// dialect's name and the document's characters.
+#[test]
+fn a_request_is_projected_over_its_dialects_models() {
+    let routes = std::collections::BTreeMap::from([
+        ("a".to_string(), tail::DIALECT_JEV),
+        ("n".to_string(), tail::DIALECT_NANOJEV),
+    ]);
+    let body = r#"{"model":"a","state":"é"}"#.as_bytes();
+    let view = project_hook(body, tail::DIALECT_JEV, &routes, |d| *d);
+    assert_eq!(
+        view,
+        Projected {
+            entry: "a",
+            dialect: "jev",
+            chars: body.len() - 1,
+        }
+    );
+    // The only model of its dialect is the default; a model of the other dialect is none.
+    assert_eq!(
+        project_hook(b"{}", tail::DIALECT_NANOJEV, &routes, |d| *d).entry,
+        "n"
+    );
+    assert_eq!(
+        project_hook(br#"{"model":"n"}"#, tail::DIALECT_JEV, &routes, |d| *d).entry,
+        ""
+    );
+}
+
+/// THE 1.5.5 PARITY TABLE FOR THE HEAD READ (`readable`): what 1.5.5's validating parse (sonic-rs
+/// 0.5.8: top-level keys and the values of `HEAD_KEYS` decoded, every other value SKIPPED by
+/// `skip_one(true)`) answered for each body. `Ok(model)` = accepted; `Err` = its 400. Derived from
+/// sonic-rs 0.5.8 `parser.rs` (`skip_escaped_chars`: after a backslash the next byte is consumed and
+/// for `u` four more, unchecked, with six bytes needed from the `u`; the other escapes come from
+/// `ESCAPED_TAB`; control bytes refuse) and `lazy_body.rs` (`Head`, `HeadKey`).
+#[test]
+fn the_head_read_matches_sonic_rs_0_5_8_on_escapes() {
+    let a = || Ok(Some(serde_json::json!("a")));
+    type Read = Result<Option<serde_json::Value>, Unrouted>;
+    let table: &[(&str, &[u8], Read)] = &[
+        // A skipped value's \u escape is never checked: invalid hex, lone surrogates (either half).
+        (
+            "invalid hex, skipped",
+            br#"{"model":"a","x":"\uZZZZ"}"#,
+            a(),
+        ),
+        ("short hex, skipped", br#"{"model":"a","x":"\u12G4"}"#, a()),
+        ("lone high, skipped", br#"{"model":"a","x":"\ud800"}"#, a()),
+        ("lone low, skipped", br#"{"model":"a","x":"\udc00"}"#, a()),
+        (
+            "reversed pair, skipped",
+            br#"{"model":"a","x":"\udc00\ud800"}"#,
+            a(),
+        ),
+        (
+            "valid pair, skipped",
+            br#"{"model":"a","x":"\ud83d\ude00"}"#,
+            a(),
+        ),
+        (
+            "nested in an array",
+            br#"{"model":"a","x":["\uXYZW",1]}"#,
+            a(),
+        ),
+        (
+            "a skipped object's key",
+            br#"{"model":"a","x":{"\ud800":"\uZZZZ"}}"#,
+            a(),
+        ),
+        (
+            "a skipped key before the model",
+            br#"{"x":"\uZZZZ","model":"a"}"#,
+            a(),
+        ),
+        ("root array element", br#"["\uZZZZ"]"#, Ok(None)),
+        // The four swallowed bytes may hold the closing quote, or an escaped one.
+        ("quote swallowed", br#"{"model":"a","x":"\u12\"}"}"#, a()),
+        (
+            "quote swallowed, then more",
+            br#"{"model":"a","x":"\u"   "}"#,
+            a(),
+        ),
+        ("escaped quote", br#"{"model":"a","x":"q\"uote"}"#, a()),
+        (
+            "escaped backslash then quote",
+            br#"{"model":"a","x":"q\\"}"#,
+            a(),
+        ),
+        (
+            "every simple escape",
+            br#"{"model":"a","x":"\"\\\/\b\f\n\r\t"}"#,
+            a(),
+        ),
+        // Refused in a skipped value all the same: a bad simple escape, a control byte.
+        (
+            "bad simple escape",
+            br#"{"model":"a","x":"\q"}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "bad escape x",
+            br#"{"model":"a","x":"\x41"}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "raw newline",
+            b"{\"model\":\"a\",\"x\":\"a\nb\"}",
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "raw tab",
+            b"{\"model\":\"a\",\"x\":\"a\tb\"}",
+            Err(Unrouted::Unparsable),
+        ),
+        // A backslash at the buffer's end: nothing to escape, or fewer than six bytes from the `u`.
+        (
+            "backslash at the end",
+            br#"{"model":"a","x":"\"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "u at the end",
+            br#"{"model":"a","x":"\u"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "u1234 at the end",
+            br#"["\u1234"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "five bytes from the u",
+            br#"["\u12"]"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "six bytes from the u, quote eaten",
+            br#"["\u123"]"#,
+            Err(Unrouted::Unparsable),
+        ),
+        ("valid, six bytes from the u", br#"["\u1234"]"#, Ok(None)),
+        // The values 1.5.5 DECODED refuse the same escapes: keys, the `HEAD_KEYS` values, a root string.
+        (
+            "invalid hex in a key",
+            br#"{"\uZZZZ":1}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "lone surrogate in a key",
+            br#"{"model":"a","\ud800":1}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "invalid hex in the model",
+            br#"{"model":"\uZZZZ"}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "lone surrogate in the model",
+            br#"{"model":"a\ud800"}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "invalid hex in system",
+            br#"{"model":"a","system":"\uZZZZ"}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "lone surrogate in system",
+            br#"{"model":"a","system":"\ud800"}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "lone surrogate in stream",
+            br#"{"model":"a","stream":"\ud800"}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "in stream_options",
+            br#"{"model":"a","stream_options":{"k":"\uZZZZ"}}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "in the shim key",
+            br#"{"model":"a","__busbar_gemini_json_array":["\ud800"]}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "in a non-string model",
+            br#"{"model":{"\ud800":1}}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        ("root string", br#""\uZZZZ""#, Err(Unrouted::Unparsable)),
+        // An escape decoded: a key spelled with one still names the model.
+        ("escaped key", br#"{"mod\u0065l":"a"}"#, a()),
+        // The rest of the grammar stays strict.
+        (
+            "trailing bytes",
+            br#"{"model":"a"} x"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "trailing comma",
+            br#"{"model":"a","x":[1,]}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "leading zero",
+            br#"{"model":"a","x":01}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "bare minus",
+            br#"{"model":"a","x":-}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "fraction needs a digit",
+            br#"{"model":"a","x":1.}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "exponent needs a digit",
+            br#"{"model":"a","x":1e}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        ("numbers", br#"{"model":"a","x":[-0,1.5e+3,2E-2,0.0]}"#, a()),
+        (
+            "bad literal",
+            br#"{"model":"a","x":tru}"#,
+            Err(Unrouted::Unparsable),
+        ),
+        (
+            "truncated",
+            br#"{"model":"a","x":[1,2"#,
+            Err(Unrouted::Unparsable),
+        ),
+        ("empty", b"", Err(Unrouted::Unparsable)),
+    ];
+    for (name, body, want) in table {
+        assert_eq!(
+            &readable(body),
+            want,
+            "{name}: {}",
+            String::from_utf8_lossy(body)
+        );
+    }
+}
+
+/// THE 1.5.5 PARITY TABLE FOR A ROOT SCALAR'S RANGE AND A SKIPPED VALUE'S DEPTH (`readable`), each
+/// outcome what 1.5.5's head parse answered (v1.5.5 `lazy_body.rs`, `Head`, over sonic-rs 0.5.8).
+///
+/// RED (opus review, B2): a root number 1.5.5 DECODED (`deserialize_any`, `parse_number`) refuses
+/// when it overflows to infinity (sonic-number 0.1.2 `FloatMustBeFinite`), where the head read only
+/// skipped it and served it. An integer past `u64` or `i64` is read as a finite double, served; a
+/// number inside a skipped value is never ranged; one inside a head value is.
+///
+/// RED (opus review, B3): sonic's checked skip has no depth bound, and a `\u` escape that swallows
+/// the closing quote leaves 1.5.5's depth scan reading the rest of the body as a string, so a body
+/// nested past 128 behind one was served, where the head read refused it at 128. A head value is
+/// held to the 253 levels sonic's deserializer left it (255, less one for the root object, less the
+/// level that refuses).
+#[test]
+fn the_head_read_matches_1_5_5_on_root_numbers_and_unbounded_skips() {
+    type Read = Result<Option<serde_json::Value>, Unrouted>;
+    let a = || Ok(Some(serde_json::json!("a")));
+    let served = || Ok(None);
+    let refused = || Err(Unrouted::Unparsable);
+    let nested = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
+    // `"\uAAA\"`: sonic eats `uAAA\` after the backslash and the next quote closes the string; the
+    // depth scan reads `\"` as an escaped quote, and the string as still open.
+    let trick = r#"{"model":"a","x":"\uAAA\","#;
+    let one_then_zeros = |n: usize| format!("1{}", "0".repeat(n));
+    let table: Vec<(&str, String, Read)> = vec![
+        ("1e400", "1e400".into(), refused()),
+        ("-1e400", "-1e400".into(), refused()),
+        ("1e308", "1e308".into(), served()),
+        ("1e309", "1e309".into(), refused()),
+        ("-1e309", "-1e309".into(), refused()),
+        (
+            "the largest double",
+            "1.7976931348623157e308".into(),
+            served(),
+        ),
+        (
+            "rounds to the largest double",
+            "1.7976931348623158e308".into(),
+            served(),
+        ),
+        ("rounds past it", "1.7976931348623159e308".into(), refused()),
+        ("u64::MAX", "18446744073709551615".into(), served()),
+        ("past u64", "18446744073709551616".into(), served()),
+        ("i64::MIN", "-9223372036854775808".into(), served()),
+        ("past i64", "-9223372036854775809".into(), served()),
+        ("309 digits", one_then_zeros(308), served()),
+        ("310 digits", one_then_zeros(309), refused()),
+        ("401 digits", one_then_zeros(400), refused()),
+        (
+            "-401 digits",
+            format!("-{}", one_then_zeros(400)),
+            refused(),
+        ),
+        ("underflow", "1e-400".into(), served()),
+        ("zero, a large exponent", "0e99999".into(), served()),
+        (
+            "zero fraction, a large exponent",
+            "0.0e99999".into(),
+            served(),
+        ),
+        (
+            "exponent past i32",
+            "1e99999999999999999999".into(),
+            refused(),
+        ),
+        ("spaced", " 7 ".into(), served()),
+        ("literal", "true".into(), served()),
+        ("in a root array, skipped", "[1e400]".into(), served()),
+        (
+            "in a skipped member",
+            r#"{"model":"a","x":1e400}"#.into(),
+            a(),
+        ),
+        (
+            "401 digits in a skipped member",
+            format!(r#"{{"model":"a","x":[{}]}}"#, one_then_zeros(400)),
+            a(),
+        ),
+        (
+            "in stream, decoded",
+            r#"{"model":"a","stream":1e400}"#.into(),
+            refused(),
+        ),
+        (
+            "in stream_options, decoded",
+            r#"{"model":"a","stream_options":{"k":-1e400}}"#.into(),
+            refused(),
+        ),
+        // sonic-number 0.1.2's own reading (`parse_exponent` stops at 1000 and drops the rest of
+        // the exponent; 19 significant digits are kept): where it parts from the true value, 1.5.5's
+        // answer stands (opus re-review, B2).
+        (
+            "a capped exponent on a long fraction, served",
+            format!("0.{}1e12300", "0".repeat(2000)),
+            served(),
+        ),
+        (
+            "the same, negative",
+            format!("-0.{}1e12300", "0".repeat(2000)),
+            served(),
+        ),
+        (
+            "a capped exponent on a long integer, refused",
+            format!("1{}e-14800", "0".repeat(15000)),
+            refused(),
+        ),
+        (
+            "the smallest capped case, 1e308, served",
+            format!("0.{}1e10000", "0".repeat(691)),
+            served(),
+        ),
+        (
+            "one zero fewer, 1e309, refused",
+            format!("0.{}1e10000", "0".repeat(690)),
+            refused(),
+        ),
+        (
+            "a capped exponent in stream, served",
+            format!(r#"{{"model":"a","stream":0.{}1e12300}}"#, "0".repeat(2000)),
+            a(),
+        ),
+        (
+            "a capped exponent in stream, refused",
+            format!(r#"{{"model":"a","stream":1{}e-14800}}"#, "0".repeat(15000)),
+            refused(),
+        ),
+        (
+            "a capped exponent in a skipped member, never read",
+            format!(r#"{{"model":"a","x":1{}e-14800}}"#, "0".repeat(15000)),
+            a(),
+        ),
+        // Depth: the scan's own edge, without the escape.
+        (
+            "127 under the root",
+            format!(r#"{{"model":"a","y":{}}}"#, nested(127)),
+            a(),
+        ),
+        (
+            "128 under the root",
+            format!(r#"{{"model":"a","y":{}}}"#, nested(128)),
+            refused(),
+        ),
+        // Behind the escape: a skipped value has no bound.
+        (
+            "200 behind the escape",
+            format!(r#"{trick}"y":{}}}"#, nested(200)),
+            a(),
+        ),
+        (
+            "1000 behind the escape",
+            format!(r#"{trick}"y":{}}}"#, nested(1000)),
+            a(),
+        ),
+        (
+            "1000 behind the escape, unclosed",
+            format!(r#"{trick}"y":{}}}"#, &nested(1000)[1..]),
+            refused(),
+        ),
+        (
+            "1000 in a root array",
+            format!(r#"["\uAAA\",{}]"#, nested(1000)),
+            served(),
+        ),
+        // A head value behind the escape: 253 levels, not 254.
+        (
+            "system, 253",
+            format!(r#"{trick}"system":{}}}"#, nested(253)),
+            a(),
+        ),
+        (
+            "system, 254",
+            format!(r#"{trick}"system":{}}}"#, nested(254)),
+            refused(),
+        ),
+        (
+            "system object, 253",
+            format!(r#"{trick}"system":{{"a":{}}}}}"#, nested(252)),
+            a(),
+        ),
+        (
+            "system object, 254",
+            format!(r#"{trick}"system":{{"a":{}}}}}"#, nested(253)),
+            refused(),
+        ),
+    ];
+    for (name, body, want) in &table {
+        assert_eq!(
+            &readable(body.as_bytes()),
+            want,
+            "{name}: {}",
+            body.get(..80).unwrap_or(body)
+        );
+    }
+}
+
+/// RED (opus re-review, B2): the document parse reads a number as 1.5.5's did
+/// (`crate::sonic_number`), wherever it sits: a capped exponent 1.5.5 read as in range is a
+/// document, one it read as out of range is none, whatever the number's true value.
+#[test]
+fn the_document_reads_a_number_as_1_5_5_read_it() {
+    let served = format!(r#"{{"model":"a","x":[0.{}1e12300]}}"#, "0".repeat(2000));
+    assert!(valid(served.as_bytes()));
+    let refused = format!(r#"{{"model":"a","x":[1{}e-14800]}}"#, "0".repeat(15000));
+    assert!(
+        readable(refused.as_bytes()).is_ok(),
+        "a skipped member is never read"
+    );
+    assert!(!valid(refused.as_bytes()));
+    assert!(parsed(refused.as_bytes()).is_err());
+    assert!(valid(
+        br#"{"model":"a","x":[1e308,-0,18446744073709551616]}"#
+    ));
+    assert!(!valid(br#"{"model":"a","x":[1e309]}"#));
+}
+
+/// The document [`built`] makes where serde refuses one of 1.5.5's numbers is the document serde
+/// makes everywhere else: the same members, strings decoded, numbers read alike.
+#[test]
+fn the_built_document_is_serdes_where_both_read_it() {
+    let body = br#" {"model":"m","a":[1,-3,1.5,2e3,true,false,null,"x\u00e9\ud83d\ude00",{}],
+        "b":{"c":[[],{"d":"e"}],"c":7},"n":18446744073709551616,"s":"q\"uote"} "#;
+    let serde: serde_json::Value = serde_json::from_slice(body).expect("serde reads it");
+    assert_eq!(built(body), Some(serde));
+}
+
+/// RED (opus re-review, B2 residual): a rewrite over a body holding a number 1.5.5's reader took as
+/// finite through its exponent cap (its true value overflows, so serde refuses it) applies, as
+/// 1.5.5 applied it over the document it built; the number is the value 1.5.5 read. RED before:
+/// FAULT, 500.
+#[test]
+fn a_rewrite_applies_over_a_number_only_1_5_5s_reader_takes() {
+    let body = format!(
+        r#"{{"model":"m","x":0.{}1e12300,"pii":"123-45-6789","state":{{}}}}"#,
+        "0".repeat(2000)
+    );
+    let document = parsed(body.as_bytes()).expect("1.5.5 built this document");
+    assert_eq!(
+        document["x"],
+        serde_json::json!(0.0),
+        "1e-771, as 1.5.5 read it"
+    );
+    let rewritten = rewritten(body.as_bytes(), &rewrite_of(r#"{"state":{}}"#), "m")
+        .expect("applied")
+        .expect("the request changes");
+    let rewritten: serde_json::Value = serde_json::from_slice(&rewritten).expect("JSON");
+    assert_eq!(rewritten, serde_json::json!({"model": "m", "state": {}}));
+}
+
+/// The skipped-escape cases 1.5.5 SERVED are the ones its DOM parse (a rewrite hook's pass) refused:
+/// the whole document does not parse, which is what a rewrite over such a body must FAULT on.
+#[test]
+fn a_body_the_head_read_accepts_may_not_parse_as_a_document() {
+    for body in [
+        &br#"{"model":"a","x":"\uZZZZ"}"#[..],
+        br#"{"model":"a","x":"\ud800"}"#,
+        br#"{"model":"a","x":"\u12\"}"}"#,
+        br#"["\uZZZZ"]"#,
+    ] {
+        assert!(readable(body).is_ok(), "{}", String::from_utf8_lossy(body));
+        assert!(parsed(body).is_err(), "{}", String::from_utf8_lossy(body));
+        assert!(!valid(body), "{}", String::from_utf8_lossy(body));
+    }
+    for body in [
+        &br#"{"model":"a","x":"\u00e9\ud83d\ude00"}"#[..],
+        br#"[1,{"a":null}]"#,
+    ] {
+        assert!(parsed(body).is_ok() && valid(body));
+    }
+}
+
+/// RED (review, B2): a rewrite over a body whose document does not parse is a FAULT, decided before
+/// the hook's own document is read: a hook that echoes the bad member back and drops `pii` answers a
+/// rewrite that does not read either, which was "does not apply" and let the body through
+/// un-redacted. A top-level array that does not parse is the same FAULT, never replaced by an
+/// object; an unreadable rewrite over a body that parses still leaves the request.
+#[test]
+fn a_rewrite_over_a_body_that_does_not_parse_is_a_fault_before_the_rewrite_is_read() {
+    let echo = br#"{"messages":[{"role":"user","content":"{\"x\":\"\\ud800\"}"}],"tools":[]}"#;
+    for body in [
+        &br#"{"model":"m","pii":"123-45-6789","x":"\ud800"}"#[..],
+        br#"["\ud800"]"#,
+    ] {
+        for rewrite in [&echo[..], &rewrite_of(r#"{"state":{}}"#)[..], b"not json"] {
+            assert_eq!(rewritten(body, rewrite, "m"), Err(NotApplied::Fault));
+        }
+    }
+    assert_eq!(rewritten(br#"{"model":"m"}"#, b"not json", "m"), Ok(None));
+    // A body the head cannot read at all is a FAULT too, never "does not apply".
+    assert_eq!(
+        rewritten(b"{\"model\":", &rewrite_of(r#"{"state":{}}"#), "m"),
+        Err(NotApplied::Fault)
+    );
+}
+
+/// B3: the splice check reads the document without building it, as strictly as the DOM parse.
+#[test]
+fn spliceable_validates_without_a_second_head_read() {
+    let bad = br#"{"model":"jev","x":"\uZZZZ"}"#;
+    assert!(readable(bad).is_ok());
+    assert!(!spliceable(bad, "jev-1"));
+    assert!(
+        spliceable_named(bad, Some("jev"), "jev"),
+        "no rewrite needed"
+    );
+    assert!(spliceable_named(bad, None, "jev-1"), "no model named");
+    assert!(!spliceable_named(bad, Some("jev"), "jev-1"));
+    assert!(spliceable_named(
+        br#"{"model":"jev"}"#,
+        Some("jev"),
+        "jev-1"
+    ));
 }
