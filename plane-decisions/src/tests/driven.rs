@@ -742,7 +742,11 @@ fn a_rewrite_naming_another_model_is_refused() {
     assert_eq!(same, br#"{"model":"m","state":{"a":1}}"#);
     // A request naming no model, routed over the only one: the document may name that one.
     assert_eq!(
-        rewritten(br#"{"state":{}}"#, &rewrite_of(r#"{"model":"m","state":{}}"#), "m"),
+        rewritten(
+            br#"{"state":{}}"#,
+            &rewrite_of(r#"{"model":"m","state":{}}"#),
+            "m"
+        ),
         Ok(None)
     );
 }
