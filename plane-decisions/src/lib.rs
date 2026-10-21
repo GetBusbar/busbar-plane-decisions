@@ -145,10 +145,9 @@ mod tests {
     /// The crate root's prose, held to the tree it describes.
     mod lib;
 
-    // `alloc_gate.rs` (the relay's allocation pin) is wired in when the busbar pin carries
-    // busbar-contract's `alloc-counter` feature (ARCHITECT addendum 2026-10-21 08:30Z): its
-    // `#[global_allocator]` is `busbar_contract::alloc_counter::Counting`, and this crate keeps the
-    // literal `forbid(unsafe_code)`.
+    /// The relay's allocation pin, over busbar-contract's counting allocator (`alloc-counter`, a
+    /// dev-dependency feature): this crate keeps the literal `forbid(unsafe_code)`.
+    mod alloc_gate;
     mod byte_fixtures;
     /// The scaffolding one plane call needs (the `plane` module's tests read it too).
     pub(super) mod common;
