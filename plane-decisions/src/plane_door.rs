@@ -1041,8 +1041,10 @@ slot!(
     /// `project`: THE HOOK VIEW of a unit's request ([`driven::project`]), as every plane projects
     /// its own (THE DESIGN section 1: "the hook tap and gate ... apply to every plane the same
     /// way"). A request-stage hook's rewrite is applied first, in the request's dialect
-    /// ([`driven::rewritten`]): the rewritten request is answered in `rewritten` (the body the
-    /// kernel keeps and re-pushes on every attempt from then on) and is the request projected; a
+    /// ([`driven::rewritten`], wholesale, as 1.5.5 replaced the body; a rewrite naming another
+    /// model is REFUSED, the hook's failure): the rewritten request is answered in `rewritten`
+    /// (the body the kernel keeps and re-pushes on every attempt from then on) and is the request
+    /// projected; a
     /// rewrite that does not apply leaves the request as it was (1.5.5). The view's pool is the
     /// entry the request routes over, its dialect the claim's, and its one turn the request
     /// document, shown only to a hook granted the prompt. The plane reads nothing of the content
@@ -1058,13 +1060,19 @@ slot!(
         };
         let body = input.field(|i| &i.body).bytes();
         let rewrite = input.field(|i| &i.rewrite).bytes();
+        let routes: &Routes = &plane.routes();
         let rewritten = if rewrite.is_empty() {
             None
         } else {
-            driven::rewritten(body, rewrite)
+            let routed = driven::project(body, dialect, routes, |r| r.dialect).entry;
+            match driven::rewritten(body, rewrite, routed) {
+                Ok(rewritten) => rewritten,
+                // A rewrite naming another model is the hook's failure, never a switch of provider:
+                // REFUSED, and the kernel answers it by that hook's `on_error`.
+                Err(driven::ModelRewritten { .. }) => return Outcome::Refused,
+            }
         };
         let request = rewritten.as_deref().unwrap_or(body);
-        let routes: &Routes = &plane.routes();
         let view = driven::project(request, dialect, routes, |r| r.dialect);
         let (signals, mut arena, mut turns) =
             (input.signals_buf(), input.arena_buf(), input.messages_buf());

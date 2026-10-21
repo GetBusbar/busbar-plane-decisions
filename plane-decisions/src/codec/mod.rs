@@ -10,9 +10,10 @@
 //! ## What reaches the far end, precisely
 //!
 //! The caller's body reaches the far end as the caller sent it, but for the governed top-level
-//! `model`: a configured `upstream_model` that differs from the name the caller used is spliced
-//! over its value (`driven::spliced`), and a bound request-stage hook's rewrite is spliced into the
-//! members it states (`driven::rewritten`); every other byte is the caller's. The far end's answer
+//! `model`, where a configured `upstream_model` that differs from the name the caller used is
+//! spliced over its value (`driven::spliced`), and but for a bound request-stage hook's rewrite,
+//! whose document replaces the request's members wholesale, as 1.5.5 replaced the body
+//! (`driven::rewritten`). With neither, every byte is the caller's. The far end's answer
 //! reaches the caller unchanged; its counts are read as it passes, never in place of relaying it.
 
 /// The pointer a SUCCESSFUL `systemone` response reports its billable usage count at.

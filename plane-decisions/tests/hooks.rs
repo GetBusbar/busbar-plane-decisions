@@ -71,14 +71,15 @@ fn a_nanojev_request_is_projected_in_its_dialect() {
     );
 }
 
-/// RED (audit plane-decisions R3, the hook capability): a request-stage hook's rewrite is applied
-/// in the dialect, by span splice: the members its document states are set, every other byte is
-/// the caller's, and the rewritten request is both answered as the body the kernel keeps and the
-/// request projected. The kernel re-pushes that body, and it is what the far end receives.
+/// RED (audit plane-decisions R3, the hook capability): a request-stage hook's rewrite REPLACES the
+/// request with its document, as 1.5.5 replaced the body: what the far end receives is the
+/// hook's document (the caller's `model` kept), stated here on its own and never read off the
+/// caller's request; the rewritten request is both answered as the body the kernel keeps and the
+/// request projected, and the kernel re-pushes that body.
 #[test]
 fn a_rewrite_alters_the_request_the_far_end_receives() {
     let door = open(TWO);
-    let body = b"{\"model\":\"a\",  \"state\":{\"amount\":7}}";
+    let body = b"{\"model\":\"a\",  \"state\":{\"amount\":7}, \"trace\":\"t-1\"}";
     assert_eq!(door.arrive(1, body).outcome, Outcome::Ready);
     let view = door.project(
         1,
@@ -86,20 +87,66 @@ fn a_rewrite_alters_the_request_the_far_end_receives() {
         body,
         Some(&rewrite_of(r#"{"state":{"amount":0}}"#)),
     );
-    let want = b"{\"model\":\"a\",  \"state\":{\"amount\":0}}";
+    // The hook's document, with the routed model: what replaces the request.
+    let want: &[u8] = br#"{"model":"a","state":{"amount":0}}"#;
     assert_eq!(view.outcome, Some(Outcome::Ready), "{view:?}");
-    assert_eq!(view.rewritten.as_deref(), Some(&want[..]), "{view:?}");
+    assert_eq!(view.rewritten.as_deref(), Some(want), "{view:?}");
     assert_eq!(
         view.body.as_deref(),
-        Some(&want[..]),
+        Some(want),
         "the rewritten request is projected"
     );
-    // The kernel keeps the rewritten body and pushes it as the caller's piece.
+    // The kernel keeps the body `project` answered as rewritten and pushes it as the caller's
+    // piece: the far end receives the rewrite, never the caller's original.
+    let kept = view.rewritten.expect("a rewritten body is answered");
     let mut bufs = Bufs::new(1 << 16);
     door.piece(1, Given::attempt(1), &mut bufs);
-    let sent = door.piece(1, Given::caller(want), &mut bufs);
+    let sent = door.piece(1, Given::caller(&kept), &mut bufs);
     assert!(sent.far, "{sent:?}");
     assert_eq!(sent.bytes, want);
+}
+
+/// RED (coordinator ruling, 1.5.5 parity): a member the hook's document omits is dropped from the
+/// request, so a hook redacts by omission.
+#[test]
+fn a_rewrite_redacts_by_omission() {
+    let door = open(TWO);
+    let body = br#"{"model":"a","state":{"amount":7},"pii":{"ssn":"123-45-6789"}}"#;
+    let view = door.project(
+        1,
+        SYSTEMONE,
+        body,
+        Some(&rewrite_of(r#"{"state":{"amount":7}}"#)),
+    );
+    let want: &[u8] = br#"{"model":"a","state":{"amount":7}}"#;
+    assert_eq!(view.rewritten.as_deref(), Some(want), "{view:?}");
+}
+
+/// RED (coordinator ruling): a rewrite naming another model is no switch of provider: `project`
+/// REFUSES it, the hook's failure, which the kernel answers by that hook's `on_error`; naming the
+/// routed model applies.
+#[test]
+fn a_rewrite_naming_another_model_is_refused() {
+    let door = open(TWO);
+    let body = br#"{"model":"a","state":{}}"#;
+    let switched = door.project(
+        1,
+        SYSTEMONE,
+        body,
+        Some(&rewrite_of(r#"{"model":"b","state":{}}"#)),
+    );
+    assert_eq!(switched.outcome, Some(Outcome::Refused), "{switched:?}");
+    let same = door.project(
+        1,
+        SYSTEMONE,
+        body,
+        Some(&rewrite_of(r#"{"model":"a","state":{"x":1}}"#)),
+    );
+    assert_eq!(
+        same.rewritten.as_deref(),
+        Some(&br#"{"model":"a","state":{"x":1}}"#[..]),
+        "{same:?}"
+    );
 }
 
 /// A rewrite that does not apply leaves the request as it was (1.5.5): the view is the caller's

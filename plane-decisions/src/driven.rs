@@ -223,32 +223,42 @@ impl Unrouted {
                               configured: name one in `model`"
                 .to_string(),
             Self::NotAName => "`model` must be a string naming a decisions model".to_string(),
-            Self::Unknown(model) => {
-                format!("The model '{model}' does not exist or you do not have access to it.")
-            }
+            Self::Unknown(model) => format!("{UNKNOWN_HEAD}{model}{UNKNOWN_TAIL}"),
         }
     }
 }
 
-/// The most bytes of a requested model's name an unknown-model refusal echoes. The name comes from
-/// the caller's body, which may be as long as the deployment's body ceiling; the refusal's words
-/// are bounded (`busbar_contract::abi::plane::MAX_REFUSAL_TEXT`, past which the `arrive` is a
-/// FAULT), so a longer name is cut on a character boundary and marked cut. Every name up to this
-/// length is echoed whole, in the words 1.5.5's unknown-model refusal spoke.
-pub const MAX_ECHOED_MODEL: usize = 1024;
+/// The unknown-model refusal's words before the echoed name: 1.5.5's (v1.5.5 ingress/mod.rs
+/// `not_found_message`), and predev's decisions refusal, byte for byte.
+const UNKNOWN_HEAD: &str = "The model '";
+
+/// The unknown-model refusal's words after the echoed name.
+const UNKNOWN_TAIL: &str = "' does not exist or you do not have access to it.";
+
+/// The most bytes of a requested model's name an unknown-model refusal echoes: every byte the
+/// refusal's words may run (`busbar_contract::abi::plane::MAX_REFUSAL_TEXT`, past which the `arrive`
+/// is a FAULT) but the sentence's own. Every name up to it is echoed whole, as 1.5.5 and predev
+/// echoed it; only a name the refusal could not carry is cut, on a character boundary, and marked
+/// cut.
+pub const MAX_ECHOED_MODEL: usize = busbar_contract::abi::plane::MAX_REFUSAL_TEXT as usize
+    - UNKNOWN_HEAD.len()
+    - UNKNOWN_TAIL.len();
+
+/// The mark a cut name ends in.
+const CUT_MARK: &str = "...";
 
 /// What an unknown-model refusal echoes of `name`: the whole name up to [`MAX_ECHOED_MODEL`] bytes,
-/// else its first bytes to a character boundary, followed by `...`.
+/// else its first bytes to a character boundary, followed by `...`, within the same bound.
 #[must_use]
 pub fn echoed(name: &str) -> String {
     if name.len() <= MAX_ECHOED_MODEL {
         return name.to_string();
     }
-    let mut cut = MAX_ECHOED_MODEL;
+    let mut cut = MAX_ECHOED_MODEL - CUT_MARK.len();
     while !name.is_char_boundary(cut) {
         cut -= 1;
     }
-    format!("{}...", &name[..cut])
+    format!("{}{CUT_MARK}", &name[..cut])
 }
 
 /// The top-level `model` a request body names: `Ok(None)` when it names none, and
@@ -401,70 +411,111 @@ fn rewrite_document(rewrite: &[u8]) -> Option<serde_json::Map<String, serde_json
     document
 }
 
-/// THE REWRITE, APPLIED IN THE DIALECT: `body` (a decision request, one JSON object) with every
-/// top-level member the rewrite's document ([`rewrite_document`]) states set to the document's
-/// value. A member whose value already equals the document's keeps the caller's bytes; a member
-/// the document changes has its value's span replaced, by span splice as `upstream_model` is
-/// ([`spliced`]); a member the body lacks is appended before the closing brace. Every byte outside
-/// the changed spans is the caller's: member order, whitespace and every member the document does
-/// not name. `None` when the rewrite names no document, the body is not one JSON object, or the
-/// document changes nothing: the request goes on as it was (1.5.5: a rewrite that cannot be applied
-/// leaves the request unmodified).
-#[must_use]
-pub fn rewritten(body: &[u8], rewrite: &[u8]) -> Option<Vec<u8>> {
-    let document = rewrite_document(rewrite)?;
-    let current: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(body).ok()?;
-    let busbar_contract::spans::Resolved::Found(whole) =
-        busbar_contract::spans::resolve_pointer(body, "")
-    else {
-        return None;
+/// A rewrite the plane will not apply: its document names a top-level `model` other than the model
+/// the request is routed over. The model is no rewritable member (a rewrite never switches the
+/// provider a request goes to); the rewrite is that hook's FAILURE, which the kernel answers by the
+/// hook's own `on_error`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelRewritten {
+    /// The model the document names.
+    pub named: String,
+}
+
+/// THE REWRITE, APPLIED IN THE DIALECT, as 1.5.5 applied one: the rewrite's document
+/// ([`rewrite_document`]) REPLACES the request wholesale (v1.5.5 `RewriteReply`: "the replacement
+/// message body"). A member the document omits is dropped, so a hook redacts by omission; a
+/// member it states is set to its value, the caller's own bytes kept for a value it leaves as it
+/// was; a member the caller did not send is added after the caller's. The top-level `model` alone
+/// is not the document's: it stays the caller's whether or not the document repeats it, and a
+/// document naming another model is refused ([`ModelRewritten`]), never a silent switch of
+/// provider. `routed` is the model entry the request is routed over.
+///
+/// `Ok(None)` when the rewrite names no document, the body is not one JSON object, or the document
+/// is the request as it stands: the request goes on byte for byte as it was (1.5.5: a rewrite that
+/// cannot be applied leaves the request unmodified).
+///
+/// # Errors
+///
+/// [`ModelRewritten`]: the document names a model other than `routed`.
+pub fn rewritten(
+    body: &[u8],
+    rewrite: &[u8],
+    routed: &str,
+) -> Result<Option<Vec<u8>>, ModelRewritten> {
+    let Some(mut document) = rewrite_document(rewrite) else {
+        return Ok(None);
     };
-    // The closing brace of the top-level object: the last byte of its span.
-    let close = whole.end.checked_sub(1)?;
-    if body.get(close) != Some(&b'}') {
-        return None;
-    }
-    let mut replaced: Vec<(usize, usize, Vec<u8>)> = Vec::new();
-    let mut appended: Vec<u8> = Vec::new();
-    let mut members = current.len();
-    for (key, value) in &document {
-        if current.get(key) == Some(value) {
-            continue;
+    let Ok(current) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(body)
+    else {
+        return Ok(None);
+    };
+    const MODEL: &str = "model";
+    if let Some(named) = document.remove(MODEL) {
+        let same = named.as_str() == Some(routed) || current.get(MODEL) == Some(&named);
+        if !same {
+            return Err(ModelRewritten {
+                named: named
+                    .as_str()
+                    .map_or_else(|| named.to_string(), str::to_string),
+            });
         }
-        let raw = serde_json::to_vec(value).ok()?;
-        if current.contains_key(key) {
-            let pointer = format!("/{}", key.replace('~', "~0").replace('/', "~1"));
-            let busbar_contract::spans::Resolved::Found(span) =
-                busbar_contract::spans::resolve_pointer(body, &pointer)
-            else {
-                return None;
-            };
-            replaced.push((span.start, span.end, raw));
+    }
+    // The document as it replaces the request: the caller's `model`, then the document's members.
+    let unchanged = current.len() == document.len() + usize::from(current.contains_key(MODEL))
+        && document.iter().all(|(k, v)| current.get(k) == Some(v));
+    if unchanged {
+        return Ok(None);
+    }
+    Ok(replaced(body, &current, &document))
+}
+
+/// [`rewritten`]'s request: the caller's members `document` keeps (the `model` always), in the
+/// caller's order, each the caller's own bytes where its value is unchanged, then the members the
+/// caller did not send. `None` when a member's bytes cannot be read back.
+fn replaced(
+    body: &[u8],
+    current: &serde_json::Map<String, serde_json::Value>,
+    document: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Vec<u8>> {
+    let span_of = |key: &str| {
+        let pointer = format!("/{}", key.replace('~', "~0").replace('/', "~1"));
+        match busbar_contract::spans::resolve_pointer(body, &pointer) {
+            busbar_contract::spans::Resolved::Found(span) => Some(span),
+            _ => None,
+        }
+    };
+    let mut kept: Vec<(usize, Vec<u8>)> = Vec::with_capacity(current.len());
+    for (key, value) in current {
+        let span = span_of(key)?;
+        let bytes = if key == "model" || document.get(key) == Some(value) {
+            body.get(span.start..span.end)?.to_vec()
+        } else if let Some(wanted) = document.get(key) {
+            serde_json::to_vec(wanted).ok()?
         } else {
-            if members != 0 {
-                appended.push(b',');
-            }
-            appended.extend_from_slice(&serde_json::to_vec(key).ok()?);
-            appended.push(b':');
-            appended.extend_from_slice(&raw);
-            members += 1;
+            continue;
+        };
+        kept.push((span.start, member(key, &bytes)?));
+    }
+    kept.sort_by_key(|(at, _)| *at);
+    let mut members: Vec<Vec<u8>> = kept.into_iter().map(|(_, m)| m).collect();
+    for (key, value) in document {
+        if !current.contains_key(key) {
+            members.push(member(key, &serde_json::to_vec(value).ok()?)?);
         }
     }
-    if replaced.is_empty() && appended.is_empty() {
-        return None;
-    }
-    replaced.sort_by_key(|(start, _, _)| *start);
-    let mut out = Vec::with_capacity(body.len() + appended.len());
-    let mut at = 0;
-    for (start, end, raw) in &replaced {
-        out.extend_from_slice(body.get(at..*start)?);
-        out.extend_from_slice(raw);
-        at = *end;
-    }
-    out.extend_from_slice(body.get(at..close)?);
-    out.extend_from_slice(&appended);
-    out.extend_from_slice(body.get(close..)?);
+    let mut out = Vec::with_capacity(body.len());
+    out.push(b'{');
+    out.extend_from_slice(&members.join(&b','));
+    out.push(b'}');
     Some(out)
+}
+
+/// One member, `"key":value`, `value` as written.
+fn member(key: &str, value: &[u8]) -> Option<Vec<u8>> {
+    let mut m = serde_json::to_vec(key).ok()?;
+    m.push(b':');
+    m.extend_from_slice(value);
+    Some(m)
 }
 
 /// Whether the kernel must verify a principal before the first piece. Every claimed request of this

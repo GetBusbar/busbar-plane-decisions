@@ -575,10 +575,22 @@ fn an_arrival_states_its_admission_estimate() {
 
 /// RED (audit plane-decisions R3, the unbounded echo): a requested model name longer than the
 /// refusal's words may run is cut in the unknown-model refusal, so `arrive` answers its own 404 in
-/// its dialect and never a FAULT past `MAX_REFUSAL_TEXT`; a name within the bound is echoed whole.
+/// its dialect and never a FAULT past `MAX_REFUSAL_TEXT`; a name within the bound, however long,
+/// is echoed whole, in 1.5.5's and predev's words.
 #[test]
 fn an_unknown_model_name_of_any_length_is_refused_in_bounded_words() {
     let two = open(TWO);
+    let long = "k".repeat(8 * 1024);
+    let whole = two.arrive(2, format!("{{\"model\":\"{long}\"}}").as_bytes());
+    assert_eq!(
+        (whole.outcome, whole.status, whole.text),
+        (
+            Outcome::Refused,
+            404,
+            format!("The model '{long}' does not exist or you do not have access to it.")
+        ),
+        "a name over a kilobyte is echoed whole"
+    );
     let name = "x".repeat(600 * 1024);
     let body = format!("{{\"model\":\"{name}\"}}");
     let unknown = two.arrive(1, body.as_bytes());
@@ -589,10 +601,15 @@ fn an_unknown_model_name_of_any_length_is_refused_in_bounded_words() {
         unknown.text.len()
     );
     assert!(
-        (unknown.text.len() as u64) < 4096
-            && (unknown.text.len() as u64) < busbar_contract::abi::plane::MAX_REFUSAL_TEXT,
+        (unknown.text.len() as u64) <= busbar_contract::abi::plane::MAX_REFUSAL_TEXT,
         "the refusal's words run {} bytes",
         unknown.text.len()
+    );
+    assert!(
+        unknown
+            .text
+            .ends_with("...' does not exist or you do not have access to it."),
+        "only a name past the cap is cut, and marked cut"
     );
     assert!(
         unknown.text.starts_with("The model 'xxx"),

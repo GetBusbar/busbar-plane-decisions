@@ -609,8 +609,9 @@ fn a_success_with_no_count_bills_the_planes_floor_not_a_far_end_count() {
 }
 
 /// RED (audit plane-decisions R3, the unbounded echo): an unknown model's name is echoed into the
-/// refusal whole up to `MAX_ECHOED_MODEL` bytes, in 1.5.5's words, and cut there past it, so the
-/// refusal's words never outgrow what an `arrive` may answer.
+/// refusal whole, in 1.5.5's and predev's words, however long, up to what the refusal's words may
+/// run (`MAX_REFUSAL_TEXT`); only a name past that is cut, so the refusal's words never outgrow
+/// what an `arrive` may answer.
 #[test]
 fn an_unknown_models_echoed_name_is_bounded() {
     let models = std::collections::BTreeMap::from([("jev".to_string(), ())]);
@@ -619,13 +620,22 @@ fn an_unknown_models_echoed_name_is_bounded() {
         short.text(),
         "The model 'zz' does not exist or you do not have access to it."
     );
+    // A name well past a kilobyte is echoed whole.
+    let kilobytes = "k".repeat(64 * 1024);
+    let body = format!("{{\"model\":\"{kilobytes}\"}}");
+    let whole = route_model(body.as_bytes(), &models, |_| true).expect_err("unknown");
+    assert_eq!(
+        whole.text(),
+        format!("The model '{kilobytes}' does not exist or you do not have access to it.")
+    );
     let long = "é".repeat(600_000);
     let body = format!("{{\"model\":\"{long}\"}}");
     let unknown = route_model(body.as_bytes(), &models, |_| true).expect_err("unknown");
     assert_eq!(unknown.status(), 404);
     let text = unknown.text();
+    let cap = busbar_contract::abi::plane::MAX_REFUSAL_TEXT as usize;
     assert!(
-        text.len() < MAX_ECHOED_MODEL + 128,
+        text.len() <= cap && text.len() > cap - 8,
         "the refusal echoes {} bytes",
         text.len()
     );
@@ -636,6 +646,13 @@ fn an_unknown_models_echoed_name_is_bounded() {
     );
     let exact = "m".repeat(MAX_ECHOED_MODEL);
     assert_eq!(echoed(&exact), exact, "a name at the bound is echoed whole");
+    assert_eq!(
+        Unrouted::Unknown(exact).text().len(),
+        cap,
+        "and its refusal runs exactly the cap"
+    );
+    let over = "m".repeat(MAX_ECHOED_MODEL + 1);
+    assert!(echoed(&over).ends_with("...") && echoed(&over).len() == MAX_ECHOED_MODEL);
 }
 
 #[test]
@@ -656,26 +673,77 @@ fn rewrite_of(document: &str) -> Vec<u8> {
     .expect("JSON")
 }
 
-/// THE REWRITE, BY SPAN SPLICE: a member the document changes has its value replaced, a member the
-/// body lacks is appended, and every other byte is the caller's.
+/// THE REWRITE REPLACES THE REQUEST WHOLESALE, as 1.5.5 replaced the body: the members the document
+/// states, the caller's own bytes kept where a value is unchanged, the caller's `model` kept, and a
+/// member the caller did not send added.
 #[test]
-fn a_rewrite_sets_the_members_its_document_states_and_keeps_every_other_byte() {
-    let body = b"{ \"state\" : {\"amount\": 7},\n  \"model\":\"jev\" }";
-    let out = rewritten(body, &rewrite_of(r#"{"state":{"amount":0}}"#)).expect("applied");
+fn a_rewrite_replaces_the_request_with_its_document() {
+    let body = b"{ \"state\" : {\"amount\": 7},\n  \"model\":\"m\", \"note\": [1, 2] }";
+    let out = rewritten(
+        body,
+        &rewrite_of(r#"{"state":{"amount":0},"note":[1,2]}"#),
+        "m",
+    )
+    .expect("the model is the routed one")
+    .expect("applied");
     assert_eq!(
         String::from_utf8(out).expect("UTF-8"),
-        "{ \"state\" : {\"amount\":0},\n  \"model\":\"jev\" }"
+        r#"{"state":{"amount":0},"model":"m","note":[1, 2]}"#
     );
-    let added =
-        rewritten(br#"{"state":{}}"#, &rewrite_of(r#"{"context":{"k":1}}"#)).expect("applied");
+    let added = rewritten(
+        br#"{"state":{}}"#,
+        &rewrite_of(r#"{"state":{},"context":{"k":1}}"#),
+        "m",
+    )
+    .expect("no model named")
+    .expect("applied");
     assert_eq!(added, br#"{"state":{},"context":{"k":1}}"#);
-    let into_empty = rewritten(b"{}", &rewrite_of(r#"{"state":1}"#)).expect("applied");
+    let into_empty = rewritten(b"{}", &rewrite_of(r#"{"state":1}"#), "m")
+        .expect("no model named")
+        .expect("applied");
     assert_eq!(into_empty, br#"{"state":1}"#);
     // An object message itself, with no role, is a document too.
     let bare = br#"{"messages":[{"state":2}],"tools":[]}"#;
     assert_eq!(
-        rewritten(br#"{"state":1}"#, bare).expect("applied"),
+        rewritten(br#"{"state":1}"#, bare, "m")
+            .expect("no model named")
+            .expect("applied"),
         br#"{"state":2}"#
+    );
+}
+
+/// RED (coordinator ruling on the rewrite, 1.5.5 parity: v1.5.5 `RewriteReply` replaces the body):
+/// a member the document omits is DROPPED, never kept, so a hook redacts by omission.
+#[test]
+fn a_member_the_rewrite_omits_is_dropped() {
+    let body = br#"{"model":"m","state":{"amount":7},"pii":{"ssn":"123-45-6789"}}"#;
+    let out = rewritten(body, &rewrite_of(r#"{"state":{"amount":7}}"#), "m")
+        .expect("no other model named")
+        .expect("applied");
+    assert_eq!(out, br#"{"model":"m","state":{"amount":7}}"#);
+    assert!(!String::from_utf8_lossy(&out).contains("123-45-6789"));
+}
+
+/// RED (coordinator ruling on the rewrite): the `model` is no rewritable member. A document naming
+/// the routed model (or the caller's own) applies; one naming another is refused as the hook's
+/// failure, never a silent switch of provider.
+#[test]
+fn a_rewrite_naming_another_model_is_refused() {
+    let body = br#"{"model":"m","state":{}}"#;
+    assert_eq!(
+        rewritten(body, &rewrite_of(r#"{"model":"other","state":{}}"#), "m"),
+        Err(ModelRewritten {
+            named: "other".to_string()
+        })
+    );
+    let same = rewritten(body, &rewrite_of(r#"{"model":"m","state":{"a":1}}"#), "m")
+        .expect("the routed model")
+        .expect("applied");
+    assert_eq!(same, br#"{"model":"m","state":{"a":1}}"#);
+    // A request naming no model, routed over the only one: the document may name that one.
+    assert_eq!(
+        rewritten(br#"{"state":{}}"#, &rewrite_of(r#"{"model":"m","state":{}}"#), "m"),
+        Ok(None)
     );
 }
 
@@ -684,14 +752,18 @@ fn a_rewrite_sets_the_members_its_document_states_and_keeps_every_other_byte() {
 #[test]
 fn a_rewrite_that_does_not_apply_leaves_the_request() {
     let body = br#"{"state":{"amount":7}}"#;
+    for rewrite in [
+        &rewrite_of(r#"{"state":{"amount":7}}"#)[..],
+        br#"{"messages":[],"tools":[]}"#,
+        &rewrite_of("not a document")[..],
+        b"not json",
+    ] {
+        assert_eq!(rewritten(body, rewrite, "m"), Ok(None));
+    }
     assert_eq!(
-        rewritten(body, &rewrite_of(r#"{"state":{"amount":7}}"#)),
-        None
+        rewritten(b"[1,2]", &rewrite_of(r#"{"state":1}"#), "m"),
+        Ok(None)
     );
-    assert_eq!(rewritten(body, br#"{"messages":[],"tools":[]}"#), None);
-    assert_eq!(rewritten(body, &rewrite_of("not a document")), None);
-    assert_eq!(rewritten(body, b"not json"), None);
-    assert_eq!(rewritten(b"[1,2]", &rewrite_of(r#"{"state":1}"#)), None);
 }
 
 /// The projection names the entry the request routes over among its dialect's models, the

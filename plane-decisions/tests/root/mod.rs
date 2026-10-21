@@ -401,8 +401,8 @@ mod hooks {
 
     /// HOOKS-TAP, BY THE SECTION'S OWN ATTACH: a `prompt: rw` hook the section names in
     /// `decisions.hooks` rewrites the request at the kernel's hook stage before the provider is
-    /// dialled: the provider receives the document the hook wrote, spliced into the caller's
-    /// request. RED: `decisions.hooks` was accepted and bound nothing, and the door refused
+    /// dialled: the provider receives the document the hook wrote, which replaces the caller's
+    /// request (1.5.5). RED: `decisions.hooks` was accepted and bound nothing, and the door refused
     /// `project`, so no rewrite reached a decisions unit.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_decisions_hooks_rewrite_alters_the_request_the_provider_receives() {
