@@ -227,3 +227,19 @@ fn a_redaction_applies_at_1_5_5s_parse_depth() {
         .expect("the hook's rewrite applies at 128 deep");
     assert!(!String::from_utf8_lossy(&kept).contains("123-45-6789"));
 }
+
+/// RED (review of the rewrite): a request whose document does not parse (a member 1.5.5's head
+/// never decoded carrying a lone surrogate escape) passes `arrive`; a redaction hook's rewrite of it
+/// answered "does not apply", and the request went upstream un-redacted. The rewrite now applies:
+/// the hook's document replaces the request, the caller's model kept.
+#[test]
+fn a_redaction_applies_over_a_body_whose_document_does_not_parse() {
+    let door = open(TWO);
+    let body = br#"{"model":"a","pii":"123-45-6789","x":"\ud800"}"#;
+    assert_eq!(door.arrive(1, body).outcome, Outcome::Ready);
+    let view = door.project(1, SYSTEMONE, body, Some(&rewrite_of(r#"{"state":{}}"#)));
+    assert_eq!(view.outcome, Some(Outcome::Ready), "{view:?}");
+    let kept = view.rewritten.expect("the hook's rewrite applies");
+    let kept: serde_json::Value = serde_json::from_slice(&kept).expect("JSON");
+    assert_eq!(kept, serde_json::json!({"model": "a", "state": {}}));
+}

@@ -829,6 +829,11 @@ fn a_lone_surrogate_in_a_top_level_key_or_the_model_is_refused() {
     for (unit, body) in [
         (1, &br#"{"model":"a","\ud800":1}"#[..]),
         (2, br#"{"model":"a\ud800"}"#),
+        // The values 1.5.5's head decoded (lazy_body.rs:41-52): `system`, `stream_options`, and a
+        // `model` that is no string.
+        (3, br#"{"model":"a","system":"\ud800"}"#),
+        (4, br#"{"model":"a","stream_options":{"\ud800":1}}"#),
+        (5, br#"{"model":{"\ud800":1}}"#),
     ] {
         let refused = two.arrive(unit, body);
         assert_eq!(
@@ -841,4 +846,56 @@ fn a_lone_surrogate_in_a_top_level_key_or_the_model_is_refused() {
             "{refused:?}"
         );
     }
+}
+
+/// RED (1.5.5 parity): a member 1.5.5's head never decoded may carry a string its decoding would
+/// refuse (a lone surrogate escape): 1.5.5 scanned past it and served the request. A body nested
+/// past the span scanner's depth with such a member, its `model` first, routes by that model (the
+/// whole document was decoded, and it was refused 400).
+#[test]
+fn a_member_1_5_5_never_decoded_does_not_refuse_the_body() {
+    let two = open(TWO);
+    let deep = format!(
+        r#"{{"model":"b","deep":{}"\ud800"{}}}"#,
+        "[".repeat(70),
+        "]".repeat(70)
+    );
+    let routed = two.arrive(1, deep.as_bytes());
+    assert_eq!(
+        (routed.outcome, routed.entry.as_str()),
+        (Outcome::Ready, "b"),
+        "{routed:?}"
+    );
+    let shallow = two.arrive(2, br#"{"model":"a","x":"\ud800"}"#);
+    assert_eq!(shallow.entry, "a", "{shallow:?}");
+}
+
+/// RED (1.5.5 parity): a request whose `model` must be rewritten to its route's `upstream_model`
+/// but whose document does not parse (a member 1.5.5's head never decoded, which its hop's document
+/// parse refused) was answered 500 "We received an unexpected internal error. Please try again."
+/// (v1.5.5 proxy/engine/mod.rs:1499-1520): it is refused so, about its entry, never relayed with the
+/// caller's model unspliced. One that needs no rewrite is served.
+#[test]
+fn a_request_that_cannot_take_its_upstream_model_is_refused_as_1_5_5_refused_it() {
+    let upstream = r#"{"models":{"jev":{"provider":"typesafe","upstream_model":"jev-1.13.0"}}}"#;
+    let door = open(upstream);
+    let refused = door.arrive(1, br#"{"model":"jev","x":"\ud800"}"#);
+    assert_eq!(
+        (
+            refused.outcome,
+            refused.status,
+            refused.text.as_str(),
+            refused.entry.as_str()
+        ),
+        (
+            Outcome::Refused,
+            500,
+            "We received an unexpected internal error. Please try again.",
+            "jev"
+        ),
+        "{refused:?}"
+    );
+    // Naming no model, there is nothing to rewrite.
+    let unnamed = door.arrive(2, br#"{"x":"\ud800"}"#);
+    assert_eq!(unnamed.outcome, Outcome::Ready, "{unnamed:?}");
 }

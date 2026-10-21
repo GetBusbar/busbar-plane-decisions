@@ -118,6 +118,14 @@ pub const BUSY: u32 = 3;
 /// The status a [`BUSY`] arrival is refused at.
 const STATUS_BUSY: u32 = 503;
 
+/// [`ArriveOut::refusal`]: the request names a model other than its route's `upstream_model` and
+/// its document does not parse, so the far end cannot be sent the routed model
+/// ([`driven::spliceable`]); refused at [`STATUS_INTERNAL`], about the entry it routed over.
+pub const UNSPLICEABLE: u32 = 4;
+
+/// The status an [`UNSPLICEABLE`] arrival is refused at: 1.5.5's.
+const STATUS_INTERNAL: u32 = 500;
+
 /// The human label.
 const LABEL: &str = "Decisions";
 
@@ -682,6 +690,15 @@ slot!(
                     return out.fail(Refusal::refused(unrouted.text()));
                 }
             };
+            // A request whose model the far end could not be sent as the routed one is refused
+            // here, as 1.5.5 refused it, never relayed with the caller's model.
+            if let Some(up) = upstream.as_deref() {
+                if !driven::spliceable(body, up) {
+                    out.set(|o| &o.refusal, UNSPLICEABLE);
+                    out.set(|o| &o.refusal_status, STATUS_INTERNAL);
+                    return out.fail(Refusal::refused(driven::INTERNAL_ERROR));
+                }
+            }
             // The caller's head crosses here once: keep what the far end receives of it.
             let caller = driven::relayed_fields(input.fields().iter().map(|f| {
                 (
