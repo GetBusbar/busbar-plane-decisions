@@ -150,8 +150,8 @@ mod tests {
     // `#[global_allocator]` is `busbar_contract::alloc_counter::Counting`, and this crate keeps the
     // literal `forbid(unsafe_code)`.
     mod byte_fixtures;
-    /// The scaffolding one plane call needs.
-    mod common;
+    /// The scaffolding one plane call needs (the `plane` module's tests read it too).
+    pub(super) mod common;
     mod durable_strings;
     mod jev;
     mod purity;

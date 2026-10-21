@@ -60,8 +60,7 @@ fn refusal_render_never_names_a_provider_or_billing_word() {
 
 // ---- the plane driven through its own trait, over the crate's shared test scaffold ----
 
-#[path = "common.rs"]
-mod common;
+use crate::tests::common;
 
 use busbar_contract::plane::Progress;
 use busbar_contract::wire::FrameCursor;
