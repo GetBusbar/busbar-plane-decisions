@@ -617,3 +617,80 @@ fn an_unknown_model_name_of_any_length_is_refused_in_bounded_words() {
         &unknown.text[..32]
     );
 }
+
+/// A member nested `depth` levels deep: `[[...]]`.
+fn nested(depth: usize) -> String {
+    format!("{}{}", "[".repeat(depth), "]".repeat(depth))
+}
+
+/// RED (review of the routing, 1.5.5 parity): a body with a member nested past the span scanner's
+/// depth (64; 1.5.5 read bodies to 128) still routes by the `model` it names. The scanner could not
+/// walk it and the model was taken to be absent: several models configured, the request was
+/// refused 400 as naming none.
+#[test]
+fn a_body_nested_past_the_span_scanners_depth_routes_by_its_model() {
+    let two = open(TWO);
+    let body = format!(r#"{{"model":"b","deep":{},"state":{{}}}}"#, nested(70));
+    let routed = two.arrive(1, body.as_bytes());
+    assert_eq!(
+        (routed.outcome, routed.route, routed.entry.as_str()),
+        (Outcome::Ready, ROUTE_DIRECT, "b"),
+        "{routed:?}"
+    );
+}
+
+/// RED (review of the routing, 1.5.5 parity): the same deep body with one model configured honours
+/// the model it names (another is unknown), and the `upstream_model` splice applies, the model set
+/// in the document as 1.5.5 read it and every other member keeping its value.
+#[test]
+fn a_deep_body_with_one_model_honours_its_model_and_is_spliced() {
+    let upstream = r#"{"models":{"jev":{"provider":"typesafe","upstream_model":"jev-1.13.0"}}}"#;
+    let door = open(upstream);
+    let other = format!(r#"{{"model":"other","deep":{}}}"#, nested(70));
+    assert_eq!(
+        door.arrive(2, other.as_bytes()).status,
+        404,
+        "another model is unknown"
+    );
+    let body = format!(
+        r#"{{"model":"jev","deep":{},"state":{{"amount":7}}}}"#,
+        nested(70)
+    );
+    assert_eq!(door.arrive(1, body.as_bytes()).entry, "jev");
+    let mut bufs = Bufs::new(1 << 16);
+    door.piece(1, Given::attempt(1), &mut bufs);
+    let sent = door.piece(1, Given::caller(body.as_bytes()), &mut bufs);
+    assert!(sent.far, "{sent:?}");
+    let sent: serde_json::Value = serde_json::from_slice(&sent.bytes).expect("JSON");
+    let mut want: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+    want["model"] = serde_json::Value::String("jev-1.13.0".to_string());
+    assert_eq!(sent, want);
+}
+
+/// RED (review of the routing, 1.5.5 parity): a body nested past 1.5.5's own parse depth (128) is
+/// refused exactly as 1.5.5 refused a body it could not parse (v1.5.5 ingress/dispatch.rs:116):
+/// 400, "We could not parse the JSON body of your request.", in the dialect's error shape.
+#[test]
+fn a_body_past_the_parse_depth_is_refused_as_1_5_5_refused_it() {
+    let two = open(TWO);
+    let body = format!(r#"{{"model":"a","deep":{}}}"#, nested(129));
+    let refused = two.arrive(1, body.as_bytes());
+    assert_eq!(
+        (refused.outcome, refused.status, refused.text.as_str()),
+        (
+            Outcome::Refused,
+            400,
+            "We could not parse the JSON body of your request."
+        ),
+        "{refused:?}"
+    );
+    let (outcome, rendered) = two.refusal(1, refused.status, &refused.text, true);
+    assert_eq!(outcome, Outcome::Ready);
+    assert_eq!(
+        rendered,
+        br#"{"error":{"code":"invalid_request","message":"We could not parse the JSON body of your request."}}"#
+    );
+    // At 1.5.5's depth exactly, the body is read.
+    let at = format!(r#"{{"model":"a","deep":{}}}"#, nested(127));
+    assert_eq!(two.arrive(2, at.as_bytes()).entry, "a");
+}

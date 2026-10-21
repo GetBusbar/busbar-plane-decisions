@@ -203,6 +203,9 @@ pub enum Unrouted {
     NotAName,
     /// The request names a model the generation does not configure.
     Unknown(String),
+    /// The body is no JSON document 1.5.5 would read: malformed, or nested past 1.5.5's parse depth
+    /// ([`MAX_PARSE_DEPTH`]).
+    Unparsable,
 }
 
 impl Unrouted {
@@ -210,7 +213,7 @@ impl Unrouted {
     #[must_use]
     pub const fn status(&self) -> u16 {
         match self {
-            Self::Unnamed | Self::NotAName => 400,
+            Self::Unnamed | Self::NotAName | Self::Unparsable => 400,
             Self::Unknown(_) => 404,
         }
     }
@@ -224,8 +227,65 @@ impl Unrouted {
                 .to_string(),
             Self::NotAName => "`model` must be a string naming a decisions model".to_string(),
             Self::Unknown(model) => format!("{UNKNOWN_HEAD}{model}{UNKNOWN_TAIL}"),
+            Self::Unparsable => UNPARSABLE.to_string(),
         }
     }
+}
+
+/// The words 1.5.5 refused a body it could not parse in, at 400 (v1.5.5
+/// `crates/busbar/src/ingress/dispatch.rs:116` and `ingress/mod.rs:650`, kind `invalid_request`).
+pub const UNPARSABLE: &str = "We could not parse the JSON body of your request.";
+
+/// THE PARSE DEPTH 1.5.5 READ A BODY TO (v1.5.5 `crates/busbar/src/json.rs`, `MAX_JSON_DEPTH`):
+/// a body nested deeper is refused before any document is built, as one that does not parse.
+pub const MAX_PARSE_DEPTH: usize = 128;
+
+/// 1.5.5's depth scan (v1.5.5 `json.rs`, `exceeds_max_depth`): whether `bytes` nests `{`/`[` past
+/// `max`, brackets inside strings (and escaped quotes) not counted.
+fn exceeds_depth(bytes: &[u8], max: usize) -> bool {
+    let (mut depth, mut in_string, mut escaped) = (0_usize, false, false);
+    for &b in bytes {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > max {
+                    return true;
+                }
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    false
+}
+
+/// The body as 1.5.5 read it, for a body the span scanner cannot walk: the whole document, or
+/// [`Unrouted::Unparsable`] for one 1.5.5 refused (malformed, or past [`MAX_PARSE_DEPTH`]).
+///
+/// # Errors
+///
+/// [`Unrouted::Unparsable`], as above.
+pub fn parsed(body: &[u8]) -> Result<serde_json::Value, Unrouted> {
+    if exceeds_depth(body, MAX_PARSE_DEPTH) {
+        return Err(Unrouted::Unparsable);
+    }
+    // The depth is bounded by the scan above, at 1.5.5's own; serde's limit stops one level short.
+    let mut de = serde_json::Deserializer::from_slice(body);
+    de.disable_recursion_limit();
+    let value = serde::Deserialize::deserialize(&mut de).map_err(|_| Unrouted::Unparsable)?;
+    de.end().map_err(|_| Unrouted::Unparsable)?;
+    Ok(value)
 }
 
 /// The unknown-model refusal's words before the echoed name: 1.5.5's (v1.5.5 ingress/mod.rs
@@ -268,7 +328,23 @@ pub fn echoed(name: &str) -> String {
 ///
 /// [`Unrouted::NotAName`], as above.
 pub fn requested_model(body: &[u8]) -> Result<Option<std::borrow::Cow<'_, str>>, Unrouted> {
-    let Some(raw) = codec::read_raw(body, codec::PTR_MODEL) else {
+    let raw = match busbar_contract::spans::resolve_pointer(body, codec::PTR_MODEL) {
+        busbar_contract::spans::Resolved::Found(span) => body.get(span.start..span.end),
+        busbar_contract::spans::Resolved::Missing => None,
+        // THE SCANNER CANNOT WALK THE BODY (nested past its depth, or not a document): it is read
+        // as 1.5.5 read it, whole, and an unreadable `model` is never taken to be an absent one.
+        busbar_contract::spans::Resolved::Malformed
+        | busbar_contract::spans::Resolved::NeedMore => {
+            return match parsed(body)?.get("model") {
+                None => Ok(None),
+                Some(serde_json::Value::String(name)) => {
+                    Ok(Some(std::borrow::Cow::Owned(name.clone())))
+                }
+                Some(_) => Err(Unrouted::NotAName),
+            };
+        }
+    };
+    let Some(raw) = raw else {
         return Ok(None);
     };
     if let Ok(name) = serde_json::from_slice::<&str>(raw) {
@@ -316,15 +392,22 @@ pub fn route_model<'m, V>(
 /// the document are the caller's.
 #[must_use]
 pub fn spliced(body: &[u8], upstream: &str) -> Option<Vec<u8>> {
-    let busbar_contract::spans::Resolved::Found(span) =
-        busbar_contract::spans::resolve_pointer(body, codec::PTR_MODEL)
-    else {
-        return None;
-    };
     let named = requested_model(body).ok().flatten()?;
     if named == upstream {
         return None;
     }
+    let busbar_contract::spans::Resolved::Found(span) =
+        busbar_contract::spans::resolve_pointer(body, codec::PTR_MODEL)
+    else {
+        // The scanner cannot walk the body: the model is set in the document as 1.5.5 read it,
+        // every other member keeping its value.
+        let mut document = parsed(body).ok()?;
+        document.as_object_mut()?.insert(
+            "model".to_string(),
+            serde_json::Value::String(upstream.to_string()),
+        );
+        return Some(document.to_string().into_bytes());
+    };
     let value = serde_json::to_string(upstream).ok()?;
     let mut out = Vec::with_capacity(body.len() - (span.end - span.start) + value.len());
     out.extend_from_slice(body.get(..span.start)?);

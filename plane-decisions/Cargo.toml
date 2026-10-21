@@ -67,7 +67,9 @@ crate-type = ["rlib"]
 busbar-contract = { workspace = true }
 # The object notation the jev dialect speaks. Byte-identity passthrough of the body is the norm;
 # this crate parses ONLY the handful of declared pointers (never `state`/`answers`) to build facts.
-serde_json = { workspace = true }
+# `unbounded_depth`: a body the span scanner cannot walk is read as 1.5.5 read it, to its parse depth
+# of 128 (`driven::MAX_PARSE_DEPTH`, scanned first); serde's own limit stops one level short of it.
+serde_json = { workspace = true, features = ["unbounded_depth"] }
 serde = { workspace = true }
 
 [dev-dependencies]
