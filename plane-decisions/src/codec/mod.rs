@@ -39,7 +39,9 @@ pub const PTR_EXECUTION_STATES: &str = "/execution/states";
 /// metadata, never decision content.
 pub const PTR_MODEL: &str = "/model";
 
-/// The raw bytes at one declared pointer of a body.
+/// The raw bytes at one declared pointer of a body (the crate's tests' reference reader; the door
+/// resolves its pointers where it reads them, so an unreadable body is never taken to be absent).
+#[cfg(test)]
 #[must_use]
 pub fn read_raw<'u>(body: &'u [u8], pointer: &str) -> Option<&'u [u8]> {
     match busbar_contract::spans::resolve_pointer(body, pointer) {
