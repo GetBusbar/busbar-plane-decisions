@@ -991,7 +991,7 @@ pub enum NotApplied {
 /// # Errors
 ///
 /// [`NotApplied::Model`]: the document names a model other than `routed`; [`NotApplied::Fault`]:
-/// the body's document does not parse.
+/// the body's document does not parse, or the head could not read the body at all.
 #[cfg(test)]
 pub fn rewritten(body: &[u8], rewrite: &[u8], routed: &str) -> Result<Option<Vec<u8>>, NotApplied> {
     rewritten_read(body, &readable(body), rewrite, routed)
@@ -1010,8 +1010,9 @@ pub fn rewritten_read(
 ) -> Result<Option<Vec<u8>>, NotApplied> {
     const MODEL: &str = "model";
     // The caller's `model`, as `arrive` read it (1.5.5's head).
+    // A body the head could not read is no request to rewrite: FAULT, the safer answer.
     let Ok(caller_model) = read else {
-        return Ok(None);
+        return Err(NotApplied::Fault);
     };
     // THE BODY'S WHOLE DOCUMENT FIRST, before anything the hook answered is read: 1.5.5 materialized
     // it for its rewrite pass before any hook ran, and failed closed when it could not. A body whose
