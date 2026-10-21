@@ -795,7 +795,7 @@ fn a_request_is_projected_over_its_dialects_models() {
         ("n".to_string(), tail::DIALECT_NANOJEV),
     ]);
     let body = r#"{"model":"a","state":"é"}"#.as_bytes();
-    let view = project(body, tail::DIALECT_JEV, &routes, |d| *d);
+    let view = project_hook(body, tail::DIALECT_JEV, &routes, |d| *d);
     assert_eq!(
         view,
         Projected {
@@ -806,11 +806,11 @@ fn a_request_is_projected_over_its_dialects_models() {
     );
     // The only model of its dialect is the default; a model of the other dialect is none.
     assert_eq!(
-        project(b"{}", tail::DIALECT_NANOJEV, &routes, |d| *d).entry,
+        project_hook(b"{}", tail::DIALECT_NANOJEV, &routes, |d| *d).entry,
         "n"
     );
     assert_eq!(
-        project(br#"{"model":"n"}"#, tail::DIALECT_JEV, &routes, |d| *d).entry,
+        project_hook(br#"{"model":"n"}"#, tail::DIALECT_JEV, &routes, |d| *d).entry,
         ""
     );
 }

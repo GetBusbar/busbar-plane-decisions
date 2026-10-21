@@ -34,7 +34,7 @@
 //! * `refusal`: [`crate::driven::refusal_body`]; the refused unit's state is dropped.
 //! * `cancel`: the unit the host names (`PlaneCancelIn::unit`), else the one on the cancelled
 //!   ticket, is dropped, `CANCEL_ABORTED` before its far end answered and `CANCEL_OK_PARTIAL` after.
-//! * `project`: the hook view of a unit's request ([`crate::driven::project`]): the entry it routes
+//! * `project`: the hook view of a unit's request ([`crate::driven::project_hook`]): the entry it routes
 //!   over as the view's pool, its dialect, the request document as the one turn a content-granted
 //!   hook reads, and a request-stage hook's rewrite applied in the dialect
 //!   ([`crate::driven::rewritten`]) and answered as the body the kernel keeps. Every plane gets every
@@ -1055,7 +1055,7 @@ const NO_SPAN: Span = Span {
 };
 
 slot!(
-    /// `project`: THE HOOK VIEW of a unit's request ([`driven::project`]), as every plane projects
+    /// `project`: THE HOOK VIEW of a unit's request ([`driven::project_hook`]), as every plane projects
     /// its own (THE DESIGN section 1: "the hook tap and gate ... apply to every plane the same
     /// way"). A request-stage hook's rewrite is applied first, in the request's dialect
     /// ([`driven::rewritten`], wholesale, as 1.5.5 replaced the body; a rewrite naming another

@@ -307,7 +307,7 @@ pub fn parsed(body: &[u8]) -> Result<serde_json::Value, Unrouted> {
 
 /// An open container of [`built`]: an array's items so far, or an object's members so far and
 /// the key of the member being read.
-enum Open {
+enum OpenValue {
     Array(Vec<serde_json::Value>),
     Object(serde_json::Map<String, serde_json::Value>, String),
 }
@@ -319,14 +319,14 @@ enum Open {
 fn built(body: &[u8]) -> Option<serde_json::Value> {
     use serde_json::Value;
     let mut at = Skip::lenient(body);
-    let mut open: Vec<Open> = Vec::new();
+    let mut open: Vec<OpenValue> = Vec::new();
     loop {
         let mut value = match at.next_non_space()? {
             b'{' => match at.next_non_space()? {
                 b'}' => Value::Object(serde_json::Map::new()),
                 b'"' => {
                     let key = at.key()?;
-                    open.push(Open::Object(serde_json::Map::new(), key));
+                    open.push(OpenValue::Object(serde_json::Map::new(), key));
                     continue;
                 }
                 _ => return None,
@@ -337,7 +337,7 @@ fn built(body: &[u8]) -> Option<serde_json::Value> {
                     at.at += 1;
                     Value::Array(Vec::new())
                 } else {
-                    open.push(Open::Array(Vec::new()));
+                    open.push(OpenValue::Array(Vec::new()));
                     continue;
                 }
             }
@@ -352,16 +352,16 @@ fn built(body: &[u8]) -> Option<serde_json::Value> {
         loop {
             let next = match open.last_mut() {
                 None => return Some(value),
-                Some(Open::Array(items)) => {
+                Some(OpenValue::Array(items)) => {
                     items.push(value);
                     at.next_non_space()?
                 }
-                Some(Open::Object(members, key)) => {
+                Some(OpenValue::Object(members, key)) => {
                     members.insert(core::mem::take(key), value);
                     at.next_non_space()?
                 }
             };
-            let in_array = matches!(open.last()?, Open::Array(_));
+            let in_array = matches!(open.last()?, OpenValue::Array(_));
             match (next, in_array) {
                 (b',', true) => break,
                 (b',', false) => {
@@ -369,15 +369,15 @@ fn built(body: &[u8]) -> Option<serde_json::Value> {
                         return None;
                     }
                     let next_key = at.key()?;
-                    if let Some(Open::Object(_, key)) = open.last_mut() {
+                    if let Some(OpenValue::Object(_, key)) = open.last_mut() {
                         *key = next_key;
                     }
                     break;
                 }
                 (b']', true) | (b'}', false) => {
                     value = match open.pop()? {
-                        Open::Array(items) => Value::Array(items),
-                        Open::Object(members, _) => Value::Object(members),
+                        OpenValue::Array(items) => Value::Array(items),
+                        OpenValue::Object(members, _) => Value::Object(members),
                     };
                 }
                 _ => return None,
@@ -1090,7 +1090,7 @@ pub struct Projected<'r> {
 /// `model`, and mints no fact from it.
 #[cfg(test)]
 #[must_use]
-pub fn project<'r, V>(
+pub fn project_hook<'r, V>(
     request: &[u8],
     dialect: u32,
     routes: &'r std::collections::BTreeMap<String, V>,
@@ -1298,13 +1298,13 @@ fn spliced_members(
         } else {
             continue;
         };
-        kept.push((span.start, member(key, &bytes)));
+        kept.push((span.start, member_bytes(key, &bytes)));
     }
     kept.sort_by_key(|(at, _)| *at);
     let mut members: Vec<Vec<u8>> = kept.into_iter().map(|(_, m)| m).collect();
     for (key, value) in document {
         if !current.contains_key(key) {
-            members.push(member(key, value.to_string().as_bytes()));
+            members.push(member_bytes(key, value.to_string().as_bytes()));
         }
     }
     let mut out = Vec::with_capacity(body.len());
@@ -1315,7 +1315,7 @@ fn spliced_members(
 }
 
 /// One member, `"key":value`, `value` as written.
-fn member(key: &str, value: &[u8]) -> Vec<u8> {
+fn member_bytes(key: &str, value: &[u8]) -> Vec<u8> {
     let mut m = serde_json::Value::String(key.to_string())
         .to_string()
         .into_bytes();
