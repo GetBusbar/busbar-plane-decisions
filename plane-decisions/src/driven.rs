@@ -286,10 +286,9 @@ fn exceeds_depth(bytes: &[u8], max: usize) -> bool {
 ///
 /// [`Unrouted::Unparsable`], as above.
 pub fn parsed(body: &[u8]) -> Result<serde_json::Value, Unrouted> {
-    // The document 1.5.5 would build ([`valid`]), and only then built, here by serde. A number
-    // 1.5.5's reader took as finite through its exponent cap but whose true value overflows
-    // ([`crate::sonic_number`]) is one serde refuses: that body is refused here though 1.5.5
-    // built it.
+    // The document 1.5.5 would build ([`valid`]), and only then built: by serde, or where serde
+    // refuses a number 1.5.5's reader took as finite through its exponent cap ([`built`]), from
+    // that reader's own values.
     if !valid(body) {
         return Err(Unrouted::Unparsable);
     }
@@ -297,9 +296,94 @@ pub fn parsed(body: &[u8]) -> Result<serde_json::Value, Unrouted> {
     // The depth is bounded by the scan above, at 1.5.5's own; serde's limit stops one level short.
     let mut de = serde_json::Deserializer::from_str(text);
     de.disable_recursion_limit();
-    let value = serde::Deserialize::deserialize(&mut de).map_err(|_| Unrouted::Unparsable)?;
-    de.end().map_err(|_| Unrouted::Unparsable)?;
-    Ok(value)
+    let read: Result<serde_json::Value, _> = serde::Deserialize::deserialize(&mut de);
+    match read {
+        Ok(value) if de.end().is_ok() => Ok(value),
+        // A document 1.5.5 built whose number serde refuses (one 1.5.5's reader took as finite
+        // through its exponent cap, its true value overflowing): built as 1.5.5 built it.
+        _ => built(body).ok_or(Unrouted::Unparsable),
+    }
+}
+
+/// An open container of [`built`]: an array's items so far, or an object's members so far and
+/// the key of the member being read.
+enum Open {
+    Array(Vec<serde_json::Value>),
+    Object(serde_json::Map<String, serde_json::Value>, String),
+}
+
+/// [`parsed`]'s document for a body [`valid`] holds to be one, built without recursion from the
+/// walk [`Skip`] makes, each number as 1.5.5's reader read it ([`crate::sonic_number::value`]), each
+/// string decoded; a repeated key keeps its last value, as serde's map does. Only reached where
+/// serde refuses a number 1.5.5's reader took.
+fn built(body: &[u8]) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    let mut at = Skip::lenient(body);
+    let mut open: Vec<Open> = Vec::new();
+    loop {
+        let mut value = match at.next_non_space()? {
+            b'{' => match at.next_non_space()? {
+                b'}' => Value::Object(serde_json::Map::new()),
+                b'"' => {
+                    let key = at.key()?;
+                    open.push(Open::Object(serde_json::Map::new(), key));
+                    continue;
+                }
+                _ => return None,
+            },
+            b'[' => {
+                at.eat_spaces();
+                if at.peek()? == b']' {
+                    at.at += 1;
+                    Value::Array(Vec::new())
+                } else {
+                    open.push(Open::Array(Vec::new()));
+                    continue;
+                }
+            }
+            b'"' => Value::String(at.string_value()?),
+            first @ (b'-' | b'0'..=b'9') => at.number_value(first)?,
+            b't' => at.skip_literal(b"rue").ok().map(|()| Value::Bool(true))?,
+            b'f' => at.skip_literal(b"alse").ok().map(|()| Value::Bool(false))?,
+            b'n' => at.skip_literal(b"ull").ok().map(|()| Value::Null)?,
+            _ => return None,
+        };
+        // The value ends every container it is the last of.
+        loop {
+            let next = match open.last_mut() {
+                None => return Some(value),
+                Some(Open::Array(items)) => {
+                    items.push(value);
+                    at.next_non_space()?
+                }
+                Some(Open::Object(members, key)) => {
+                    members.insert(core::mem::take(key), value);
+                    at.next_non_space()?
+                }
+            };
+            let in_array = matches!(open.last()?, Open::Array(_));
+            match (next, in_array) {
+                (b',', true) => break,
+                (b',', false) => {
+                    if at.next_non_space()? != b'"' {
+                        return None;
+                    }
+                    let next_key = at.key()?;
+                    if let Some(Open::Object(_, key)) = open.last_mut() {
+                        *key = next_key;
+                    }
+                    break;
+                }
+                (b']', true) | (b'}', false) => {
+                    value = match open.pop()? {
+                        Open::Array(items) => Value::Array(items),
+                        Open::Object(members, _) => Value::Object(members),
+                    };
+                }
+                _ => return None,
+            }
+        }
+    }
 }
 
 /// The unknown-model refusal's words before the echoed name: 1.5.5's (v1.5.5 ingress/mod.rs
@@ -584,6 +668,35 @@ impl<'b> Skip<'b> {
                 }
             }
         }
+    }
+
+    /// [`built`]'s string, its opening quote consumed: decoded.
+    fn string_value(&mut self) -> Option<String> {
+        let start = self.at - 1;
+        self.skip_string_token().ok()?;
+        serde_json::from_slice(&self.bytes[start..self.at]).ok()
+    }
+
+    /// [`built`]'s key and its colon, the key's opening quote consumed.
+    fn key(&mut self) -> Option<String> {
+        let key = self.string_value()?;
+        (self.next_non_space()? == b':').then_some(key)
+    }
+
+    /// [`built`]'s number, its first byte consumed: as 1.5.5's reader read it.
+    fn number_value(&mut self, first: u8) -> Option<serde_json::Value> {
+        use crate::sonic_number::ParserNumber;
+        let start = self.at - 1;
+        self.skip_number_token(first).ok()?;
+        Some(
+            match crate::sonic_number::value(&self.bytes[start..self.at])? {
+                ParserNumber::Unsigned(n) => serde_json::Value::from(n),
+                ParserNumber::Signed(n) => serde_json::Value::from(n),
+                ParserNumber::Float(f) => {
+                    serde_json::Value::Number(serde_json::Number::from_f64(f)?)
+                }
+            },
+        )
     }
 
     /// A skipped object's key and its colon, the key's opening quote consumed.

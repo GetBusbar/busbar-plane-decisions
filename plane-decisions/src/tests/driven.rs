@@ -1250,6 +1250,39 @@ fn the_document_reads_a_number_as_1_5_5_read_it() {
     assert!(!valid(br#"{"model":"a","x":[1e309]}"#));
 }
 
+/// The document [`built`] makes where serde refuses one of 1.5.5's numbers is the document serde
+/// makes everywhere else: the same members, strings decoded, numbers read alike.
+#[test]
+fn the_built_document_is_serdes_where_both_read_it() {
+    let body = br#" {"model":"m","a":[1,-3,1.5,2e3,true,false,null,"x\u00e9\ud83d\ude00",{}],
+        "b":{"c":[[],{"d":"e"}],"c":7},"n":18446744073709551616,"s":"q\"uote"} "#;
+    let serde: serde_json::Value = serde_json::from_slice(body).expect("serde reads it");
+    assert_eq!(built(body), Some(serde));
+}
+
+/// RED (opus re-review, B2 residual): a rewrite over a body holding a number 1.5.5's reader took as
+/// finite through its exponent cap (its true value overflows, so serde refuses it) applies, as
+/// 1.5.5 applied it over the document it built; the number is the value 1.5.5 read. RED before:
+/// FAULT, 500.
+#[test]
+fn a_rewrite_applies_over_a_number_only_1_5_5s_reader_takes() {
+    let body = format!(
+        r#"{{"model":"m","x":0.{}1e12300,"pii":"123-45-6789","state":{{}}}}"#,
+        "0".repeat(2000)
+    );
+    let document = parsed(body.as_bytes()).expect("1.5.5 built this document");
+    assert_eq!(
+        document["x"],
+        serde_json::json!(0.0),
+        "1e-771, as 1.5.5 read it"
+    );
+    let rewritten = rewritten(body.as_bytes(), &rewrite_of(r#"{"state":{}}"#), "m")
+        .expect("applied")
+        .expect("the request changes");
+    let rewritten: serde_json::Value = serde_json::from_slice(&rewritten).expect("JSON");
+    assert_eq!(rewritten, serde_json::json!({"model": "m", "state": {}}));
+}
+
 /// The skipped-escape cases 1.5.5 SERVED are the ones its DOM parse (a rewrite hook's pass) refused:
 /// the whole document does not parse, which is what a rewrite over such a body must FAULT on.
 #[test]

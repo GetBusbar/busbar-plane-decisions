@@ -32,9 +32,15 @@ use self::{common::BiasedFp, float::RawFloat, table::POWER_OF_FIVE_128};
 /// malformed number), the parse 400.
 #[must_use]
 pub(crate) fn finite(number: &[u8]) -> bool {
+    value(number).is_some()
+}
+
+/// The value 1.5.5 read `number` as (one JSON number's bytes, held to the JSON grammar): an
+/// unsigned or a negative integer, or a finite float; `None` where [`finite`] is `false`.
+pub(crate) fn value(number: &[u8]) -> Option<ParserNumber> {
     let negative = number.first() == Some(&b'-');
     let mut index = usize::from(negative);
-    parse_number(number, &mut index, negative).is_ok()
+    parse_number(number, &mut index, negative).ok()
 }
 
 /// PORT: `arch/fallback.rs`'s `simd_str2int`, without `unsafe`: the value of at most `need`
@@ -49,9 +55,9 @@ fn str2int(c: &[u8], need: usize) -> (u64, usize) {
     (sum, i)
 }
 
+/// A number as 1.5.5 read it.
 #[derive(Debug)]
-#[allow(dead_code)]
-enum ParserNumber {
+pub(crate) enum ParserNumber {
     Unsigned(u64),
     /// Always less than zero.
     Signed(i64),
