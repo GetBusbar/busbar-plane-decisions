@@ -114,7 +114,11 @@ mod hooks {
 
     /// A `kind: gate` on the hook double holding the `prompt` grant, answering as `settings` say,
     /// deployment-wide when `global`.
-    fn hook(prompt: &str, global: bool, settings: serde_json::Value) -> busbar_kernel::config::HookCfg {
+    fn hook(
+        prompt: &str,
+        global: bool,
+        settings: serde_json::Value,
+    ) -> busbar_kernel::config::HookCfg {
         serde_json::from_value(serde_json::json!({
             "kind": "gate",
             "module": "test-hook",
@@ -181,7 +185,8 @@ mod hooks {
         let dispatcher = Arc::new(Dispatcher::new(DispatchConfig::default()));
         crate::root::connector::install_io(&dispatcher);
         let _ = dispatcher.lend_seal(busbar_kernel::seal::lend());
-        let row = LinkedRow::of(busbar_plane_decisions::door).expect("the door states its Statement");
+        let row =
+            LinkedRow::of(busbar_plane_decisions::door).expect("the door states its Statement");
         let plane = Arc::new(
             load_linked::<Plane>(
                 &row,
@@ -321,7 +326,9 @@ mod hooks {
         } else {
             let app = hooks
                 .iter()
-                .fold(app.hook_env(hook_env()), |app, (name, cfg)| app.hook(name, cfg.clone()));
+                .fold(app.hook_env(hook_env()), |app, (name, cfg)| {
+                    app.hook(name, cfg.clone())
+                });
             match bound {
                 Bound::Global => names
                     .iter()
@@ -386,7 +393,10 @@ mod hooks {
         let (status, body, heard) = s.decide().await;
         assert_eq!(status.as_u16(), 409, "the hook's own status: {body}");
         assert_eq!(body["error"]["message"], "no decisions today", "{body}");
-        assert!(heard.is_none(), "the gated unit reached the provider: {heard:?}");
+        assert!(
+            heard.is_none(),
+            "the gated unit reached the provider: {heard:?}"
+        );
     }
 
     /// HOOKS-TAP, BY THE SECTION'S OWN ATTACH: a `prompt: rw` hook the section names in

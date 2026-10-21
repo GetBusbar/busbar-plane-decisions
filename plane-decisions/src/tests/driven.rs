@@ -414,8 +414,8 @@ fn every_caller_field_but_the_governed_set_is_relayed() {
 /// The money rule's reading of a whole answer by its declared pointers, as the body would be read
 /// kept whole: the reference the piece-by-piece reading is held to.
 fn by_pointer(status: u32, body: &[u8]) -> Result<Vec<(u32, u64)>, UnreadableUsage> {
-    use crate::codec::{read_raw, PTR_ERROR};
-    let ok = (200..300).contains(&status) && read_raw(body, PTR_ERROR).is_none_or(|e| e == b"null");
+    use crate::codec::read_raw;
+    let ok = (200..300).contains(&status) && read_raw(body, "/error").is_none_or(|e| e == b"null");
     if !ok {
         return Ok(vec![]);
     }
@@ -666,8 +666,8 @@ fn a_rewrite_sets_the_members_its_document_states_and_keeps_every_other_byte() {
         String::from_utf8(out).expect("UTF-8"),
         "{ \"state\" : {\"amount\":0},\n  \"model\":\"jev\" }"
     );
-    let added = rewritten(br#"{"state":{}}"#, &rewrite_of(r#"{"context":{"k":1}}"#))
-        .expect("applied");
+    let added =
+        rewritten(br#"{"state":{}}"#, &rewrite_of(r#"{"context":{"k":1}}"#)).expect("applied");
     assert_eq!(added, br#"{"state":{},"context":{"k":1}}"#);
     let into_empty = rewritten(b"{}", &rewrite_of(r#"{"state":1}"#)).expect("applied");
     assert_eq!(into_empty, br#"{"state":1}"#);
@@ -684,7 +684,10 @@ fn a_rewrite_sets_the_members_its_document_states_and_keeps_every_other_byte() {
 #[test]
 fn a_rewrite_that_does_not_apply_leaves_the_request() {
     let body = br#"{"state":{"amount":7}}"#;
-    assert_eq!(rewritten(body, &rewrite_of(r#"{"state":{"amount":7}}"#)), None);
+    assert_eq!(
+        rewritten(body, &rewrite_of(r#"{"state":{"amount":7}}"#)),
+        None
+    );
     assert_eq!(rewritten(body, br#"{"messages":[],"tools":[]}"#), None);
     assert_eq!(rewritten(body, &rewrite_of("not a document")), None);
     assert_eq!(rewritten(body, b"not json"), None);
@@ -699,7 +702,7 @@ fn a_request_is_projected_over_its_dialects_models() {
         ("a".to_string(), tail::DIALECT_JEV),
         ("n".to_string(), tail::DIALECT_NANOJEV),
     ]);
-    let body = br#"{"model":"a","state":"é"}"#;
+    let body = r#"{"model":"a","state":"é"}"#.as_bytes();
     let view = project(body, tail::DIALECT_JEV, &routes, |d| *d);
     assert_eq!(
         view,
@@ -710,7 +713,10 @@ fn a_request_is_projected_over_its_dialects_models() {
         }
     );
     // The only model of its dialect is the default; a model of the other dialect is none.
-    assert_eq!(project(b"{}", tail::DIALECT_NANOJEV, &routes, |d| *d).entry, "n");
+    assert_eq!(
+        project(b"{}", tail::DIALECT_NANOJEV, &routes, |d| *d).entry,
+        "n"
+    );
     assert_eq!(
         project(br#"{"model":"n"}"#, tail::DIALECT_JEV, &routes, |d| *d).entry,
         ""

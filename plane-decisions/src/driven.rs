@@ -360,8 +360,8 @@ pub fn project<'r, V>(
     routes: &'r std::collections::BTreeMap<String, V>,
     dialect_of: impl Fn(&V) -> u32,
 ) -> Projected<'r> {
-    let entry = route_model(request, routes, |r| dialect_of(r) == dialect)
-        .map_or("", |(name, _)| name);
+    let entry =
+        route_model(request, routes, |r| dialect_of(r) == dialect).map_or("", |(name, _)| name);
     let chars = match core::str::from_utf8(request) {
         Ok(text) => text.chars().count(),
         Err(_) => String::from_utf8_lossy(request).chars().count(),

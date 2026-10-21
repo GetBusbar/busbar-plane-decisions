@@ -250,7 +250,11 @@ fn a_success_with_no_count_bills_one_decision() {
     assert_eq!(
         a.units,
         vec![
-            (class("decision"), busbar_contract::abi::plane::UNITS_FLOOR, 1),
+            (
+                class("decision"),
+                busbar_contract::abi::plane::UNITS_FLOOR,
+                1
+            ),
             (fee, busbar_contract::abi::plane::UNITS_REPORTED, 1),
         ]
     );
@@ -444,10 +448,7 @@ fn a_live_unit_not_yet_started_is_never_dropped_to_make_room() {
         door.cancel_unit(2),
         (Outcome::Ready, busbar_contract::abi::plane::CANCEL_ABORTED)
     );
-    assert_eq!(
-        door.arrive(MAX_UNITS + 2, br#"{}"#).outcome,
-        Outcome::Ready
-    );
+    assert_eq!(door.arrive(MAX_UNITS + 2, br#"{}"#).outcome, Outcome::Ready);
 }
 
 /// RED (audit plane-decisions R3, the cancel): the host cancels a unit it minted by naming it
@@ -593,5 +594,9 @@ fn an_unknown_model_name_of_any_length_is_refused_in_bounded_words() {
         "the refusal's words run {} bytes",
         unknown.text.len()
     );
-    assert!(unknown.text.starts_with("The model 'xxx"), "{}", &unknown.text[..32]);
+    assert!(
+        unknown.text.starts_with("The model 'xxx"),
+        "{}",
+        &unknown.text[..32]
+    );
 }

@@ -89,7 +89,11 @@ fn a_rewrite_alters_the_request_the_far_end_receives() {
     let want = b"{\"model\":\"a\",  \"state\":{\"amount\":0}}";
     assert_eq!(view.outcome, Some(Outcome::Ready), "{view:?}");
     assert_eq!(view.rewritten.as_deref(), Some(&want[..]), "{view:?}");
-    assert_eq!(view.body.as_deref(), Some(&want[..]), "the rewritten request is projected");
+    assert_eq!(
+        view.body.as_deref(),
+        Some(&want[..]),
+        "the rewritten request is projected"
+    );
     // The kernel keeps the rewritten body and pushes it as the caller's piece.
     let mut bufs = Bufs::new(1 << 16);
     door.piece(1, Given::attempt(1), &mut bufs);

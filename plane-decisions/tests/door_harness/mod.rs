@@ -9,10 +9,10 @@
 
 use std::os::raw::c_void;
 
+use busbar_contract::abi::hook::MessageView;
 use busbar_contract::abi::mechanism::call::{
     AbiStr, Blob, Field, InHead, OutHead, Outcome, Span, BLOB_OCTETS,
 };
-use busbar_contract::abi::hook::MessageView;
 use busbar_contract::abi::mechanism::lifecycle::{
     slot as life, CancelIn, CancelOut, GenIn, OpenIn, OpenOut, OpsHead, RefreshIn, ValidateIn,
 };
