@@ -189,3 +189,22 @@ fn the_section_under_its_verb_reads_as_the_section() {
     // RED ARM: the verb beside another member is no wrapper; it is an unknown member.
     assert!(read_settings(br#"{"decisions":{},"models":{}}"#).is_err());
 }
+
+/// RED-BEFORE-GREEN (busbar row 159; architect ruling 2026-10-23 R-6, spec Part 1: "a plane's
+/// settings reach it as ONE validated JSON object `{section: value}`"): a host hands a plane that
+/// consumes sections its own `decisions:` section beside each consumed section the deployment
+/// writes (`providers:`), keyed. The plane reads its own key from that object, at open and at
+/// refresh, and ignores the consumed sections there (their dialect facts reach it at open). RED:
+/// only a one-key object was unwrapped, so the keyed object read as a section with an unknown
+/// `decisions` member and the open was refused.
+#[test]
+fn the_keyed_settings_read_as_the_decisions_section_beside_the_consumed_ones() {
+    let section = read_settings(
+        br#"{"decisions":{"models":{"jev":{"provider":"typesafe"}}},"providers":{"typesafe":{"protocol":"jev"}}}"#,
+    )
+    .expect("the keyed object reads at the plane's own key");
+    assert_eq!(section.models.len(), 1);
+    let bare = read_settings(br#"{"models":{"jev":{"provider":"typesafe"}}}"#)
+        .expect("the bare section still reads");
+    assert_eq!(bare.models.len(), 1);
+}
