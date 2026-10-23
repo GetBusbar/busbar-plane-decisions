@@ -124,9 +124,11 @@ pub struct Door {
     pub claims: Vec<(String, String)>,
 }
 
-/// Open the door over `settings` (the `decisions:` section, as written).
+/// Open the door over `settings` (the `decisions:` section, as written), the host stating provider
+/// `typesafe`'s protocol `jev` as it states every provider the section references
+/// (`busbar_contract::plane_calls::dialect_facts`).
 pub fn open(settings: &str) -> Door {
-    open_with(settings, &[])
+    open_with(settings, &[("typesafe", "jev")])
 }
 
 /// Open the door over `settings`, the host stating each referenced provider's `(name, protocol)`.
@@ -324,6 +326,18 @@ impl Bufs {
 impl Door {
     /// `refresh` onto `generation` over `settings`: the new generation's claims.
     pub fn refresh(&self, settings: &str, generation: u64) -> Vec<(String, String)> {
+        let (outcome, words, claims) = self.try_refresh(settings, generation);
+        assert_eq!(outcome, Outcome::Ready, "the door refreshes: {words}");
+        claims
+    }
+
+    /// `refresh` onto `generation` over `settings`: its outcome, its refusal's words and the new
+    /// generation's claims (none unless it is ready).
+    pub fn try_refresh(
+        &self,
+        settings: &str,
+        generation: u64,
+    ) -> (Outcome, String, Vec<(String, String)>) {
         let mut i: RefreshIn = z();
         i.head = head::<RefreshIn>(life::REFRESH, Ticket::NONE);
         i.generation = generation;
@@ -336,8 +350,10 @@ impl Door {
             std::ptr::from_ref(&i).cast(),
             std::ptr::from_mut(&mut o).cast(),
         );
-        assert_eq!(ret.outcome(), Outcome::Ready, "the door refreshes");
-        claims_of(o.snapshot)
+        if ret.outcome() != Outcome::Ready {
+            return (ret.outcome(), read(o.head.error), Vec::new());
+        }
+        (ret.outcome(), String::new(), claims_of(o.snapshot))
     }
 
     /// `arrive` of `unit` on `POST /v1/systemone` with `body`.

@@ -327,13 +327,14 @@ pub struct ModelRoute {
 
 /// EVERY MODEL'S ROUTE under `section`: its dialect, its own `protocol` override or else its
 /// provider's protocol (`protocols`, the provider facts the host handed at `open`; THE DESIGN
-/// section 2: "a model's dialect is its override or its provider's protocol"), `jev` for a provider
-/// the host stated no protocol for.
+/// section 2: "a model's dialect is its override or its provider's protocol"; #51: "Resolution:
+/// model override if present, else the provider/catalog default").
 ///
 /// # Errors
 ///
 /// A model whose dialect is none this plane speaks, named with the dialects it does (#51: an
-/// unknown dialect fails closed).
+/// unknown dialect fails closed); and a model with no override whose provider the host stated no
+/// protocol for, named with that provider: it has no dialect, and none is guessed for it.
 pub fn routes(
     section: &DecisionsSection,
     protocols: &BTreeMap<String, String>,
@@ -346,23 +347,51 @@ pub fn routes(
                 .protocol
                 .as_deref()
                 .or_else(|| protocols.get(&model.provider).map(String::as_str))
-                .unwrap_or(tail::DIALECTS[0]);
-            let dialect = driven::dialect_of(protocol).ok_or_else(|| {
-                format!(
-                    "decisions.models.{name} resolves to protocol '{protocol}', but the decisions \
-                     plane speaks only: {}.",
-                    tail::DIALECTS.join(", ")
-                )
-            })?;
+                .ok_or_else(|| {
+                    format!(
+                        "decisions.models.{name} names provider '{}', whose protocol the host did \
+                         not state when the plane opened, and states no `protocol` of its own; the \
+                         decisions plane speaks only: {}.",
+                        model.provider,
+                        tail::DIALECTS.join(", ")
+                    )
+                })?;
             Ok((
                 name.clone(),
                 ModelRoute {
-                    dialect,
+                    dialect: dialect_named(name, protocol)?,
                     upstream: model.upstream_model.clone(),
                 },
             ))
         })
         .collect()
+}
+
+/// Every model's own `protocol` override under `section` is a dialect this plane speaks
+/// (`validate`, handed no provider facts: a provider's protocol is judged by the kernel against
+/// the dialects the Statement states).
+///
+/// # Errors
+///
+/// As [`routes`]' for an unspoken dialect.
+pub fn spoken_overrides(section: &DecisionsSection) -> Result<(), String> {
+    section
+        .models
+        .iter()
+        .filter_map(|(name, model)| model.protocol.as_deref().map(|p| (name, p)))
+        .try_for_each(|(name, protocol)| dialect_named(name, protocol).map(drop))
+}
+
+/// The index of `protocol`, model `name`'s resolved one, in [`tail::DIALECTS`], or the refusal
+/// naming the dialects the plane speaks.
+fn dialect_named(name: &str, protocol: &str) -> Result<u32, String> {
+    driven::dialect_of(protocol).ok_or_else(|| {
+        format!(
+            "decisions.models.{name} resolves to protocol '{protocol}', but the decisions plane \
+             speaks only: {}.",
+            tail::DIALECTS.join(", ")
+        )
+    })
 }
 
 /// ONE GENERATION'S SNAPSHOT for `section`'s `routes`: [`snapshot_spec`]'s claims for its models'
@@ -453,7 +482,7 @@ slot!(
         // A model's own `protocol` must be a dialect this plane speaks; its provider's is judged
         // by the kernel against the dialects the Statement states.
         match read_dealt(input.field(|i| &i.settings).bytes())
-            .and_then(|section| routes(&section, &BTreeMap::new()))
+            .and_then(|section| spoken_overrides(&section))
         {
             Ok(_) => Outcome::Ready,
             Err(words) => out.fail(Refusal::refused(words)),

@@ -116,6 +116,43 @@ fn a_nanojev_unit_is_sent_to_evaluate_and_bills_its_states() {
     assert!(none.units.is_empty() && none.bytes.is_empty(), "{none:?}");
 }
 
+/// RED (audit plane-decisions R2 #3): a reload naming a model whose provider `open` was handed no
+/// protocol for, and which states no `protocol` of its own, is refused by name (#51: "Resolution:
+/// model override if present, else the provider/catalog default"; fail closed), never routed over
+/// the first dialect; the live generation keeps serving.
+#[test]
+fn a_reload_of_an_unstated_provider_is_refused_by_name() {
+    let door = open_with(
+        r#"{"models":{"n":{"provider":"np"}}}"#,
+        &[("np", "nanojev")],
+    );
+    let (outcome, words, claims) = door.try_refresh(
+        r#"{"models":{"n":{"provider":"np"},"g":{"provider":"ghost"}}}"#,
+        2,
+    );
+    assert_eq!(
+        (outcome, claims.is_empty()),
+        (Outcome::Refused, true),
+        "{words}"
+    );
+    assert!(
+        words.contains("decisions.models.g") && words.contains("'ghost'"),
+        "{words}"
+    );
+    // The live generation still routes its model.
+    let n = door.arrive_on(1, EVALUATE.0, EVALUATE.1, br#"{"input":{}}"#, &[]);
+    assert_eq!(
+        (n.outcome, n.entry.as_str()),
+        (Outcome::Ready, "n"),
+        "{n:?}"
+    );
+    // Validate, handed no provider facts, judges only a model's own `protocol`.
+    assert_eq!(
+        validate(r#"{"models":{"g":{"provider":"ghost"}}}"#).0,
+        Outcome::Ready
+    );
+}
+
 /// A model's own `protocol` that names no dialect the plane speaks is refused at validate (#51:
 /// fail closed), naming the dialects it does.
 #[test]
