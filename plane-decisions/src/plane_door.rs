@@ -251,10 +251,14 @@ pub const STATEMENT: Statement = Statement {
 
 /// The settings blob read as the `decisions:` section; an empty blob is the empty section.
 ///
-/// The blob is ONE JSON object `{decisions: <section>}` (`BUSBAR-1.6.0.md` section 4: "a plane's
-/// settings reach it as ONE validated JSON object `{section: value}`"), the shape the boot's deal
-/// hands every door; the bare section is read too, since a section never carries a member named
-/// after its own verb (its grammar refuses unknown members), so the two cannot be confused.
+/// The blob is ONE JSON object keyed by section (`BUSBAR-1.6.0.md` section 4: "a plane's settings
+/// reach it as ONE validated JSON object `{section: value}`"): `{decisions: <section>}` beside each
+/// section the plane consumes that the deployment writes (`providers:`; architect ruling R-6,
+/// 2026-10-23). The plane reads its own key; a consumed section's facts reach it at open
+/// (`PlaneOpenIn::providers`). Only the plane's own verb and the sections it consumes may sit in
+/// the keyed object: any other member beside the verb makes it no wrapper. The bare section is read
+/// too, since a section never carries a member named after its own verb (its grammar refuses
+/// unknown members), so the two cannot be confused.
 ///
 /// # Errors
 ///
@@ -266,9 +270,15 @@ pub fn read_settings(settings: &[u8]) -> Result<DecisionsSection, String> {
     let mut value: serde_json::Value =
         serde_json::from_slice(settings).map_err(|e| e.to_string())?;
     let section = match value.as_object_mut() {
-        Some(blob) if blob.len() == 1 && blob.contains_key(tail::SECTION_DECLARING) => blob
-            .remove(tail::SECTION_DECLARING)
-            .unwrap_or(serde_json::Value::Null),
+        Some(blob)
+            if blob.contains_key(tail::SECTION_DECLARING)
+                && blob.keys().all(|k| {
+                    k == tail::SECTION_DECLARING || tail::SECTIONS_CONSUMED.contains(&k.as_str())
+                }) =>
+        {
+            blob.remove(tail::SECTION_DECLARING)
+                .unwrap_or(serde_json::Value::Null)
+        }
         _ => value,
     };
     if section.is_null() {
