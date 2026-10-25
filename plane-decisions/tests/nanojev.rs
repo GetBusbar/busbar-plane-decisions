@@ -14,7 +14,7 @@ mod door_harness;
 
 use busbar_contract::abi::mechanism::call::Outcome;
 use busbar_contract::abi::plane::{ROUTE_DIRECT, UNITS_REPORTED};
-use door_harness::{open, open_with, validate, Bufs, Given};
+use door_harness::{claims, open, open_with, validate, Bufs, Given};
 
 const SYSTEMONE: (&str, &str) = ("POST", "/v1/systemone");
 const EVALUATE: (&str, &str) = ("POST", "/api/evaluate");
@@ -22,12 +22,6 @@ const EVALUATE: (&str, &str) = ("POST", "/api/evaluate");
 /// One model of each dialect: `nano` by its own `protocol`, `jev` by its provider's.
 const BOTH: &str =
     r#"{"models":{"nano":{"provider":"np","protocol":"nanojev"},"jev":{"provider":"typesafe"}}}"#;
-
-fn claims(c: &[(&str, &str)]) -> Vec<(String, String)> {
-    c.iter()
-        .map(|(v, t)| ((*v).to_string(), (*t).to_string()))
-        .collect()
-}
 
 /// RED (audit plane-decisions#3): `/api/evaluate` is claimed when a `nanojev` model is configured,
 /// by its own `protocol` or its provider's as the host stated it at `open`, and only then.

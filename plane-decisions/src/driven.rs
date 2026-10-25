@@ -1324,14 +1324,6 @@ fn member_bytes(key: &str, value: &[u8]) -> Vec<u8> {
     m
 }
 
-/// Whether the kernel must verify a principal before the first piece. Every claimed request of this
-/// plane needs one: a decision is billed to someone (see [`arrive`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PrincipalNeed {
-    /// A principal is verified before the first piece.
-    Required,
-}
-
 /// A claimed request, classified.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Arrived {
@@ -1339,8 +1331,6 @@ pub struct Arrived {
     pub op: OpClassId,
     /// Its index in [`tail::OP_CLASSES`].
     pub op_class: u32,
-    /// Whether a principal is verified first.
-    pub principal: PrincipalNeed,
     /// Its index in [`tail::DIALECTS`].
     pub dialect: u32,
 }
@@ -1360,9 +1350,6 @@ pub fn arrive(verb: &str, target: &str) -> Option<Arrived> {
     Some(Arrived {
         op: row.op,
         op_class: u32::try_from(op_class).ok()?,
-        // A decision is billed to someone: the provider account is the deployment's, and the unit
-        // is the caller's.
-        principal: PrincipalNeed::Required,
         dialect,
     })
 }
@@ -1389,7 +1376,7 @@ pub fn caller_piece(bytes: &[u8], last: bool) -> CallerAnswer {
 
 /// The request bound for the far end, answered to an ATTEMPT piece.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FarEndRequest<'a> {
+pub struct FarEndRequest {
     /// The verb, explicit.
     pub verb: &'static str,
     /// The target, explicit.
@@ -1398,8 +1385,6 @@ pub struct FarEndRequest<'a> {
     pub fields: [(&'static str, &'static [u8]); 1],
     /// The auth scheme the kernel decorates the request under.
     pub auth: &'static str,
-    /// The caller's body, unchanged: byte identity is the dialect.
-    pub body: &'a [u8],
 }
 
 /// Answer an ATTEMPT piece of a unit of `dialect`: the same request on every attempt, whichever
@@ -1408,7 +1393,7 @@ pub struct FarEndRequest<'a> {
 /// it is not a cross-plane re-spelling of llm/a2a's `attempt` (structure-lint plane-dup; ARCHITECT
 /// ruling 2b 2026-10-04).
 #[must_use]
-pub fn attempt_request(dialect: u32, caller_body: &[u8]) -> FarEndRequest<'_> {
+pub fn attempt_request(dialect: u32) -> FarEndRequest {
     let target = tail::CLAIMS
         .iter()
         .find(|(_, _, d)| *d == dialect)
@@ -1418,7 +1403,6 @@ pub fn attempt_request(dialect: u32, caller_body: &[u8]) -> FarEndRequest<'_> {
         target,
         fields: [(FIELD_CONTENT_TYPE, CONTENT_TYPE_JSON)],
         auth: EGRESS_SCHEME,
-        body: caller_body,
     }
 }
 
@@ -1550,13 +1534,6 @@ pub struct FarEndReading {
 }
 
 impl FarEndReading {
-    /// A `jev` reading with nothing received.
-    #[cfg(test)]
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// A reading of an answer in `dialect` ([`tail::DIALECTS`]' index), nothing received.
     #[must_use]
     pub fn for_dialect(dialect: u32) -> Self {

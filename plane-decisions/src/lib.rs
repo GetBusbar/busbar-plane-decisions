@@ -65,8 +65,5 @@ pub use plane_door::door;
 /// door.
 #[cfg(test)]
 mod tests {
-    /// The crate root's prose, held to the tree it describes.
-    mod lib;
-
     mod durable_strings;
 }

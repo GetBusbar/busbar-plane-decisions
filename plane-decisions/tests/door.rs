@@ -15,19 +15,13 @@
 mod door_harness;
 
 use busbar_contract::abi::mechanism::call::Outcome;
-use busbar_contract::abi::plane::ROUTE_DIRECT;
-use door_harness::{open, Bufs, Given};
+use busbar_contract::abi::plane::{PRINCIPAL_REQUIRED, ROUTE_DIRECT};
+use door_harness::{claims, open, Bufs, Given};
 
 const SYSTEMONE: (&str, &str) = ("POST", "/v1/systemone");
 
 const TWO: &str = r#"{"models":{"a":{"provider":"typesafe"},"b":{"provider":"typesafe"}}}"#;
 const ONE: &str = r#"{"models":{"jev":{"provider":"typesafe"}}}"#;
-
-fn claims(c: &[(&str, &str)]) -> Vec<(String, String)> {
-    c.iter()
-        .map(|(v, t)| ((*v).to_string(), (*t).to_string()))
-        .collect()
-}
 
 /// RED (audit plane-decisions#1): several configured models publish the claim; none publishes none.
 #[test]
@@ -52,6 +46,8 @@ fn a_request_routes_by_its_model() {
         (Outcome::Ready, ROUTE_DIRECT, "b"),
         "{b:?}"
     );
+    // A decision is billed to someone: a principal is verified before the first piece.
+    assert_eq!(b.principal_need, PRINCIPAL_REQUIRED, "{b:?}");
     let a = two.arrive(2, br#"{"state":{},"model":"a"}"#);
     assert_eq!(
         (a.outcome, a.entry.as_str()),
@@ -207,19 +203,21 @@ fn tail() -> &'static busbar_contract::abi::plane::PlaneTail {
     }
 }
 
-/// The class index the tail names `name` at.
-fn class(name: &str) -> u32 {
+/// The tail's billable classes.
+fn classes() -> &'static [busbar_contract::abi::plane::BillableClass] {
     let tail = tail();
     // SAFETY: the tail's billable classes are a `'static` list of `billable_classes_len` entries,
     // each naming `'static` strings.
-    let classes = unsafe {
-        std::slice::from_raw_parts(tail.billable_classes_ptr(), tail.billable_classes_len())
-    };
+    unsafe { std::slice::from_raw_parts(tail.billable_classes_ptr(), tail.billable_classes_len()) }
+}
+
+/// The class index the tail names `name` at.
+fn class(name: &str) -> u32 {
     let named = |c: &busbar_contract::abi::plane::BillableClass| {
         // SAFETY: as above.
         unsafe { c.class.bytes() == name.as_bytes() }
     };
-    let at = classes
+    let at = classes()
         .iter()
         .position(named)
         .unwrap_or_else(|| panic!("the tail declares no class `{name}`"));
@@ -298,14 +296,9 @@ fn a_success_with_an_unreadable_count_fails_loudly() {
 /// three in family `decision`, and a success's reported tokens are billed in them.
 #[test]
 fn the_tokens_a_success_reports_are_billed_in_family_decision() {
-    let tail = tail();
-    // SAFETY: as in `class`.
-    let classes = unsafe {
-        std::slice::from_raw_parts(tail.billable_classes_ptr(), tail.billable_classes_len())
-    };
     let family = |name: &str| {
-        let c = &classes[class(name) as usize];
-        // SAFETY: as in `class`.
+        let c = &classes()[class(name) as usize];
+        // SAFETY: as in `classes`.
         String::from_utf8_lossy(unsafe { c.family.bytes() }).into_owned()
     };
     for name in ["decision", "input_tokens", "output_tokens"] {

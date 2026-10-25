@@ -88,6 +88,13 @@ static TABLES: Tables = Tables(HostTables {
     services: std::ptr::null(),
 });
 
+/// `(verb, target)` pairs, as [`claims_of`] reads a snapshot's claims.
+pub fn claims(c: &[(&str, &str)]) -> Vec<(String, String)> {
+    c.iter()
+        .map(|(v, t)| ((*v).to_string(), (*t).to_string()))
+        .collect()
+}
+
 /// The claims a snapshot publishes, `(verb, target)`.
 fn claims_of(snapshot: *const PlaneSnapshot) -> Vec<(String, String)> {
     if snapshot.is_null() {
@@ -214,6 +221,8 @@ pub struct Arrived {
     pub entry_at: usize,
     /// The expected units written (the admission estimate), `(class, source, amount)`.
     pub expected: Vec<(u32, u32, u64)>,
+    /// The principal need the door answered.
+    pub principal_need: u32,
 }
 
 /// What one `project` answered.
@@ -440,6 +449,7 @@ impl Door {
                 .iter()
                 .map(|u| (u.class, u.source, u.amount))
                 .collect(),
+            principal_need: o.principal_need,
         }
     }
 

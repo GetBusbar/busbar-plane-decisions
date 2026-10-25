@@ -7,7 +7,6 @@ fn systemone_arrives_as_the_first_op_class_with_a_principal() {
     assert_eq!(a.op, ops::OP_SYSTEMONE);
     assert_eq!(a.op_class, 0);
     assert_eq!(tail::OP_CLASSES[a.op_class as usize], ops::OP_SYSTEMONE);
-    assert_eq!(a.principal, PrincipalNeed::Required);
     assert_eq!(tail::DIALECTS[a.dialect as usize], "jev");
     let e = arrive("POST", ops::PATH_EVALUATE).expect("evaluate is claimed");
     assert_eq!(e.op, ops::OP_EVALUATE);
@@ -32,7 +31,7 @@ fn every_claim_arrives() {
     for (verb, target, dialect) in tail::CLAIMS {
         let a = arrive(verb, target).unwrap_or_else(|| panic!("{verb} {target}"));
         assert_eq!(a.dialect, *dialect, "{verb} {target}");
-        assert_eq!(attempt_request(*dialect, b"{}").target, *target);
+        assert_eq!(attempt_request(*dialect).target, *target);
     }
 }
 
@@ -70,22 +69,17 @@ fn the_caller_body_is_kept_and_an_empty_one_is_refused() {
 }
 
 #[test]
-fn an_attempt_forwards_the_caller_body_unchanged() {
-    let body = br#"{"state":{"session":"s"},"context":{}}"#;
-    let r = attempt_request(tail::DIALECT_JEV, body);
+fn an_attempt_request_is_the_dialects_head() {
+    let r = attempt_request(tail::DIALECT_JEV);
     assert_eq!(r.verb, "POST");
     assert_eq!(r.target, "/v1/systemone");
     assert_eq!(r.fields, [("content-type", &b"application/json"[..])]);
     assert_eq!(r.auth, "decision-egress");
-    assert!(
-        std::ptr::eq(r.body, &body[..]),
-        "the body is borrowed, not copied"
-    );
 }
 
 /// The answer's counts as `(class, amount)`, for a far end answering `status` with `body`.
 fn billed(status: u32, body: &[u8]) -> Result<Vec<(u32, u64)>, UnreadableUsage> {
-    let mut reading = FarEndReading::new();
+    let mut reading = FarEndReading::default();
     reading.piece(body);
     reading.counts(Some(status)).map(|c| {
         c.into_iter()
@@ -102,7 +96,7 @@ const OUTPUT: u32 = tail::CLASS_OUTPUT_TOKENS_INDEX;
 
 #[test]
 fn far_end_pieces_are_relayed_unchanged_and_the_count_read_over_the_whole_answer() {
-    let mut reading = FarEndReading::new();
+    let mut reading = FarEndReading::default();
     let a = br#"{"request_id":"req_1","usage":{"un"#;
     let b = br#"its":42},"answers":{"decision":"approve"}}"#;
     assert_eq!(reading.piece(a), &a[..]);
@@ -166,7 +160,7 @@ fn a_non_success_bills_nothing() {
             "{status}"
         );
     }
-    let mut reading = FarEndReading::new();
+    let mut reading = FarEndReading::default();
     reading.piece(br#"{"usage":{"units":2}}"#);
     assert_eq!(
         reading.counts(None),
@@ -362,7 +356,7 @@ fn the_splice_rewrites_the_top_level_model_value_alone() {
 /// `/error` member, and never for an error answer, a non-2xx status or an answer with no status.
 #[test]
 fn the_request_fee_is_counted_on_a_success_alone() {
-    let mut ok = FarEndReading::new();
+    let mut ok = FarEndReading::default();
     ok.piece(br#"{"usage":{"units":3}}"#);
     let fee = ok.counts(Some(200)).expect("a success")[3].expect("a success owes its fee");
     assert_eq!(
@@ -473,7 +467,7 @@ fn by_pointer(status: u32, body: &[u8]) -> Result<Vec<(u32, u64)>, UnreadableUsa
 
 /// The answer read in two pieces split at `at`.
 fn split_billed(status: u32, body: &[u8], at: usize) -> Result<Vec<(u32, u64)>, UnreadableUsage> {
-    let mut reading = FarEndReading::new();
+    let mut reading = FarEndReading::default();
     reading.piece(&body[..at]);
     reading.piece(&body[at..]);
     reading.counts(Some(status)).map(|c| {
@@ -522,7 +516,7 @@ fn the_reading_is_the_pointers_reading_wherever_the_pieces_split() {
 /// An answer of any size is read in the reading's own fixed space.
 #[test]
 fn a_large_answer_is_read_without_keeping_it() {
-    let mut reading = FarEndReading::new();
+    let mut reading = FarEndReading::default();
     let before = std::mem::size_of_val(&reading);
     reading.piece(br#"{"answers":{"blob":""#);
     let filler = [b'x'; 4096];
@@ -627,7 +621,7 @@ fn a_model_of_the_other_dialect_is_this_dialects_unknown_model() {
 /// request fee, stay reported.
 #[test]
 fn a_success_with_no_count_bills_the_planes_floor_not_a_far_end_count() {
-    let mut none = FarEndReading::new();
+    let mut none = FarEndReading::default();
     none.piece(br#"{"answers":{}}"#);
     let counts = none.counts(Some(200)).expect("a success");
     assert_eq!(
@@ -639,7 +633,7 @@ fn a_success_with_no_count_bills_the_planes_floor_not_a_far_end_count() {
         })
     );
     assert_eq!(counts[3].map(|f| f.source), Some(Source::Reported));
-    let mut stated = FarEndReading::new();
+    let mut stated = FarEndReading::default();
     stated.piece(br#"{"usage":{"units":5}}"#);
     let counts = stated.counts(Some(200)).expect("a success");
     assert_eq!(counts[0].map(|d| d.source), Some(Source::Reported));

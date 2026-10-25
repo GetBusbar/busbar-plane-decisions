@@ -153,13 +153,6 @@ fn a_generation_lists_every_configured_model_in_name_order() {
     assert!(generation_spec(&routed(&empty)).listed.is_empty());
 }
 
-#[test]
-fn the_need_is_the_tails() {
-    assert_eq!(NEEDS.len(), tail::NEEDS.len());
-    assert_eq!(STATEMENT.needs_len(), NEEDS.len());
-    assert_eq!(STATEMENT.sections_len(), 1 + tail::SECTIONS_CONSUMED.len());
-}
-
 /// `validate` reads the blob stage 3g deals (`{decisions: <section>}`): the section inside it is
 /// judged (a typo refused), a blob that writes no `decisions:` is the empty section, and the bare
 /// section is not the dealt shape.

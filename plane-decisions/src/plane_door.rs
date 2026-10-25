@@ -85,7 +85,7 @@ use busbar_contract::abi::sdk::{
 use crate::claims;
 use crate::codec::{CONTENT_TYPE_JSON, FIELD_CONTENT_TYPE, FIELD_RETRY_AFTER};
 use crate::config::DecisionsSection;
-use crate::driven::{self, tail, CallerAnswer, FarEndReading, PrincipalNeed, Source};
+use crate::driven::{self, tail, CallerAnswer, FarEndReading, Source};
 use crate::meta::PLANE_KEY;
 
 /// The version the Statement names: the crate's (a test pins the two equal).
@@ -619,12 +619,9 @@ slot!(
         };
         out.set(|o| &o.op_class, arrived.op_class);
         out.set(|o| &o.dialect, arrived.dialect);
-        out.set(
-            |o| &o.principal_need,
-            match arrived.principal {
-                PrincipalNeed::Required => PRINCIPAL_REQUIRED,
-            },
-        );
+        // A decision is billed to someone: the provider account is the deployment's, and the unit
+        // is the caller's.
+        out.set(|o| &o.principal_need, PRINCIPAL_REQUIRED);
         if let Some(plane) = instance.get() {
             let body = input.body().bytes();
             let routes: &Routes = &plane.routes();
@@ -775,7 +772,7 @@ fn attempt_piece(
     out: &mut Out<'_, OnPieceOut>,
 ) -> Outcome {
     let dialect = input.dialect();
-    let request = driven::attempt_request(dialect, &[]);
+    let request = driven::attempt_request(dialect);
     let (mut fields, units, mut arena) = (input.fields_buf(), input.units_buf(), input.arena_buf());
     let verb = arena.span(request.verb.as_bytes());
     let target = arena.span(request.target.as_bytes());
