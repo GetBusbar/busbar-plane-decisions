@@ -409,6 +409,42 @@ fn every_caller_field_but_the_governed_set_is_relayed() {
     assert!(relayed_fields(std::iter::empty()).is_empty());
 }
 
+/// RED (CREDENTIAL-LOCKDOWN H7): NO CALLER CREDENTIAL REACHES THE FAR END. Every credential carrier
+/// the contract governs (`busbar_contract::abi::host::conn::connector::NEVER_KEPT`), sent by the
+/// caller with a canary value in any case, is absent from the relayed fields; the caller's other
+/// fields still cross.
+#[test]
+fn red_no_caller_credential_carrier_is_relayed() {
+    let canaries: [(&[u8], &[u8]); 8] = [
+        (b"x-api-key", b"CANARY-x-api-key"),
+        (b"Api-Key", b"CANARY-api-key"),
+        (b"X-Goog-Api-Key", b"CANARY-x-goog-api-key"),
+        (b"Cookie", b"session=CANARY-cookie"),
+        (b"x-amz-security-token", b"CANARY-x-amz-security-token"),
+        (b"Authorization", b"Bearer CANARY-authorization"),
+        (b"X-Trace", b"kept"),
+        (b"set-cookie", b"CANARY-set-cookie"),
+    ];
+    let kept = relayed_fields(canaries);
+    for (name, value) in kept.iter() {
+        assert!(
+            !value.windows(6).any(|w| w == b"CANARY"),
+            "the caller's `{}` crossed to the far end",
+            String::from_utf8_lossy(name)
+        );
+    }
+    assert_eq!(
+        kept.iter()
+            .map(|(n, v)| (n.to_vec(), v.to_vec()))
+            .collect::<Vec<_>>(),
+        vec![(b"x-trace".to_vec(), b"kept".to_vec())]
+    );
+    for carrier in busbar_contract::abi::host::conn::connector::NEVER_KEPT {
+        let field: [(&[u8], &[u8]); 1] = [(carrier.as_bytes(), b"CANARY")];
+        assert!(relayed_fields(field).is_empty(), "`{carrier}` is relayed");
+    }
+}
+
 /// The money rule's reading of a whole answer by its declared pointers, as the body would be read
 /// kept whole: the reference the piece-by-piece reading is held to.
 fn by_pointer(status: u32, body: &[u8]) -> Result<Vec<(u32, u64)>, UnreadableUsage> {
