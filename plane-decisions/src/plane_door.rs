@@ -112,13 +112,11 @@ const SECTIONS: &[Section] = &[
     Section {
         name: abi_str(tail::SECTION_DECLARING),
         flags: SECTION_DECLARING,
-        _reserved: 0,
         ..Section::ZERO
     },
     Section {
         name: abi_str(tail::SECTIONS_CONSUMED[0]),
         flags: SECTION_CONSUMED,
-        _reserved: 0,
         ..Section::ZERO
     },
 ];
@@ -133,7 +131,6 @@ const fn dialect_auth(i: usize) -> DialectAuth {
     DialectAuth {
         dialect: tail::DIALECT_AUTH[i].0,
         // No provider's `protocol` names a decisions dialect for a lane, and no caller signs one.
-        flags: 0,
         style: abi_str(tail::DIALECT_AUTH[i].1),
         params: Blob::ABSENT,
         ..DialectAuth::ZERO
@@ -149,7 +146,6 @@ const fn op_class(i: usize) -> OpClass {
     OpClass {
         op: abi_str(tail::OP_CLASSES[i].as_str()),
         name: abi_str(tail::OP_CLASSES[i].as_str()),
-        ..OpClass::ZERO
     }
 }
 
@@ -160,7 +156,6 @@ const fn billable(i: usize) -> BillableClass {
     BillableClass {
         class: abi_str(tail::BILLABLE_CLASSES[i].0.as_str()),
         family: abi_str(tail::BILLABLE_CLASSES[i].1),
-        ..BillableClass::ZERO
     }
 }
 
