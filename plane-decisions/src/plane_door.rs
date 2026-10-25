@@ -106,9 +106,6 @@ const STATUS_BUSY: u32 = 503;
 /// The human label.
 const LABEL: &str = "Decisions";
 
-/// An absent string.
-const NONE: AbiStr = AbiStr::ABSENT;
-
 /// `decisions:` declared, `providers:` consumed ([`tail::SECTION_DECLARING`],
 /// [`tail::SECTIONS_CONSUMED`]).
 const SECTIONS: &[Section] = &[
