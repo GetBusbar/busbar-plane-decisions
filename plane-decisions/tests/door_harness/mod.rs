@@ -32,27 +32,21 @@ pub fn z<T>() -> T {
 }
 
 fn str_of(s: &[u8]) -> AbiStr {
-    AbiStr {
-        ptr: s.as_ptr(),
-        len: s.len(),
-    }
+    // SAFETY: the test's own bytes, which outlive the call each `in` is built for.
+    unsafe { AbiStr::from_raw_parts(s.as_ptr(), s.len()) }
 }
 
 fn octets(b: &[u8]) -> Blob {
-    Blob {
-        ptr: b.as_ptr(),
-        len: b.len(),
-        fmt: BLOB_OCTETS,
-        flags: 0,
-    }
+    // SAFETY: the test's own bytes, which outlive the call each `in` is built for.
+    unsafe { Blob::from_raw_parts(b.as_ptr(), b.len(), BLOB_OCTETS, 0) }
 }
 
 fn read(s: AbiStr) -> String {
-    if s.ptr.is_null() || s.len == 0 {
+    if s.is_absent() || s.is_empty() {
         return String::new();
     }
     // SAFETY: the door's memory, valid until the instance's next call.
-    String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(s.ptr, s.len) }).into_owned()
+    String::from_utf8_lossy(unsafe { s.bytes() }).into_owned()
 }
 
 fn head<T>(op: u32, ticket: Ticket) -> InHead {
@@ -73,7 +67,7 @@ fn out_head<T>() -> OutHead {
 
 fn ops() -> &'static Ops {
     // SAFETY: the door is a `'static` table whose ops are the plane kind's.
-    unsafe { &*(*door()).ops.cast::<Ops>() }
+    unsafe { &*(*door()).ops().cast::<Ops>() }
 }
 
 fn lifecycle() -> &'static OpsHead {
@@ -161,11 +155,15 @@ pub fn open_with(settings: &str, providers: &[(&str, &str)]) -> Door {
         ..z()
     };
     let f = lifecycle().open.expect("the door opens");
-    let ret = f(
-        std::ptr::null_mut(),
-        std::ptr::from_ref(&i).cast(),
-        std::ptr::from_mut(&mut o).cast(),
-    );
+    // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+    #[allow(unused_unsafe)]
+    let ret = unsafe {
+        f(
+            std::ptr::null_mut(),
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
     assert_eq!(
         ret.outcome(),
         Outcome::Ready,
@@ -187,11 +185,15 @@ pub fn validate(settings: &str) -> (Outcome, String) {
     (i.err_buf, i.err_cap) = (err.as_mut_ptr(), err.len());
     let mut o: OutHead = out_head::<OutHead>();
     let f = lifecycle().validate.expect("validate");
-    let ret = f(
-        std::ptr::null_mut(),
-        std::ptr::from_ref(&i).cast(),
-        std::ptr::from_mut(&mut o).cast(),
-    );
+    // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+    #[allow(unused_unsafe)]
+    let ret = unsafe {
+        f(
+            std::ptr::null_mut(),
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
     (ret.outcome(), read(o.error))
 }
 
@@ -369,11 +371,15 @@ impl Door {
         let mut o: PlaneRefreshOut = z();
         o.head = out_head::<PlaneRefreshOut>();
         let f = lifecycle().refresh.expect("refresh");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         if ret.outcome() != Outcome::Ready {
             return (ret.outcome(), read(o.head.error), Vec::new());
         }
@@ -413,11 +419,15 @@ impl Door {
         let mut o: ArriveOut = z();
         o.head = out_head::<ArriveOut>();
         let f = ops().arrive.expect("arrive");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         Arrived {
             outcome: ret.outcome(),
             refusal: o.refusal,
@@ -532,11 +542,15 @@ impl Door {
             let mut o: OnPieceOut = z();
             o.head = out_head::<OnPieceOut>();
             let f = ops().on_piece.expect("on_piece");
-            let ret = f(
-                self.instance,
-                std::ptr::from_ref(&i).cast(),
-                std::ptr::from_mut(&mut o).cast(),
-            );
+            // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+            #[allow(unused_unsafe)]
+            let ret = unsafe {
+                f(
+                    self.instance,
+                    std::ptr::from_ref(&i).cast(),
+                    std::ptr::from_mut(&mut o).cast(),
+                )
+            };
             first = false;
             got.outcome = Some(ret.outcome());
             got.short |= o.units_needed != 0 || o.fields_needed != 0 || o.arena_needed != 0;
@@ -594,11 +608,15 @@ impl Door {
         let mut o: OnPieceOut = z();
         o.head = out_head::<OnPieceOut>();
         let f = ops().on_piece.expect("on_piece");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         assert!(ret.outcome() == Outcome::Ready && o.more == 0);
         usize::try_from(o.emitted).unwrap()
     }
@@ -624,11 +642,15 @@ impl Door {
         let mut o: RefusalOut = z();
         o.head = out_head::<RefusalOut>();
         let f = ops().refusal.expect("refusal");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         let n = usize::try_from(o.reply_written).unwrap().min(reply.len());
         (ret.outcome(), reply[..n].to_vec())
     }
@@ -662,11 +684,15 @@ impl Door {
             ..z()
         };
         let f = lifecycle().cancel.expect("cancel");
-        let ret = f(
-            self.instance,
-            std::ptr::from_ref(&i).cast(),
-            std::ptr::from_mut(&mut o).cast(),
-        );
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
         (ret.outcome(), o.cancel.disposition)
     }
 }

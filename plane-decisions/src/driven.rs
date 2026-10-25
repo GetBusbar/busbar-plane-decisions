@@ -1794,16 +1794,16 @@ pub fn whole(raw: &[u8]) -> Option<u64> {
         .filter(|n| i64::try_from(*n).is_ok())
 }
 
-/// THE CALLER FIELDS THE FAR END NEVER RECEIVES: the ones the plane writes itself (the document
-/// type), the ones naming the hop (`host`), and the credential carriers (the far end is presented
-/// the member's credential by the kernel, never the caller's). Compared without case. Hop-by-hop
-/// fields and the body framing never reach the plane (the framer drops them).
-pub const NOT_RELAYED: &[&str] = &[
-    FIELD_CONTENT_TYPE,
-    "host",
-    "authorization",
-    "proxy-authorization",
-];
+/// THE CALLER FIELDS THE FAR END NEVER RECEIVES, besides the credential carriers: the ones the
+/// plane writes itself (the document type) and the ones naming the hop (`host`). Compared without
+/// case. Hop-by-hop fields and the body framing never reach the plane (the framer drops them).
+///
+/// The credential carriers are the contract's one governed set,
+/// [`NEVER_KEPT`](busbar_contract::abi::host::conn::connector::NEVER_KEPT) (`authorization`,
+/// `proxy-authorization`, `cookie`, `x-api-key`, `api-key`, `x-goog-api-key`,
+/// `x-amz-security-token`, ...): the far end is presented the member's credential by the kernel,
+/// never the caller's (CREDENTIAL-LOCKDOWN H7).
+pub const NOT_RELAYED: &[&str] = &[FIELD_CONTENT_TYPE, "host"];
 
 /// The caller's fields the far end receives, held in one buffer per unit: each field's name
 /// (lowercased) and value, back to back, and where each ends.
@@ -1837,13 +1837,14 @@ impl RelayedFields {
 fn relayed(name: &[u8]) -> bool {
     !NOT_RELAYED
         .iter()
+        .chain(busbar_contract::abi::host::conn::connector::NEVER_KEPT)
         .any(|n| name.eq_ignore_ascii_case(n.as_bytes()))
 }
 
 /// THE CALLER'S FIELDS THE FAR END RECEIVES, in the order the caller sent them, a repeated name
-/// keeping every value: every field the caller sent but [`NOT_RELAYED`]'s (a same-dialect relay
-/// passes every header but the governed set; ARCHITECT DEC-SERVE Q2, the OWNER's DIALECT-FIDELITY
-/// F2). Names are lowercased, as the wire compares them. Kept in one buffer sized once.
+/// keeping every value: every field the caller sent but [`NOT_RELAYED`]'s and the credential
+/// carriers' (a same-dialect relay passes every header but the governed set; ARCHITECT DEC-SERVE
+/// Q2, the OWNER's DIALECT-FIDELITY F2). Names are lowercased, as the wire compares them. Kept in one buffer sized once.
 #[must_use]
 pub fn relayed_fields<'f, I>(caller: I) -> RelayedFields
 where

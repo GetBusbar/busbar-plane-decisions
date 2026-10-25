@@ -201,7 +201,7 @@ fn tail() -> &'static busbar_contract::abi::plane::PlaneTail {
     // SAFETY: the door, its Statement and a plane Statement's kind tail (a `PlaneTail`) are
     // `'static`.
     unsafe {
-        &*(*(*busbar_plane_decisions::door()).statement)
+        &*(*(*busbar_plane_decisions::door()).statement())
             .kind_tail
             .cast::<busbar_contract::abi::plane::PlaneTail>()
     }
@@ -212,11 +212,12 @@ fn class(name: &str) -> u32 {
     let tail = tail();
     // SAFETY: the tail's billable classes are a `'static` list of `billable_classes_len` entries,
     // each naming `'static` strings.
-    let classes =
-        unsafe { std::slice::from_raw_parts(tail.billable_classes, tail.billable_classes_len) };
+    let classes = unsafe {
+        std::slice::from_raw_parts(tail.billable_classes_ptr(), tail.billable_classes_len())
+    };
     let named = |c: &busbar_contract::abi::plane::BillableClass| {
         // SAFETY: as above.
-        unsafe { std::slice::from_raw_parts(c.class.ptr, c.class.len) == name.as_bytes() }
+        unsafe { c.class.bytes() == name.as_bytes() }
     };
     let at = classes
         .iter()
@@ -299,13 +300,13 @@ fn a_success_with_an_unreadable_count_fails_loudly() {
 fn the_tokens_a_success_reports_are_billed_in_family_decision() {
     let tail = tail();
     // SAFETY: as in `class`.
-    let classes =
-        unsafe { std::slice::from_raw_parts(tail.billable_classes, tail.billable_classes_len) };
+    let classes = unsafe {
+        std::slice::from_raw_parts(tail.billable_classes_ptr(), tail.billable_classes_len())
+    };
     let family = |name: &str| {
         let c = &classes[class(name) as usize];
         // SAFETY: as in `class`.
-        String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(c.family.ptr, c.family.len) })
-            .into_owned()
+        String::from_utf8_lossy(unsafe { c.family.bytes() }).into_owned()
     };
     for name in ["decision", "input_tokens", "output_tokens"] {
         assert_eq!(family(name), "decision", "{name}");

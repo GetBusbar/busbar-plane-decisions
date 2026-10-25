@@ -156,8 +156,8 @@ fn a_generation_lists_every_configured_model_in_name_order() {
 #[test]
 fn the_need_is_the_tails() {
     assert_eq!(NEEDS.len(), tail::NEEDS.len());
-    assert_eq!(STATEMENT.needs_len, NEEDS.len());
-    assert_eq!(STATEMENT.sections_len, 1 + tail::SECTIONS_CONSUMED.len());
+    assert_eq!(STATEMENT.needs_len(), NEEDS.len());
+    assert_eq!(STATEMENT.sections_len(), 1 + tail::SECTIONS_CONSUMED.len());
 }
 
 /// `validate` reads the blob stage 3g deals (`{decisions: <section>}`): the section inside it is
@@ -195,4 +195,23 @@ fn the_section_under_its_verb_reads_as_the_section() {
 #[test]
 fn the_unit_ceiling_is_the_one_the_door_tests_drive() {
     assert_eq!(MAX_UNITS, 4096);
+}
+
+/// RED-BEFORE-GREEN (busbar row 159; architect ruling 2026-10-23 R-6, spec Part 1: "a plane's
+/// settings reach it as ONE validated JSON object `{section: value}`"): a host hands a plane that
+/// consumes sections its own `decisions:` section beside each consumed section the deployment
+/// writes (`providers:`), keyed. The plane reads its own key from that object, at open and at
+/// refresh, and ignores the consumed sections there (their dialect facts reach it at open). RED:
+/// only a one-key object was unwrapped, so the keyed object read as a section with an unknown
+/// `decisions` member and the open was refused.
+#[test]
+fn the_keyed_settings_read_as_the_decisions_section_beside_the_consumed_ones() {
+    let section = read_settings(
+        br#"{"decisions":{"models":{"jev":{"provider":"typesafe"}}},"providers":{"typesafe":{"protocol":"jev"}}}"#,
+    )
+    .expect("the keyed object reads at the plane's own key");
+    assert_eq!(section.models.len(), 1);
+    let bare = read_settings(br#"{"models":{"jev":{"provider":"typesafe"}}}"#)
+        .expect("the bare section still reads");
+    assert_eq!(bare.models.len(), 1);
 }
