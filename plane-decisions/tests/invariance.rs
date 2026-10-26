@@ -1,26 +1,12 @@
 //! This plane is the same plane everywhere it is compiled.
 //!
-//! Mirrors `busbar-plane-a2a`/`busbar-plane-mcp`'s own `invariance.rs`, and mirrors it exactly now:
-//! the ONE deliberate difference it used to carry — this manifest named the legacy plugin-facing
-//! crate for `UpstreamCreds`, which its pure siblings never did — is gone, and that crate has
-//! joined the forbidden list rather than the allowed one. The exception was not free. It depends on
-//! `sha2`, so the manifest edge put `sha2 -> cpufeatures -> libc` in a pure plane's closure, which
-//! the transitive source denylist bans outright, and this was the only plane of the five with such
-//! an edge (1 occurrence against 0 for the other four). `UpstreamCreds` moved to
-//! `busbar_contract::config::UpstreamCreds` verbatim, the same route `ModelCfg` took out of
-//! `busbar-substrate`/`busbar-kernel` (DECISIONS #40/#38), so both reserved model-serving shapes
-//! now arrive from the crate a plugin may name and the manifest names exactly one busbar crate. The
-//! forbidden list is that crate, `busbar-core`, `busbar-caps`, `busbar-kernel`, `busbar-unit-*`,
-//! and the sibling PLANE crates (naming another plane would be a plane reading another plane's
-//! private surface, never legitimate for any plane).
-//!
-//! `the_manifest_names_only_what_this_plane_may_name` was RED for as long as this manifest named
-//! `busbar-kernel`, and it is GREEN now because the manifest does not. The edge existed for ONE
-//! file — `src/registry.rs`, a `PlaneDecl` constant declared against a FUTURE root registration
-//! that never arrived — and that file was deleted, not relocated: nothing outside this crate ever
-//! named `PLANE_DECL`, and the binary does not even depend on this crate. This test is the #40
-//! witness for that closure, so it must never be relaxed to keep it green; if `busbar-kernel`
-//! returns to the manifest, this is the line that is supposed to fail.
+//! Mirrors `busbar-plane-a2a`/`busbar-plane-mcp`'s own `invariance.rs`. The manifest names exactly
+//! one busbar crate (the contract, which holds `ModelCfg` and `UpstreamCreds`) plus the serializer.
+//! The forbidden list is `busbar-core`, `busbar-caps`, `busbar-kernel`, `busbar-unit-*`, and the
+//! sibling PLANE crates (naming another plane would be a plane reading another plane's private
+//! surface, never legitimate for any plane). `the_manifest_names_only_what_this_plane_may_name`
+//! must never be relaxed to keep it green; if `busbar-kernel` returns to the manifest, that is the
+//! line that is supposed to fail.
 
 use std::path::{Path, PathBuf};
 
@@ -35,8 +21,8 @@ fn manifest() -> String {
 
 /// Every OTHER plane crate directory under `crates/`, read live off the tree rather than spelled by
 /// name — the forbidden list below forbids by SHAPE (`busbar-plane-*`, minus this crate itself)
-/// instead of a plane naming its siblings, which is the broker-law violation DECISION #8 forbids in
-/// the first place. It also stays true automatically if the plane roster (#48) ever changes.
+/// instead of a plane naming its siblings, which would be a broker-law violation. It also stays
+/// true automatically if the plane roster ever changes.
 fn sibling_plane_dirs() -> Vec<String> {
     let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
