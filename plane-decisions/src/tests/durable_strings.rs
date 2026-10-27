@@ -1,5 +1,4 @@
-//! THE DURABLE-STRING PIN (1.6.0-TODO KERNEL<>PLUGINS step 31; spec #17/#48; THE DESIGN, the plane
-//! verbs and the end-state crate list).
+//! THE DURABLE-STRING PIN.
 //!
 //! The owner renamed the plane `decisions`: this crate is `busbar-plane-decisions`, its feature
 //! `plane-decisions`, its config verb `decisions`. What the rename does NOT touch is the plane's
