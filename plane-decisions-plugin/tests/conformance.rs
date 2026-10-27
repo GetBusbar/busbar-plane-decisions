@@ -11,7 +11,7 @@
 //! (`tests/conformance.rs`), moved here with the crate from busbar's crates/busbar-plane-decisions.
 //! `plugin-ci.yml` runs it under `--release`.
 
-busbar_plugin_loader::conformance_suite! {
+busbar_test_kit::conformance_suite! {
     door: busbar_plane_decisions::door,
     cdylib: "busbar_plane_decisions_plugin",
     inputs: include_str!("conformance.json"),
