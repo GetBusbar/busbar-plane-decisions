@@ -9,20 +9,22 @@
 
 use std::os::raw::c_void;
 
+use busbar_contract::abi::hook::MessageView;
 use busbar_contract::abi::mechanism::call::{
     AbiStr, Blob, Field, InHead, OutHead, Outcome, Span, BLOB_OCTETS,
 };
 use busbar_contract::abi::mechanism::lifecycle::{
-    slot as life, CancelIn, CancelOut, OpenIn, OpenOut, OpsHead, RefreshIn, ValidateIn,
+    slot as life, CancelIn, CancelOut, GenIn, OpenIn, OpenOut, OpsHead, RefreshIn, ValidateIn,
 };
 use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
 use busbar_contract::abi::plane::{
     slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, Ops, OutField, PlaneCancelIn, PlaneCancelOut,
-    PlaneOpenIn, PlaneOpenOut, PlaneRefreshOut, PlaneSnapshot, ProviderFacts, RecordWrite,
-    RefusalIn, RefusalOut, UnitCount, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END,
-    FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, REFUSAL_ARRIVE, REFUSAL_KERNEL,
+    PlaneOpenIn, PlaneOpenOut, PlaneRefreshOut, PlaneSnapshot, ProjectIn, ProjectOut,
+    ProviderFacts, RecordWrite, RefusalIn, RefusalOut, UnitCount, EMIT_DONE, EMIT_TO_FAR_END,
+    FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, REFUSAL_ARRIVE,
+    REFUSAL_KERNEL, SPAN_ABSENT,
 };
-use busbar_plane_decisions::plane_door::door;
+use busbar_plane_decisions::door;
 
 pub fn z<T>() -> T {
     // SAFETY: every `in`/`out` here is plain C data; all-zero is a valid value of each.
@@ -85,6 +87,13 @@ static TABLES: Tables = Tables(HostTables {
     io: std::ptr::null(),
     services: std::ptr::null(),
 });
+
+/// `(verb, target)` pairs, as [`claims_of`] reads a snapshot's claims.
+pub fn claims(c: &[(&str, &str)]) -> Vec<(String, String)> {
+    c.iter()
+        .map(|(v, t)| ((*v).to_string(), (*t).to_string()))
+        .collect()
+}
 
 /// The claims a snapshot publishes, `(verb, target)`.
 fn claims_of(snapshot: *const PlaneSnapshot) -> Vec<(String, String)> {
@@ -208,6 +217,30 @@ pub struct Arrived {
     /// The route class and the entry it names.
     pub route: u8,
     pub entry: String,
+    /// Where the entry's name lives: the address of the copy the instance keeps for the answer.
+    pub entry_at: usize,
+    /// The expected units written (the admission estimate), `(class, source, amount)`.
+    pub expected: Vec<(u32, u32, u64)>,
+    /// The principal need the door answered.
+    pub principal_need: u32,
+}
+
+/// What one `project` answered.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Projected {
+    pub outcome: Option<Outcome>,
+    /// The view's pool and dialect.
+    pub pool: String,
+    pub dialect: String,
+    /// The view's turn count and characters.
+    pub message_count: u64,
+    pub total_chars: u64,
+    /// The prompt's turns, `(role, text)`.
+    pub turns: Vec<(String, String)>,
+    /// The projected body; `None` when absent.
+    pub body: Option<Vec<u8>>,
+    /// The rewritten body the kernel keeps; `None` when no rewrite was applied.
+    pub rewritten: Option<Vec<u8>>,
 }
 
 /// What one `on_piece` answered, re-called while it said `more`.
@@ -411,7 +444,85 @@ impl Door {
             text: read(o.head.error),
             route: o.route,
             entry: read(o.pool),
+            entry_at: o.pool.ptr as usize,
+            expected: units[..(o.units_written as usize).min(units.len())]
+                .iter()
+                .map(|u| (u.class, u.source, u.amount))
+                .collect(),
+            principal_need: o.principal_need,
         }
+    }
+
+    /// `retire` of `generation`, as the host retires a generation it no longer serves (or one it
+    /// refused after the plane's `refresh`).
+    pub fn retire(&self, generation: u64) -> Outcome {
+        let i = GenIn {
+            head: head::<GenIn>(life::RETIRE, Ticket::NONE),
+            generation,
+        };
+        let mut o: OutHead = out_head::<OutHead>();
+        let f = lifecycle().retire.expect("retire");
+        f(
+            self.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+        .outcome()
+    }
+
+    /// `project` of `unit`'s request on `target` with `body`, and a request-stage hook's
+    /// `rewrite` when one is given, over host buffers of the kernel's sizes.
+    pub fn project(
+        &self,
+        unit: u64,
+        target: &str,
+        body: &[u8],
+        rewrite: Option<&[u8]>,
+    ) -> Projected {
+        let mut arena = vec![0_u8; 1 << 16];
+        let mut turns = [z::<MessageView>(); 64];
+        let mut i: ProjectIn = z();
+        i.head = head::<ProjectIn>(slot::PROJECT, Ticket::NONE);
+        i.unit = unit;
+        i.target = str_of(target.as_bytes());
+        i.body = octets(body);
+        if let Some(rewrite) = rewrite {
+            i.rewrite = octets(rewrite);
+        }
+        (i.arena_buf, i.arena_cap) = (arena.as_mut_ptr(), arena.len());
+        (i.messages_buf, i.messages_cap) = (turns.as_mut_ptr(), turns.len());
+        let mut o: ProjectOut = z();
+        o.head = out_head::<ProjectOut>();
+        let f = ops().project.expect("project");
+        let ret = f(
+            self.instance,
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        );
+        let mut got = Projected {
+            outcome: Some(ret.outcome()),
+            ..Projected::default()
+        };
+        if ret.outcome() != Outcome::Ready {
+            return got;
+        }
+        let span = |s: Span| {
+            (s.offset != SPAN_ABSENT && s.len != 0).then(|| {
+                let from = s.offset as usize;
+                arena[from..from + s.len as usize].to_vec()
+            })
+        };
+        got.pool = read(o.view.pool);
+        got.dialect = read(o.view.ingress_dialect);
+        got.message_count = o.view.message_count;
+        got.total_chars = o.view.total_chars;
+        got.turns = turns[..o.prompt.messages_len]
+            .iter()
+            .map(|m| (read(m.role), read(m.text)))
+            .collect();
+        got.body = span(o.body);
+        got.rewritten = span(o.rewritten);
+        got
     }
 
     /// One piece of `unit` on its ticket, re-called while the door says `more`.
@@ -554,8 +665,19 @@ impl Door {
         (ret.outcome(), reply[..n].to_vec())
     }
 
+    /// `cancel` of `unit` as the host cancels a unit it minted (`PlaneCancelIn::unit`), on no unit
+    /// ticket: the outcome and the disposition.
+    pub fn cancel_unit(&self, unit: u64) -> (Outcome, u32) {
+        self.cancel_as(Ticket::NONE, unit)
+    }
+
     /// `cancel` of the op on `ticket`: the outcome and the disposition.
     pub fn cancel(&self, ticket: Ticket) -> (Outcome, u32) {
+        self.cancel_as(ticket, 0)
+    }
+
+    /// `cancel` on `ticket` naming `unit` (`0`: none).
+    fn cancel_as(&self, ticket: Ticket, unit: u64) -> (Outcome, u32) {
         let mut records = [z::<RecordWrite>(); 4];
         let mut arena = [0_u8; 256];
         let mut i: PlaneCancelIn = z();
@@ -565,6 +687,7 @@ impl Door {
         };
         (i.records_buf, i.records_cap) = (records.as_mut_ptr(), records.len());
         (i.arena_buf, i.arena_cap) = (arena.as_mut_ptr(), arena.len());
+        i.unit = unit;
         let mut o: PlaneCancelOut = z();
         o.cancel = CancelOut {
             head: out_head::<PlaneCancelOut>(),

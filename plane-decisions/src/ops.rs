@@ -1,11 +1,12 @@
 //! The operation vocabulary: which `(method, path)` is which priced operation.
 //!
-//! jev serves exactly two operations, both byte-identity passthrough to `api.typesafe.ai`
-//! (JEV-DESIGN-SIGNED-v4.md, "C-6 REVERSED"): the decision call and the model catalogue. Unlike
-//! MCP/A2A, which name their operation in a JSON-RPC method member, jev names it in the HTTP verb
-//! and path — so the table below is keyed on those, read off the transport's own reserved facts
-//! (`busbar_contract::transport::facts::PATH`/`METHOD`), the same seam `busbar-plane-a2a`'s
-//! `surface_of` reads.
+//! The plane serves one operation per dialect, each its dialect's decision call: `jev`'s
+//! `POST /v1/systemone` and `nanojev`'s `POST /api/evaluate`. Each relays the caller's body to the
+//! far end unchanged but for the governed top-level `model` splice (`upstream_model`, and a hook's
+//! rewrite where one is bound). Unlike MCP/A2A, which name their operation in a JSON-RPC method
+//! member, these dialects name it in the HTTP verb and path, so the table below is keyed on those.
+//! `GET /v1/models` is no operation of this plane: that path keeps the bytes busbar's model list
+//! serves there.
 
 use busbar_contract::ids::OpClassId;
 
@@ -13,22 +14,12 @@ use busbar_contract::ids::OpClassId;
 /// usage the SUCCESS response reports (billable-success only, per the signed design's C-3).
 pub const OP_SYSTEMONE: OpClassId = OpClassId::new("systemone");
 
-/// `GET /v1/models` — the provider's own model catalogue, relayed byte-identically. No busbar
-/// catalogue synthesis: this is typesafe's list, and only this plane may serve it.
-pub const OP_MODELS: OpClassId = OpClassId::new("models");
-
 /// `POST /api/evaluate` — the decision call of the second dialect, `nanojev` (THE DESIGN section 2:
 /// "`/api/evaluate` is its second exact claim").
 pub const OP_EVALUATE: OpClassId = OpClassId::new("evaluate");
 
-/// Every operation class this plane's units can be, in declaration order.
-pub const OP_CLASSES: &[OpClassId] = &[OP_SYSTEMONE, OP_MODELS, OP_EVALUATE];
-
 /// The path jev's decision call is mounted on.
 pub const PATH_SYSTEMONE: &str = "/v1/systemone";
-
-/// The path jev's model catalogue is mounted on.
-pub const PATH_MODELS: &str = "/v1/models";
 
 /// The path the `nanojev` dialect's decision call is mounted on.
 pub const PATH_EVALUATE: &str = "/api/evaluate";
@@ -43,8 +34,8 @@ pub struct MethodRow {
     pub verb: &'static str,
     /// The path the request arrives on.
     pub path: &'static str,
-    /// Whether this operation's REQUEST carries a body this plane must read before it is complete.
-    /// `systemone` is a POST with a JSON body; `models` is a bodyless GET.
+    /// Whether this operation's REQUEST carries a body this plane must read before it is complete:
+    /// each decision call is a POST with a JSON body.
     pub has_request_body: bool,
 }
 
@@ -57,12 +48,6 @@ pub const METHODS: &[MethodRow] = &[
         has_request_body: true,
     },
     MethodRow {
-        op: OP_MODELS,
-        verb: "GET",
-        path: PATH_MODELS,
-        has_request_body: false,
-    },
-    MethodRow {
         op: OP_EVALUATE,
         verb: "POST",
         path: PATH_EVALUATE,
@@ -72,8 +57,8 @@ pub const METHODS: &[MethodRow] = &[
 
 /// Which row a `(verb, path)` pair names, where one does.
 ///
-/// The path match is exact — jev's two surfaces are both fixed paths, not a pattern family the way
-/// A2A's task collection is — so there is no most-specific-wins question to settle here.
+/// The path match is exact (each decision call is a fixed path, not a pattern family the way
+/// A2A's task collection is), so there is no most-specific-wins question to settle here.
 #[must_use]
 pub fn row_for(verb: &str, path: &str) -> Option<&'static MethodRow> {
     METHODS

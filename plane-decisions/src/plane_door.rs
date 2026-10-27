@@ -4,7 +4,7 @@
 //! THE DECISIONS PLANE'S DOOR: the plane kind's memory-ABI table (`busbar_contract::abi::plane`)
 //! built with the SDK's `plugin_door!` on its safe surface, over this plane's answers to the plane
 //! driver ([`crate::driven`], `BUSBAR-1.6.0.md` Part 3, section 12). [`door`] is the LINKED door;
-//! the same function is the DROPPED door once a `cdylib` exports it (`examples/decisions_door.rs`,
+//! the same function is the DROPPED door once a `cdylib` exports it (`busbar-plane-decisions-plugin`,
 //! through `busbar_contract::export_door!`), so the two cannot answer differently.
 //! `tests/conformance.rs` loads both through the one loader and requires one transcript.
 //!
@@ -15,7 +15,8 @@
 //! the serve path composes the bound door and hands it its arrivals through the plane driver.
 //!
 //! * The Statement: the plane's key and version, `decisions:` declared and `providers:` consumed,
-//!   its one outbound need, and the tail [`TAIL`] (every list read off [`crate::driven::tail`]).
+//!   its one outbound need, the tail [`TAIL`] (every list read off [`crate::driven::tail`]), and
+//!   its extensions [`EXTENSIONS`]: the plugin's whole `declares` document.
 //! * `validate`, `open`, `refresh`: the settings blob read as the `decisions:` section
 //!   ([`crate::config::DecisionsSection`]), each model's dialect resolved ([`routes`]: its own
 //!   `protocol`, else its provider's as the host stated it at `open`); a generation's snapshot
@@ -31,22 +32,32 @@
 //!   ([`crate::driven::spliced`]), and the far end's answer relayed unchanged with its count read at
 //!   the last piece ([`crate::driven::FarEndReading`]).
 //! * `refusal`: [`crate::driven::refusal_body`]; the refused unit's state is dropped.
-//! * `cancel`: the unit on the cancelled ticket is dropped, `CANCEL_ABORTED` before its far end
-//!   answered and `CANCEL_OK_PARTIAL` after.
-//! * `serve` and `project` are REFUSED: the plane publishes no admin route and binds no hook view.
-//!   `hydrate`, `start`, `tick`, `drive`, `release` and `close` hold nothing.
+//! * `cancel`: the unit the host names (`PlaneCancelIn::unit`), else the one on the cancelled
+//!   ticket, is dropped, `CANCEL_ABORTED` before its far end answered and `CANCEL_OK_PARTIAL` after.
+//! * `project`: the hook view of a unit's request ([`crate::driven::project_hook`]): the entry it routes
+//!   over as the view's pool, its dialect, the request document as the one turn a content-granted
+//!   hook reads, and a request-stage hook's rewrite applied in the dialect
+//!   ([`crate::driven::rewritten`]) and answered as the body the kernel keeps. Every plane gets every
+//!   capability (THE DESIGN section 1): the deployment's gates, rewrites and route policies bind to
+//!   a decisions unit as they bind to any other.
+//! * `serve` is REFUSED: the plane publishes no admin route. `hydrate`, `start`, `tick`, `drive`,
+//!   `release` and `close` hold nothing.
 //!
 //! A unit's state lives from its arrival to its end (its last far-end piece, its refusal or its
 //! cancel), and at most [`MAX_UNITS`] live at once: an arrival past that is refused, and a live
 //! unit is never dropped to make room (THE DESIGN section 11.2: memory is plugin-owned, and no
-//! state grows without bound on the hot path).
+//! state grows without bound on the hot path; section 1: an active unit is never evicted).
+//!
+//! Each generation's routes are kept beside its snapshot, and an arrival routes over the newest
+//! generation the host still holds: a generation the host refuses after this plane's `refresh` is
+//! retired by the host, and its routes go with it, so the running generation keeps serving.
 
 use std::collections::BTreeMap;
 
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_PROVIDER, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, InHead, OutHead, Outcome};
+use busbar_contract::abi::mechanism::call::{AbiStr, Blob, InHead, OutHead, Outcome, Span};
 use busbar_contract::abi::mechanism::door::{
     Section, Statement, SECTION_CONSUMED, SECTION_DECLARING,
 };
@@ -60,7 +71,7 @@ use busbar_contract::abi::plane::{
     PlaneTail, ProjectIn, ProjectOut, RefusalIn, RefusalOut, ServeIn, ServeOut, UnitCount,
     ANSWER_LAYOUT, CANCEL_ABORTED, CANCEL_OK_PARTIAL, CLAIM_EXACT, EMIT_DONE, EMIT_TO_FAR_END,
     FROM_CALLER, FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE, PIECE_HAS_STATUS, PIECE_LAST,
-    PRINCIPAL_NONE, PRINCIPAL_OPTIONAL, PRINCIPAL_REQUIRED, ROUTE_DIRECT, SHAPE_WHOLE,
+    PRINCIPAL_REQUIRED, ROUTE_DIRECT, SHAPE_WHOLE, SPAN_ABSENT, UNITS_ESTIMATED, UNITS_FLOOR,
     UNITS_REPORTED,
 };
 use busbar_contract::abi::plane::{PlaneCancelIn, PlaneCancelOut};
@@ -70,12 +81,12 @@ use busbar_contract::abi::sdk::publish::{ClaimSpec, SnapshotSpec};
 use busbar_contract::abi::sdk::{
     open_failed, Generations, HostBuf, Instance, Keyed, Lent, Out, Safe, SafeSlot,
 };
-use busbar_contract::plane::PlaneMeta;
 
+use crate::claims;
 use crate::codec::{CONTENT_TYPE_JSON, FIELD_CONTENT_TYPE, FIELD_RETRY_AFTER};
 use crate::config::DecisionsSection;
-use crate::driven::{self, tail, CallerAnswer, FarEndReading, PrincipalNeed};
-use crate::{claims, DecisionPlane};
+use crate::driven::{self, tail, CallerAnswer, FarEndReading, Source};
+use crate::meta::PLANE_KEY;
 
 /// The version the Statement names: the crate's (a test pins the two equal).
 pub const VERSION: &str = "1.6.0";
@@ -102,6 +113,14 @@ pub const BUSY: u32 = 3;
 
 /// The status a [`BUSY`] arrival is refused at.
 const STATUS_BUSY: u32 = 503;
+
+/// [`ArriveOut::refusal`]: the request names a model other than its route's `upstream_model` and
+/// its document does not parse, so the far end cannot be sent the routed model
+/// ([`driven::spliceable`]); refused at [`STATUS_INTERNAL`], about the entry it routed over.
+pub const UNSPLICEABLE: u32 = 4;
+
+/// The status an [`UNSPLICEABLE`] arrival is refused at: 1.5.5's.
+const STATUS_INTERNAL: u32 = 500;
 
 /// The human label.
 const LABEL: &str = "Decisions";
@@ -198,12 +217,23 @@ pub const TAIL: &PlaneTail = &{
     t
 };
 
-/// THE STATEMENT: the plane's key and version, its sections, its need and its tail.
-pub const STATEMENT: Statement =
-    statement(<DecisionPlane as PlaneMeta>::KEY, VERSION, MAX_INFLIGHT)
+busbar_contract::statement_extensions!(
+    /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246).
+    EXTENSIONS: [(
+        busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
+        include_bytes!("../declares.json")
+    )]
+);
+
+/// THE STATEMENT: the plane's key and version, its sections, its need, its tail and its
+/// extensions.
+pub const STATEMENT: Statement = Statement {
+    extensions: EXTENSIONS,
+    ..statement(PLANE_KEY, VERSION, MAX_INFLIGHT)
         .with_sections(SECTIONS)
         .with_needs(NEEDS)
-        .with_kind_tail(TAIL);
+        .with_kind_tail(TAIL)
+};
 
 /// The settings blob read as the `decisions:` section; an empty blob is the empty section.
 ///
@@ -393,8 +423,6 @@ struct Unit {
     caller: driven::RelayedFields,
     /// The ticket the unit's last piece crossed on: what a `cancel` names it by.
     ticket: Option<Ticket>,
-    /// Its place in the instance's arrivals ([`DecisionsDoor::arrivals`]).
-    seq: u64,
     /// The far end's status, read off its first piece; the request fee is judged on it.
     status: Option<u32>,
     /// The routed model's `upstream_model`, kept from `arrive`: the caller's top-level `model` is
@@ -402,26 +430,27 @@ struct Unit {
     upstream: Option<String>,
 }
 
-/// One instance: every live generation's snapshot, and the units in flight.
+/// Every model one generation routes over, directly, by name, each with its dialect and
+/// `upstream_model`.
+pub type Routes = BTreeMap<String, ModelRoute>;
+
+/// One instance: every live generation's snapshot with the routes it was built from, and the units
+/// in flight.
 #[derive(Debug)]
 pub struct DecisionsDoor {
-    generations: Generations<PlaneSnapshot>,
+    /// Each live generation's snapshot, and beside it the routes a claimed arrival is routed over
+    /// while it is the newest the host holds ([`Generations::current`]).
+    generations: Generations<PlaneSnapshot, Routes>,
     units: Keyed<u64, Unit>,
-    /// The models a claimed arrival routes over, directly, by name: every model the latest
-    /// generation configures, each with its dialect and `upstream_model`.
-    models: Keyed<String, ModelRoute>,
-    /// How many arrivals the instance has kept: each unit's [`Unit::seq`]. The count is the
-    /// SDK's per-instance keyed state, its one entry under `()`: the plane holds no interior
-    /// state of its own.
-    arrivals: Keyed<(), u64>,
     /// Each provider's protocol, as the host stated it at `open` (`PlaneOpenIn::providers`).
     protocols: BTreeMap<String, String>,
 }
 
 impl DecisionsDoor {
-    /// Route claimed arrivals over `routes`.
-    fn route_over(&self, routes: BTreeMap<String, ModelRoute>) {
-        self.models.with_all(|models| *models = routes);
+    /// The routes of the newest generation the host holds: a refused generation, retired by the
+    /// host, routes nothing, and the one it kept serving routes again.
+    fn routes(&self) -> std::sync::Arc<Routes> {
+        self.generations.current().unwrap_or_default()
     }
 }
 
@@ -481,13 +510,10 @@ slot!(
         let plane = DecisionsDoor {
             generations: Generations::new(),
             units: Keyed::new(),
-            models: Keyed::new(),
-            arrivals: Keyed::new(),
             protocols,
         };
         let spec = generation_spec(&routed);
-        plane.route_over(routed);
-        out.publish(|o| &o.snapshot, &plane.generations, open.generation(), &spec);
+        out.publish_with(|o| &o.snapshot, &plane.generations, open.generation(), &spec, routed);
         instance.open(plane);
         Outcome::Ready
     }
@@ -507,15 +533,18 @@ slot!(
             Ok(routed) => routed,
             Err(words) => return out.fail(Refusal::refused(words)),
         };
+        // The routes ride beside the snapshot: they route arrivals once the host holds this
+        // generation as its newest, and go with it when the host retires it (a reload the host
+        // refuses after this refresh).
         let spec = generation_spec(&routed);
-        plane.route_over(routed);
-        out.publish(|o| &o.snapshot, &plane.generations, input.generation(), &spec);
+        out.publish_with(|o| &o.snapshot, &plane.generations, input.generation(), &spec, routed);
         Outcome::Ready
     }
 );
 
 slot!(
-    /// `retire`: the generation's snapshot is dropped.
+    /// `retire`: the generation's snapshot and its routes are dropped. A generation the host
+    /// refused is retired too, so the one it kept serving routes arrivals again.
     Retire, GenIn, OutHead, |instance, input, _| {
         if let Some(plane) = instance.get() {
             plane.generations.retire(input.generation());
@@ -538,16 +567,22 @@ slot!(
 );
 
 slot!(
-    /// `cancel`: the unit on the cancelled ticket is dropped. Before its far end answered it was
-    /// aborted (nothing billed); after, it was cut partway.
+    /// `cancel`: the unit the host names is dropped (`PlaneCancelIn::unit`, the key its `arrive`
+    /// carried, so a unit no piece reached is found), else the one on the cancelled ticket (a
+    /// cancel of an op in flight). Before its far end answered it was aborted (nothing billed);
+    /// after, it was cut partway.
     Cancel, PlaneCancelIn, PlaneCancelOut, |instance, input, mut out| {
-        let ticket = input.cancel().ticket();
+        let (named, ticket) = (input.unit(), input.cancel().ticket());
         let answered = instance.get().is_some_and(|plane| {
             plane.units.with_all(|units| {
-                let key = units
-                    .iter()
-                    .find(|(_, unit)| unit.ticket == Some(ticket))
-                    .map(|(key, _)| *key);
+                let key = if named != 0 {
+                    Some(named)
+                } else {
+                    units
+                        .iter()
+                        .find(|(_, unit)| unit.ticket == Some(ticket))
+                        .map(|(key, _)| *key)
+                };
                 key.and_then(|key| units.remove(&key))
                     .is_some_and(|unit| unit.status.is_some())
             })
@@ -584,24 +619,17 @@ slot!(
         };
         out.set(|o| &o.op_class, arrived.op_class);
         out.set(|o| &o.dialect, arrived.dialect);
-        out.set(
-            |o| &o.principal_need,
-            match arrived.principal {
-                PrincipalNeed::None => PRINCIPAL_NONE,
-                PrincipalNeed::Required => PRINCIPAL_REQUIRED,
-                PrincipalNeed::Optional => PRINCIPAL_OPTIONAL,
-            },
-        );
+        // A decision is billed to someone: the provider account is the deployment's, and the unit
+        // is the caller's.
+        out.set(|o| &o.principal_need, PRINCIPAL_REQUIRED);
         if let Some(plane) = instance.get() {
             let body = input.body().bytes();
-            let routed = plane.models.with_all(|models| {
-                driven::route_model(body, models, |r| r.dialect == arrived.dialect)
-                    .map(|(name, routed)| (name.to_string(), routed.upstream.clone()))
-            });
-            let upstream = match routed {
-                Ok((model, upstream)) => {
-                    out.route(ROUTE_DIRECT, &model);
-                    upstream
+            let routes: &Routes = &plane.routes();
+            let routed = driven::route_named(body, routes, |r| r.dialect == arrived.dialect);
+            let (upstream, named) = match routed {
+                Ok((model, routed, requested)) => {
+                    out.route(ROUTE_DIRECT, model);
+                    (routed.upstream.clone(), requested)
                 }
                 Err(unrouted) => {
                     out.set(|o| &o.refusal, UNROUTED);
@@ -609,6 +637,15 @@ slot!(
                     return out.fail(Refusal::refused(unrouted.text()));
                 }
             };
+            // A request whose model the far end could not be sent as the routed one is refused
+            // here, as 1.5.5 refused it, never relayed with the caller's model.
+            if let Some(up) = upstream.as_deref() {
+                if !driven::spliceable_named(body, named.as_deref(), up) {
+                    out.set(|o| &o.refusal, UNSPLICEABLE);
+                    out.set(|o| &o.refusal_status, STATUS_INTERNAL);
+                    return out.fail(Refusal::refused(driven::INTERNAL_ERROR));
+                }
+            }
             // The caller's head crosses here once: keep what the far end receives of it.
             let caller = driven::relayed_fields(input.fields().iter().map(|f| {
                 (
@@ -617,20 +654,12 @@ slot!(
                 )
             }));
             let unit = input.unit();
-            let seq = plane.arrivals.with_all(|n| {
-                let next = n.entry(()).or_insert(0);
-                let seq = *next;
-                *next = seq.wrapping_add(1);
-                seq
-            });
             let kept = plane.units.with_all(|units| {
-                reclaim_stale(units, unit, seq);
                 let Some(kept) = unit_of(units, unit) else {
                     return false;
                 };
                 kept.caller = caller;
                 kept.upstream = upstream;
-                kept.seq = seq;
                 true
             });
             if !kept {
@@ -641,6 +670,24 @@ slot!(
                 return out.fail(Refusal::refused(
                     "the decisions plane is serving as many requests as it holds; retry",
                 ));
+            }
+            // THE ADMISSION ESTIMATE (THE DESIGN section 7, `admission: estimate`): the least a
+            // success bills, one decision and its request fee, so a budget in estimate mode prices
+            // a decisions unit before its dial.
+            let mut expected = input.units_buf();
+            for class in [tail::CLASS_DECISION_INDEX, tail::CLASS_FEE_INDEX] {
+                expected.push(UnitCount {
+                    class,
+                    source: UNITS_ESTIMATED,
+                    amount: 1,
+                });
+            }
+            let short = !expected.fits();
+            let (written, needed) = expected.settle(short);
+            out.set(|o| &o.units_written, written as u32);
+            out.set(|o| &o.units_needed, needed as u32);
+            if short {
+                return Outcome::Failed;
             }
         }
         Outcome::Ready
@@ -725,7 +772,7 @@ fn attempt_piece(
     out: &mut Out<'_, OnPieceOut>,
 ) -> Outcome {
     let dialect = input.dialect();
-    let request = driven::attempt_request(dialect, &[]);
+    let request = driven::attempt_request(dialect);
     let (mut fields, units, mut arena) = (input.fields_buf(), input.units_buf(), input.arena_buf());
     let verb = arena.span(request.verb.as_bytes());
     let target = arena.span(request.target.as_bytes());
@@ -749,7 +796,6 @@ fn attempt_piece(
         caller: std::mem::take(&mut unit.caller),
         upstream: unit.upstream.take(),
         ticket: unit.ticket,
-        seq: unit.seq,
         owed: std::mem::take(&mut unit.owed),
         reading: FarEndReading::for_dialect(dialect),
         ..Unit::default()
@@ -809,7 +855,10 @@ fn far_end(
         for count in counts.into_iter().flatten() {
             units.push(UnitCount {
                 class: count.class,
-                source: UNITS_REPORTED,
+                source: match count.source {
+                    Source::Reported => UNITS_REPORTED,
+                    Source::Floor => UNITS_FLOOR,
+                },
                 amount: count.amount,
             });
         }
@@ -824,24 +873,6 @@ fn far_end(
     }
     let done = owe(unit, bytes, if last { EMIT_DONE } else { 0 }, input, out);
     (Outcome::Ready, done)
-}
-
-/// At [`MAX_UNITS`], the oldest unit that arrived [`MAX_UNITS`] or more arrivals before `seq` and
-/// never crossed a piece is reclaimed: the kernel never started it, and keeping it would leave the
-/// instance refusing every arrival for good. A unit that crossed a piece is never reclaimed, and a
-/// reclaimed unit's later piece is refused (`on_piece` serves only a unit it keeps state for).
-fn reclaim_stale(units: &mut BTreeMap<u64, Unit>, key: u64, seq: u64) {
-    if units.len() < MAX_UNITS || units.contains_key(&key) {
-        return;
-    }
-    let stale = units
-        .iter()
-        .filter(|(_, u)| u.ticket.is_none() && seq.saturating_sub(u.seq) >= MAX_UNITS as u64)
-        .min_by_key(|(_, u)| u.seq)
-        .map(|(k, _)| *k);
-    if let Some(stale) = stale {
-        units.remove(&stale);
-    }
 }
 
 /// `unit`'s state in `units`, a new entry when it has none; `None` when it has none and
@@ -863,8 +894,9 @@ slot!(
         let given = input;
         let bytes = input.bytes().bytes();
         plane.units.with_all(|units| {
-            // Only a unit `arrive` keeps state for is served: one whose state is gone (reclaimed,
-            // or never arrived) would cross without its `upstream_model` and its caller fields.
+            // Only a unit `arrive` keeps state for is served: one whose state is gone (cancelled,
+            // refused, or never arrived) would cross without its `upstream_model` and its caller
+            // fields.
             let Some(unit) = units.get_mut(&given.unit()) else {
                 return Outcome::Refused;
             };
@@ -963,9 +995,110 @@ slot!(
     Start, GenIn, OutHead, |_, _, _| { Outcome::Ready }
 );
 
+/// A projection that names no body: [`ProjectOut::body`] or [`ProjectOut::rewritten`] absent.
+const NO_SPAN: Span = Span {
+    offset: SPAN_ABSENT,
+    len: 0,
+};
+
 slot!(
-    /// `project`: the plane binds no hook view; it never reads the decision content.
-    Project, ProjectIn, ProjectOut, |_, _, _| { Outcome::Refused }
+    /// `project`: THE HOOK VIEW of a unit's request ([`driven::project_hook`]), as every plane projects
+    /// its own (THE DESIGN section 1: "the hook tap and gate ... apply to every plane the same
+    /// way"). A request-stage hook's rewrite is applied first, in the request's dialect
+    /// ([`driven::rewritten`], wholesale, as 1.5.5 replaced the body; a rewrite naming another
+    /// model is REFUSED, the hook's failure; a rewrite with a document over a body whose whole
+    /// document does not parse is FAULT, the kernel's shared 500): the rewritten request is answered in `rewritten`
+    /// (the body the kernel keeps and re-pushes on every attempt from then on) and is the request
+    /// projected; a rewrite that does not apply leaves the request as it was (1.5.5). The view's
+    /// pool is the entry the request routes over, its dialect the claim's, and its one turn the
+    /// request document, shown only to a hook granted the prompt. The plane reads nothing of the content
+    /// for itself: the view carries the caller's bytes, and no fact is minted from them.
+    Project, ProjectIn, ProjectOut, |instance, input, mut out| {
+        let Some(plane) = instance.get() else {
+            return Outcome::Failed;
+        };
+        let target = input.target().as_str().unwrap_or_default();
+        let Some(dialect) = driven::dialect_at(target) else {
+            // A target no claim of this plane names carries no request of this plane's.
+            return Outcome::Refused;
+        };
+        let body = input.body().bytes();
+        let rewrite = input.rewrite().bytes();
+        let routes: &Routes = &plane.routes();
+        // The unit's first `project` is made before any rewrite hook runs, and only where one is
+        // configured or a hook needs the view: 1.5.5 materialized the document before any rewrite
+        // hook ran (`proxy/engine/mod.rs:728`, `:749`) and failed closed on a body that would not
+        // parse. FAULT, which busbar answers 500 `request rewrite could not be applied`, the body
+        // never forwarded and no hook invoked.
+        if rewrite.is_empty() && !driven::valid(body) {
+            return Outcome::Fault;
+        }
+        // The request is judged and routed once: a rewrite keeps its `model`, so the entry stands.
+        let read = driven::readable(body);
+        let mut view = driven::project_read(body, &read, dialect, routes, |r| r.dialect);
+        let rewritten = if rewrite.is_empty() {
+            None
+        } else {
+            match driven::rewritten_read(body, &read, rewrite, view.entry) {
+                Ok(rewritten) => rewritten,
+                // A rewrite naming another model is the hook's failure, never a switch of provider:
+                // REFUSED, and the kernel answers it by that hook's `on_error`.
+                Err(driven::NotApplied::Model(_)) => return Outcome::Refused,
+                // The body's whole document does not parse: the kernel always answers 500 `request
+                // rewrite could not be applied`, whatever the hook's `on_error`, and the body is
+                // never forwarded (1.5.5 `proxy/engine/mod.rs:749-755`).
+                Err(driven::NotApplied::Fault) => return Outcome::Fault,
+            }
+        };
+        let request = rewritten.as_deref().unwrap_or(body);
+        if let Some(rewritten) = rewritten.as_deref() {
+            view.chars = driven::chars_of(rewritten);
+        }
+        let (signals, mut arena, mut turns) =
+            (input.signals_buf(), input.arena_buf(), input.messages_buf());
+        let pool = arena.span(view.entry.as_bytes());
+        let dialect_name = arena.span(view.dialect.as_bytes());
+        let role = arena.span(driven::PROJECTED_ROLE.as_bytes());
+        // The request is the projected body and, as text, the one turn: one copy serves both.
+        let projected = arena.span(request);
+        let text = match std::str::from_utf8(request) {
+            Ok(_) => projected,
+            Err(_) => arena.span(String::from_utf8_lossy(request).as_bytes()),
+        };
+        turns.push_turn(&arena, role, text);
+        // An applied rewrite IS the projected request: the same bytes, named twice.
+        let applied = rewritten.is_some().then_some(projected);
+        let short = !(signals.fits() && arena.fits() && turns.fits());
+        let (signals_written, signals_needed) = signals.settle(short);
+        let (arena_written, arena_needed) = arena.settle(short);
+        let (turns_written, turns_needed) = turns.settle(short);
+        out.set(|o| &o.signals_needed, signals_needed as u32);
+        out.set(|o| &o.arena_written, arena_written as u64);
+        out.set(|o| &o.arena_needed, arena_needed as u64);
+        out.set(|o| &o.messages_needed, turns_needed as u32);
+        out.set(|o| &o.body, NO_SPAN);
+        out.set(|o| &o.rewritten, NO_SPAN);
+        if short {
+            // The driver re-calls once with the buffers this named, the same rewrite with it:
+            // applying it again to the same request writes the same body.
+            return Outcome::Failed;
+        }
+        out.host_str(|o| &o.view.pool, &arena, pool);
+        out.host_str(|o| &o.view.ingress_dialect, &arena, dialect_name);
+        out.set(|o| &o.view.message_count, turns_written as u64);
+        out.set(|o| &o.view.total_chars, view.chars as u64);
+        out.set(|o| &o.view.flags, 0);
+        out.host_rows(|o| &o.view.signals, &signals);
+        out.set(|o| &o.view.signals_len, signals_written);
+        out.set(|o| &o.prompt.message_count, turns_written as u64);
+        out.host_rows(|o| &o.prompt.messages, &turns);
+        out.set(|o| &o.prompt.messages_len, turns_written);
+        out.set(|o| &o.body, projected);
+        if let Some(applied) = applied {
+            out.set(|o| &o.rewritten, applied);
+        }
+        Outcome::Ready
+    }
 );
 
 busbar_contract::plugin_door! {

@@ -10,46 +10,14 @@
 
 mod door_harness;
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-
 use busbar_contract::abi::mechanism::call::Outcome;
+use busbar_contract::alloc_counter::{allocations_of, Counting};
 use door_harness::{open, Bufs, Given};
 
-thread_local! {
-    static ALLOCS: Cell<u64> = const { Cell::new(0) };
-}
-
-struct Counting;
-
-// SAFETY: every call is forwarded verbatim to the system allocator; the counter is a thread-local
-// `Cell` of a plain integer, touched only on the allocating thread, and never reads or writes the
-// memory being handed out.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        // SAFETY: forwarded as given.
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: forwarded as given.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
-        // SAFETY: forwarded as given.
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
-
+/// The test binary's allocator: busbar-contract's counting allocator (`alloc-counter`, a
+/// dev-dependency feature), the one every allocation gate of the fleet reads.
 #[global_allocator]
-static ALLOC: Counting = Counting;
-
-fn allocations_of(f: impl FnOnce()) -> u64 {
-    let before = ALLOCS.with(Cell::get);
-    f();
-    ALLOCS.with(Cell::get) - before
-}
+static A: Counting = Counting::new();
 
 /// RED (audit plane-decisions#8): 256 pieces of a 1 MiB answer, each 4 KiB, relayed through the
 /// door: no allocation (predev kept the whole answer, growing a buffer, and copied each piece

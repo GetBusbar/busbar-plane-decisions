@@ -153,13 +153,6 @@ fn a_generation_lists_every_configured_model_in_name_order() {
     assert!(generation_spec(&routed(&empty)).listed.is_empty());
 }
 
-#[test]
-fn the_need_is_the_tails() {
-    assert_eq!(NEEDS.len(), tail::NEEDS.len());
-    assert_eq!(STATEMENT.needs_len(), NEEDS.len());
-    assert_eq!(STATEMENT.sections_len(), 1 + tail::SECTIONS_CONSUMED.len());
-}
-
 /// `validate` reads the blob stage 3g deals (`{decisions: <section>}`): the section inside it is
 /// judged (a typo refused), a blob that writes no `decisions:` is the empty section, and the bare
 /// section is not the dealt shape.
@@ -188,6 +181,13 @@ fn the_section_under_its_verb_reads_as_the_section() {
     assert!(words.contains("modles"), "{words}");
     // RED ARM: the verb beside another member is no wrapper; it is an unknown member.
     assert!(read_settings(br#"{"decisions":{},"models":{}}"#).is_err());
+}
+
+/// The unit ceiling `tests/door.rs` drives the door to, spelled there as a number because the
+/// crate's only public item is the door: the two are one value.
+#[test]
+fn the_unit_ceiling_is_the_one_the_door_tests_drive() {
+    assert_eq!(MAX_UNITS, 4096);
 }
 
 /// RED-BEFORE-GREEN (busbar row 159; architect ruling 2026-10-23 R-6, spec Part 1: "a plane's
