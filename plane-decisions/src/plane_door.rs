@@ -88,8 +88,8 @@ use crate::config::DecisionsSection;
 use crate::driven::{self, tail, CallerAnswer, FarEndReading, Source};
 use crate::meta::PLANE_KEY;
 
-/// The version the Statement names: the crate's own, so a version bump is one edit.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The version the Statement names: the crate's (a test pins the two equal).
+pub const VERSION: &str = "1.6.0";
 
 /// The most calls the kernel keeps in flight on one instance.
 const MAX_INFLIGHT: u32 = 64;
