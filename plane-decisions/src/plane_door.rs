@@ -1,18 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE DECISIONS PLANE'S DOOR: the plane kind's memory-ABI table (`busbar_contract::abi::plane`)
+//! The decisions plane's door: the plane kind's memory-ABI table (`busbar_contract::abi::plane`)
 //! built with the SDK's `plugin_door!` on its safe surface, over this plane's answers to the plane
-//! driver ([`crate::driven`], `BUSBAR-1.6.0.md` Part 3, section 12). [`door`] is the LINKED door;
-//! the same function is the DROPPED door once a `cdylib` exports it (`busbar-plane-decisions-plugin`,
-//! through `busbar_contract::export_door!`), so the two cannot answer differently.
-//! `tests/conformance.rs` loads both through the one loader and requires one transcript.
-//!
-//! The composition root links [`door`] on its `plane-door` axis under the plane's one switch
-//! `plane-decisions` (`BUSBAR-1.6.0.md` Part 3, section 12, "The switch": the fold is complete and
-//! its development-only switch is gone) and binds it through the loader's one load beside the
-//! dropped-in plane doors. The plane's registry row is this door's Statement, folded by the kernel;
-//! the serve path composes the bound door and hands it its arrivals through the plane driver.
+//! driver ([`crate::driven`]). [`door`] is the linked door; the same function is the dropped-in
+//! door once a `cdylib` exports it (`busbar-plane-decisions-plugin`, through
+//! `busbar_contract::export_door!`), so the two cannot answer differently.
 //!
 //! * The Statement: the plane's key and version, `decisions:` declared and `providers:` consumed,
 //!   its one outbound need, the tail [`TAIL`] (every list read off [`crate::driven::tail`]), and
@@ -37,16 +30,13 @@
 //! * `project`: the hook view of a unit's request ([`crate::driven::project_hook`]): the entry it routes
 //!   over as the view's pool, its dialect, the request document as the one turn a content-granted
 //!   hook reads, and a request-stage hook's rewrite applied in the dialect
-//!   ([`crate::driven::rewritten`]) and answered as the body the kernel keeps. Every plane gets every
-//!   capability (THE DESIGN section 1): the deployment's gates, rewrites and route policies bind to
-//!   a decisions unit as they bind to any other.
+//!   ([`crate::driven::rewritten`]) and answered as the body the kernel keeps.
 //! * `serve` is REFUSED: the plane publishes no admin route. `hydrate`, `start`, `tick`, `drive`,
 //!   `release` and `close` hold nothing.
 //!
 //! A unit's state lives from its arrival to its end (its last far-end piece, its refusal or its
 //! cancel), and at most [`MAX_UNITS`] live at once: an arrival past that is refused, and a live
-//! unit is never dropped to make room (THE DESIGN section 11.2: memory is plugin-owned, and no
-//! state grows without bound on the hot path; section 1: an active unit is never evicted).
+//! unit is never dropped to make room.
 //!
 //! Each generation's routes are kept beside its snapshot, and an arrival routes over the newest
 //! generation the host still holds: a generation the host refuses after this plane's `refresh` is
@@ -119,7 +109,7 @@ const STATUS_BUSY: u32 = 503;
 /// ([`driven::spliceable`]); refused at [`STATUS_INTERNAL`], about the entry it routed over.
 pub const UNSPLICEABLE: u32 = 4;
 
-/// The status an [`UNSPLICEABLE`] arrival is refused at: 1.5.5's.
+/// The status an [`UNSPLICEABLE`] arrival is refused at.
 const STATUS_INTERNAL: u32 = 500;
 
 /// The human label.
@@ -184,7 +174,7 @@ const FEE_UNITS: &[AbiStr] = &[abi_str(tail::FEE_UNITS[0])];
 /// The far end's one response field the plane relays: the document type of the answer.
 const KEEP_RESPONSE_HEADERS: &[AbiStr] = &[abi_str(FIELD_CONTENT_TYPE)];
 
-/// THE PLANE'S ONE NEED ([`tail::NEEDS`]): outbound to a configured provider, over the claim's
+/// The plane's one need ([`tail::NEEDS`]): outbound to a configured provider, over the claim's
 /// transport, decorated under the egress scheme the kernel holds the credential for.
 pub const NEEDS: &[Need] = &[{
     let mut n = Need::EMPTY.with_keep_response_headers(KEEP_RESPONSE_HEADERS);
@@ -196,7 +186,7 @@ pub const NEEDS: &[Need] = &[{
     n
 }];
 
-/// THE STATEMENT TAIL: the plane's static facts, every list [`crate::driven::tail`]'s.
+/// The Statement tail: the plane's static facts, every list [`crate::driven::tail`]'s.
 pub const TAIL: &PlaneTail = &{
     let mut t = PlaneTail::EMPTY
         .with_dialects(DIALECTS)
@@ -218,14 +208,14 @@ pub const TAIL: &PlaneTail = &{
 };
 
 busbar_contract::statement_extensions!(
-    /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246).
+    /// The Statement's extensions: this plugin's whole `declares` document.
     EXTENSIONS: [(
         busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
         include_bytes!("../declares.json")
     )]
 );
 
-/// THE STATEMENT: the plane's key and version, its sections, its need, its tail and its
+/// The Statement: the plane's key and version, its sections, its need, its tail and its
 /// extensions.
 pub const STATEMENT: Statement = Statement {
     extensions: EXTENSIONS,
@@ -237,11 +227,9 @@ pub const STATEMENT: Statement = Statement {
 
 /// The settings blob read as the `decisions:` section; an empty blob is the empty section.
 ///
-/// The blob is ONE JSON object keyed by section (`BUSBAR-1.6.0.md` section 4: "a plane's settings
-/// reach it as ONE validated JSON object `{section: value}`"): `{decisions: <section>}` beside each
-/// section the plane consumes that the deployment writes (`providers:`; architect ruling R-6,
-/// 2026-10-23). The plane reads its own key; a consumed section's facts reach it at open
-/// (`PlaneOpenIn::providers`). Only the plane's own verb and the sections it consumes may sit in
+/// The blob is one JSON object keyed by section: `{decisions: <section>}` beside each section the
+/// plane consumes that the deployment writes (`providers:`). The plane reads its own key; a
+/// consumed section's facts reach it at open (`PlaneOpenIn::providers`). Only the plane's own verb and the sections it consumes may sit in
 /// the keyed object: any other member beside the verb makes it no wrapper. The bare section is read
 /// too, since a section never carries a member named after its own verb (its grammar refuses
 /// unknown members), so the two cannot be confused.
@@ -273,8 +261,7 @@ pub fn read_settings(settings: &[u8]) -> Result<DecisionsSection, String> {
     serde_json::from_value(section).map_err(|e| e.to_string())
 }
 
-/// `validate`'s blob: what stage 3g deals a plane (`{<verb>: <section>}`; the kernel's own judges hand
-/// the same shape), read at the `decisions:` section. An empty blob, or one that writes no
+/// `validate`'s blob (`{<verb>: <section>}`), read at the `decisions:` section. An empty blob, or one that writes no
 /// `decisions:`, is the empty section.
 ///
 /// # Errors
@@ -294,7 +281,7 @@ pub fn read_dealt(settings: &[u8]) -> Result<DecisionsSection, String> {
     }
 }
 
-/// ONE GENERATION'S SNAPSHOT for a section whose models are of `dialects`: the claims
+/// One generation's snapshot for a section whose models are of `dialects`: the claims
 /// [`driven::served_claims`] serves, each an exact target over the claim's transport, wearing its
 /// own dialect for a refusal before `arrive`. It binds no audience: the operation is served on the
 /// plain data plane to a keyed caller, as the llm plane's is.
@@ -321,15 +308,12 @@ pub struct ModelRoute {
     pub upstream: Option<String>,
 }
 
-/// EVERY MODEL'S ROUTE under `section`: its dialect, its own `protocol` override or else its
-/// provider's protocol (`protocols`, the provider facts the host handed at `open`; THE DESIGN
-/// section 2: "a model's dialect is its override or its provider's protocol"; #51: "Resolution:
-/// model override if present, else the provider/catalog default").
+/// Every model's route under `section`: its dialect, its own `protocol` override or else its
+/// provider's protocol (`protocols`, the provider facts the host handed at `open`).
 ///
 /// # Errors
 ///
-/// A model whose dialect is none this plane speaks, named with the dialects it does (#51: an
-/// unknown dialect fails closed); and a model with no override whose provider the host stated no
+/// A model whose dialect is none this plane speaks, named with the dialects it does; and a model with no override whose provider the host stated no
 /// protocol for, named with that provider: it has no dialect, and none is guessed for it.
 pub fn routes(
     section: &DecisionsSection,
@@ -390,10 +374,9 @@ fn dialect_named(name: &str, protocol: &str) -> Result<u32, String> {
     })
 }
 
-/// ONE GENERATION'S SNAPSHOT for `section`'s `routes`: [`snapshot_spec`]'s claims for its models'
-/// dialects, and every model it configures LISTED (THE DESIGN section 2: all configured decisions
-/// models are listed, scope-filtered by the kernel; `/v1/models` appends them), in ascending name
-/// order.
+/// One generation's snapshot for `section`'s `routes`: [`snapshot_spec`]'s claims for its models'
+/// dialects, and every model it configures listed (the kernel scope-filters them; `/v1/models`
+/// appends them), in ascending name order.
 #[must_use]
 pub fn generation_spec(routes: &BTreeMap<String, ModelRoute>) -> SnapshotSpec {
     let dialects: Vec<u32> = routes.values().map(|r| r.dialect).collect();
@@ -607,7 +590,7 @@ slot!(
 
 slot!(
     /// `arrive`: a claimed request's op class, principal need, dialect and route (the model it
-    /// names, or the only one configured, directly: ARCHITECT Q-SW6/Q-FL3); an unclaimed one is
+    /// names, or the only one configured, directly); an unclaimed one is
     /// refused at 404, and one that routes over no model at its [`driven::Unrouted`] status.
     Arrive, ArriveIn, ArriveOut, |instance, input, mut out| {
         let verb = input.method().as_str().unwrap_or_default();
@@ -638,7 +621,7 @@ slot!(
                 }
             };
             // A request whose model the far end could not be sent as the routed one is refused
-            // here, as 1.5.5 refused it, never relayed with the caller's model.
+            // here, never relayed with the caller's model.
             if let Some(up) = upstream.as_deref() {
                 if !driven::spliceable_named(body, named.as_deref(), up) {
                     out.set(|o| &o.refusal, UNSPLICEABLE);
@@ -671,7 +654,7 @@ slot!(
                     "the decisions plane is serving as many requests as it holds; retry",
                 ));
             }
-            // THE ADMISSION ESTIMATE (THE DESIGN section 7, `admission: estimate`): the least a
+            // The admission estimate (`admission: estimate`): the least a
             // success bills, one decision and its request fee, so a budget in estimate mode prices
             // a decisions unit before its dial.
             let mut expected = input.units_buf();
@@ -762,10 +745,8 @@ fn owe(
     !more && flags & EMIT_DONE != 0
 }
 
-/// An ATTEMPT: the request bound for the far end, its verb, target and dialect fields. A new
-/// attempt starts a new far-end answer. Named `attempt_piece`, not `attempt`, so it is not a
-/// cross-plane re-spelling of llm/a2a's `attempt` (structure-lint plane-dup; ARCHITECT ruling 2b
-/// 2026-10-04).
+/// An attempt: the request bound for the far end, its verb, target and dialect fields. A new
+/// attempt starts a new far-end answer.
 fn attempt_piece(
     unit: &mut Unit,
     input: Lent<'_, OnPieceIn>,
@@ -839,17 +820,19 @@ fn far_end(
         }
     }
     if last {
-        // THE MONEY RULE (THE DESIGN section 7): a success bills its decision count, its tokens and
-        // its fee; a usage member that is not a whole count fails the unit loudly, never a silent 0.
+        // A success bills its decision count, its tokens and its fee. A usage member that is not a
+        // whole count bills the plane's floor and is said in one log line, never a silent 0, and
+        // the unit that succeeded is not failed.
         let counts = match unit.reading.counts(unit.status) {
             Ok(counts) => counts,
             Err(driven::UnreadableUsage(pointer)) => {
-                return (
-                    out.fail(Refusal::failed(format!(
-                        "the far end's answer carries `{pointer}`, which is not a whole count"
-                    ))),
-                    true,
+                busbar_contract::diag_warn!(
+                    busbar_contract::diagnostic::USAGE_TAP_DECODE_FAILED,
+                    member = pointer,
+                    "the far end's answer has no whole count at `{pointer}`: usage is unreadable; \
+                     billing the plane's floor, never 0"
                 );
+                unit.reading.floored(unit.status)
             }
         };
         for count in counts.into_iter().flatten() {
@@ -1002,14 +985,13 @@ const NO_SPAN: Span = Span {
 };
 
 slot!(
-    /// `project`: THE HOOK VIEW of a unit's request ([`driven::project_hook`]), as every plane projects
-    /// its own (THE DESIGN section 1: "the hook tap and gate ... apply to every plane the same
-    /// way"). A request-stage hook's rewrite is applied first, in the request's dialect
-    /// ([`driven::rewritten`], wholesale, as 1.5.5 replaced the body; a rewrite naming another
-    /// model is REFUSED, the hook's failure; a rewrite with a document over a body whose whole
-    /// document does not parse is FAULT, the kernel's shared 500): the rewritten request is answered in `rewritten`
-    /// (the body the kernel keeps and re-pushes on every attempt from then on) and is the request
-    /// projected; a rewrite that does not apply leaves the request as it was (1.5.5). The view's
+    /// `project`: the hook view of a unit's request ([`driven::project_hook`]). A request-stage
+    /// hook's rewrite is applied first, in the request's dialect ([`driven::rewritten`],
+    /// wholesale; a rewrite naming another model is REFUSED, the hook's failure; a rewrite with a
+    /// document over a body whose whole document does not parse is FAULT, the kernel's shared
+    /// 500): the rewritten request is answered in `rewritten` (the body the kernel keeps and
+    /// re-pushes on every attempt from then on) and is the request projected; a rewrite that does
+    /// not apply leaves the request as it was. The view's
     /// pool is the entry the request routes over, its dialect the claim's, and its one turn the
     /// request document, shown only to a hook granted the prompt. The plane reads nothing of the content
     /// for itself: the view carries the caller's bytes, and no fact is minted from them.
@@ -1025,11 +1007,9 @@ slot!(
         let body = input.body().bytes();
         let rewrite = input.rewrite().bytes();
         let routes: &Routes = &plane.routes();
-        // The unit's first `project` is made before any rewrite hook runs, and only where one is
-        // configured or a hook needs the view: 1.5.5 materialized the document before any rewrite
-        // hook ran (`proxy/engine/mod.rs:728`, `:749`) and failed closed on a body that would not
-        // parse. FAULT, which busbar answers 500 `request rewrite could not be applied`, the body
-        // never forwarded and no hook invoked.
+        // The document is checked before any rewrite hook runs, failing closed on a body that
+        // would not parse: FAULT, which busbar answers 500 `request rewrite could not be
+        // applied`, the body never forwarded and no hook invoked.
         if rewrite.is_empty() && !driven::valid(body) {
             return Outcome::Fault;
         }
@@ -1046,7 +1026,7 @@ slot!(
                 Err(driven::NotApplied::Model(_)) => return Outcome::Refused,
                 // The body's whole document does not parse: the kernel always answers 500 `request
                 // rewrite could not be applied`, whatever the hook's `on_error`, and the body is
-                // never forwarded (1.5.5 `proxy/engine/mod.rs:749-755`).
+                // never forwarded.
                 Err(driven::NotApplied::Fault) => return Outcome::Fault,
             }
         };
