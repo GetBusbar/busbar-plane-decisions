@@ -305,7 +305,7 @@ enum OpenValue {
 }
 
 /// [`parsed`]'s document for a body [`valid`] holds to be one, built without recursion from the
-/// walk [`Skip`] makes, each number as 1.5.5's reader read it ([`crate::sonic_number::value`]), each
+/// walk [`Skip`] makes, each number as 1.5.5's reader read it ([`number`]), each
 /// string decoded; a repeated key keeps its last value, as serde's map does. Only reached where
 /// serde refuses a number 1.5.5's reader took.
 fn built(body: &[u8]) -> Option<serde_json::Value> {
@@ -456,7 +456,7 @@ pub fn readable(body: &[u8]) -> Result<Option<serde_json::Value>, Unrouted> {
 
 /// Whether `span` is one value as 1.5.5 DECODED it (a top-level key, a value of [`HEAD_KEYS`], a
 /// root scalar), read strictly ([`Skip::strict`]): every escape whole, every surrogate paired and
-/// every number one 1.5.5's reader took ([`crate::sonic_number`]). The span was skipped first
+/// every number one 1.5.5's reader took ([`number`]). The span was skipped first
 /// ([`Skip`]), its depth bounded by the caller.
 fn decodes(span: &[u8]) -> bool {
     let mut strict = Skip::strict(span);
@@ -464,7 +464,7 @@ fn decodes(span: &[u8]) -> bool {
 }
 
 /// [`decodes`], and the value built. A number serde reads as out of range where 1.5.5's reader did
-/// not (the exponent cap of [`crate::sonic_number`]) is built as `null`: only the `model` is kept,
+/// not (the exponent cap of [`number`]) is built as `null`: only the `model` is kept,
 /// and a `model` that is no string is none ([`Unrouted::NotAName`]) either way.
 fn decoded(span: &[u8]) -> Result<serde_json::Value, ()> {
     if !decodes(span) {
@@ -485,11 +485,23 @@ fn decoded(span: &[u8]) -> Result<serde_json::Value, ()> {
 ///
 /// STRICT ([`Skip::strict`]), the same walk reads a value as 1.5.5 DECODED it: each string is also
 /// decoded (an escape whole, a surrogate paired) and each number read by 1.5.5's own reader,
-/// [`crate::sonic_number`], which refuses one that overflows to infinity as 1.5.5 refused it.
+/// [`number`], which refuses one that overflows to infinity as 1.5.5 refused it.
 struct Skip<'b> {
     bytes: &'b [u8],
     at: usize,
     strict: bool,
+}
+
+/// The value 1.5.5's reader read `bytes` as (one JSON number, held to the JSON grammar): an
+/// unsigned or a negative integer, or a finite float; `None` where it refused the number
+/// (`FloatMustBeFinite`, the parse 400). The reader is sonic-number's own `parse_number`, at the
+/// version busbar's lock carries (0.1.3), which reads every number as 0.1.2 did (its exponent cap at
+/// 1000, its 19 significant digits): `tests/number_reader.rs` holds it to the verdicts of the port
+/// of 0.1.2 this plane carried before.
+fn number(bytes: &[u8]) -> Option<sonic_number::ParserNumber> {
+    let negative = bytes.first() == Some(&b'-');
+    let mut at = usize::from(negative);
+    sonic_number::parse_number(bytes, &mut at, negative).ok()
 }
 
 /// The bytes a backslash may be followed by (sonic-rs 0.5.8 `ESCAPED_TAB`), `u` apart.
@@ -671,18 +683,14 @@ impl<'b> Skip<'b> {
 
     /// [`built`]'s number, its first byte consumed: as 1.5.5's reader read it.
     fn number_value(&mut self, first: u8) -> Option<serde_json::Value> {
-        use crate::sonic_number::ParserNumber;
+        use sonic_number::ParserNumber;
         let start = self.at - 1;
         self.skip_number_token(first).ok()?;
-        Some(
-            match crate::sonic_number::value(&self.bytes[start..self.at])? {
-                ParserNumber::Unsigned(n) => serde_json::Value::from(n),
-                ParserNumber::Signed(n) => serde_json::Value::from(n),
-                ParserNumber::Float(f) => {
-                    serde_json::Value::Number(serde_json::Number::from_f64(f)?)
-                }
-            },
-        )
+        Some(match number(&self.bytes[start..self.at])? {
+            ParserNumber::Unsigned(n) => serde_json::Value::from(n),
+            ParserNumber::Signed(n) => serde_json::Value::from(n),
+            ParserNumber::Float(f) => serde_json::Value::Number(serde_json::Number::from_f64(f)?),
+        })
     }
 
     /// A skipped object's key and its colon, the key's opening quote consumed.
@@ -728,7 +736,7 @@ impl<'b> Skip<'b> {
     fn skip_number(&mut self, first: u8) -> Result<(), ()> {
         let start = self.at - 1;
         self.skip_number_token(first)?;
-        if self.strict && !crate::sonic_number::finite(&self.bytes[start..self.at]) {
+        if self.strict && number(&self.bytes[start..self.at]).is_none() {
             return Err(());
         }
         Ok(())
@@ -966,7 +974,7 @@ pub fn spliceable_named(body: &[u8], named: Option<&str>, upstream: &str) -> boo
 }
 
 /// Whether the body's whole document parses, as the DOM parse reads it (strings decoded, so a
-/// bad escape or a lone surrogate refuses; numbers read by [`crate::sonic_number`]), by a walk that builds no tree ([`Skip::strict`]).
+/// bad escape or a lone surrogate refuses; numbers read by [`number`]), by a walk that builds no tree ([`Skip::strict`]).
 #[must_use]
 pub fn valid(body: &[u8]) -> bool {
     if exceeds_depth(body, MAX_PARSE_DEPTH) || core::str::from_utf8(body).is_err() {
