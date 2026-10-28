@@ -840,16 +840,19 @@ fn far_end(
     }
     if last {
         // THE MONEY RULE (THE DESIGN section 7): a success bills its decision count, its tokens and
-        // its fee; a usage member that is not a whole count fails the unit loudly, never a silent 0.
+        // its fee. A usage member that is not a whole count bills the plane's floor and is said in
+        // one log line, never a silent 0, and the unit that succeeded is not failed (owner ruling
+        // 2026-10-27, as the llm plane bills its floor for an unreadable usage).
         let counts = match unit.reading.counts(unit.status) {
             Ok(counts) => counts,
             Err(driven::UnreadableUsage(pointer)) => {
-                return (
-                    out.fail(Refusal::failed(format!(
-                        "the far end's answer carries `{pointer}`, which is not a whole count"
-                    ))),
-                    true,
+                busbar_contract::diag_warn!(
+                    busbar_contract::diagnostic::USAGE_TAP_DECODE_FAILED,
+                    member = pointer,
+                    "the far end's answer has no whole count at `{pointer}`: usage is unreadable; \
+                     billing the plane's floor, never 0"
                 );
+                unit.reading.floored(unit.status)
             }
         };
         for count in counts.into_iter().flatten() {

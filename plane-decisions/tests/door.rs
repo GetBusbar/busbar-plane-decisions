@@ -271,23 +271,47 @@ fn a_non_success_bills_nothing() {
     assert_eq!(a.bytes, br#"{"usage":{"units":2}}"#, "relayed unchanged");
 }
 
-/// RED (audit plane-decisions#4): a success whose count is not a whole count fails the unit loudly
-/// (finding 395, kept: "LOCATED, never dropped"), never a silent zero.
+/// RED (owner ruling 2026-10-27, spend is always attributed and nothing is silent): a success
+/// whose count is not a whole count bills the plane's floor (one decision, `UNITS_FLOOR`) and its
+/// fee, relays the answer unchanged, and says so in one log line; a unit that succeeded is never
+/// failed. RED before: the unit FAILED and billed nothing.
 #[test]
-fn a_success_with_an_unreadable_count_fails_loudly() {
+fn a_success_with_an_unreadable_count_bills_the_floor_and_says_so() {
+    let fee = class(busbar_contract::plane::PER_REQUEST);
     for answer in [
         &br#"{"usage":{"units":7.5}}"#[..],
         br#"{"usage":{"units":"7"}}"#,
         br#"{"usage":{"units":-3}}"#,
     ] {
         let a = answered(200, answer);
+        let shown = String::from_utf8_lossy(answer);
         assert_eq!(
             (a.outcome, a.short),
-            (Some(Outcome::Failed), false),
-            "{}: {a:?}",
-            String::from_utf8_lossy(answer)
+            (Some(Outcome::Ready), false),
+            "{shown}: {a:?}"
         );
-        assert!(a.units.is_empty() && a.bytes.is_empty(), "{a:?}");
+        assert_eq!(
+            a.units,
+            vec![
+                (
+                    class("decision"),
+                    busbar_contract::abi::plane::UNITS_FLOOR,
+                    1
+                ),
+                (fee, busbar_contract::abi::plane::UNITS_REPORTED, 1),
+            ],
+            "{shown}"
+        );
+        assert_eq!(a.bytes, answer, "relayed unchanged");
+        assert_eq!(
+            a.logs
+                .iter()
+                .filter(|l| l.contains("usage is unreadable"))
+                .count(),
+            1,
+            "{shown}: {:?}",
+            a.logs
+        );
     }
 }
 

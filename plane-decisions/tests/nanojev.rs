@@ -13,7 +13,7 @@
 mod door_harness;
 
 use busbar_contract::abi::mechanism::call::Outcome;
-use busbar_contract::abi::plane::{ROUTE_DIRECT, UNITS_REPORTED};
+use busbar_contract::abi::plane::{ROUTE_DIRECT, UNITS_FLOOR, UNITS_REPORTED};
 use door_harness::{claims, open, open_with, validate, Bufs, Given};
 
 const SYSTEMONE: (&str, &str) = ("POST", "/v1/systemone");
@@ -94,20 +94,32 @@ fn served(answer: &[u8]) -> (door_harness::Answered, door_harness::Answered) {
 }
 
 /// RED (audit plane-decisions#3): the far end is asked at the dialect's own path, and the answer's
-/// `execution.states` is the decision count; an answer with none fails loudly.
+/// `execution.states` is the decision count; an answer with none bills the plane's floor.
 #[test]
 fn a_nanojev_unit_is_sent_to_evaluate_and_bills_its_states() {
     let (request, answer) = served(br#"{"execution":{"states":3},"result":{}}"#);
     assert_eq!(request.request, "POST /api/evaluate");
     assert_eq!(answer.outcome, Some(Outcome::Ready), "{answer:?}");
     assert_eq!(answer.units[0], (0, UNITS_REPORTED, 3), "{answer:?}");
+    // An answer with no count bills the plane's floor and says so (owner ruling 2026-10-27:
+    // spend is always attributed, a unit that succeeded is never failed).
     let (_, none) = served(br#"{"result":{}}"#);
     assert_eq!(
         (none.outcome, none.short),
-        (Some(Outcome::Failed), false),
+        (Some(Outcome::Ready), false),
         "{none:?}"
     );
-    assert!(none.units.is_empty() && none.bytes.is_empty(), "{none:?}");
+    assert_eq!(none.units[0], (0, UNITS_FLOOR, 1), "{none:?}");
+    assert_eq!(none.bytes, br#"{"result":{}}"#, "relayed unchanged");
+    assert_eq!(
+        none.logs
+            .iter()
+            .filter(|l| l.contains("usage is unreadable"))
+            .count(),
+        1,
+        "{:?}",
+        none.logs
+    );
 }
 
 /// RED (audit plane-decisions R2 #3): a reload naming a model whose provider `open` was handed no

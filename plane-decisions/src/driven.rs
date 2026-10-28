@@ -1429,9 +1429,10 @@ pub struct Units {
     pub amount: u64,
 }
 
-/// A usage member the far end's success answer carries but that is not a whole count: the money
-/// rule's loud failure (finding 395, kept: "a usage member present but not a whole count is
-/// LOCATED, never dropped"), never a silent 0. Names the member's pointer.
+/// A usage member the far end's success answer carries but that is not a whole count (or a
+/// required count it does not carry): LOCATED, never dropped (finding 395), never a silent 0. The
+/// door bills the plane's floor for it ([`FarEndReading::floored`]) and says so in one log line.
+/// Names the member's pointer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnreadableUsage(pub &'static str);
 
@@ -1733,6 +1734,32 @@ impl FarEndReading {
                 Member::Unreadable => return Err(UnreadableUsage(pointer)),
             };
         }
+        Ok(Self::billed(whole))
+    }
+
+    /// WHAT A SUCCESS WHOSE USAGE COULD NOT BE READ WHOLE BILLS ([`Self::counts`] answered
+    /// [`UnreadableUsage`]; owner ruling 2026-10-27: spend is always attributed, and a unit that
+    /// succeeded is never failed): the plane's floor for an unreadable decision count (one
+    /// decision, [`Source::Floor`]), every token count it does state whole, and the request fee. A
+    /// non-success bills nothing.
+    #[must_use]
+    pub fn floored(&self, status: Option<u32>) -> Counts {
+        if !self.success(status) {
+            return [None; 4];
+        }
+        let (_, members) = self.settled();
+        let mut whole = [None; 3];
+        for (i, _) in self.usage().counted.iter().enumerate() {
+            whole[i] = match members[i] {
+                Member::Whole(n) => Some(n),
+                Member::Absent | Member::Unreadable => None,
+            };
+        }
+        Self::billed(whole)
+    }
+
+    /// The counts of a success whose whole counts are `whole` (decision, input and output tokens).
+    fn billed(whole: [Option<u64>; 3]) -> Counts {
         let reported = |class: u32, amount: u64| Units {
             class,
             source: Source::Reported,
@@ -1748,12 +1775,12 @@ impl FarEndReading {
             },
             |n| reported(tail::CLASS_DECISION_INDEX, n),
         );
-        Ok([
+        [
             Some(decisions),
             whole[1].map(|n| reported(tail::CLASS_INPUT_TOKENS_INDEX, n)),
             whole[2].map(|n| reported(tail::CLASS_OUTPUT_TOKENS_INDEX, n)),
             Some(reported(tail::CLASS_FEE_INDEX, 1)),
-        ])
+        ]
     }
 }
 

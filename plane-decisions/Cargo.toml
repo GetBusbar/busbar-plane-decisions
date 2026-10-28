@@ -78,6 +78,9 @@ busbar-contract = { workspace = true }
 # the plane reads it with its port of that reader (`src/sonic_number`).
 serde_json = { workspace = true, features = ["unbounded_depth", "float_roundtrip"] }
 serde = { workspace = true }
+# The one log line an unreadable usage raises (`busbar_contract::diag_warn!`): the door's call
+# capture carries it to the plugin's host log, compiled in or dropped in.
+tracing = { workspace = true }
 
 [dev-dependencies]
 # The TEST-ONLY seal (#65). `busbar_contract::plugin::TestKernelSeal` is the one blessed
