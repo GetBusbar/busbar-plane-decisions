@@ -9,7 +9,7 @@
 //! same function as its one symbol, so the linked and the dropped-in door cannot answer
 //! differently. The crate's one busbar dependency is `busbar-contract`; beside it, `serde` and
 //! `serde_json` read the `decisions:` section and the handful of pointers the plane reads, and
-//! `sonic_number` (ported from sonic-number 0.1.2) reads a number exactly as 1.5.5 did.
+//! `sonic_number` (ported from sonic-number 0.1.2) reads a number exactly as the ingress reader does.
 //!
 //! Each dialect has one exact claim, its decision call (`jev`'s `POST /v1/systemone`, `nanojev`'s
 //! `POST /api/evaluate`), published when a model of that dialect is configured. A request routes
@@ -58,7 +58,7 @@ mod ops;
 mod plane_door;
 mod sonic_number;
 
-/// THE DOOR: this plugin's one public item (BUSBAR-1.6.0.md l.3567, Crate shape).
+/// The door: this plugin's one public item.
 pub use plane_door::door;
 
 /// The crate's tests that reach past [`door`]: in-crate because the crate's only public item is the
