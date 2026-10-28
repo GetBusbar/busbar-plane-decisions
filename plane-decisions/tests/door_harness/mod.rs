@@ -263,6 +263,9 @@ pub struct Answered {
     pub units: Vec<(u32, u32, u64)>,
     /// Short-answer needs, when the answer was short.
     pub short: bool,
+    /// The log records the calls' envelopes carried (the plane's `tracing` lines, captured by the
+    /// door's trampoline), as text.
+    pub logs: Vec<String>,
 }
 
 /// One piece as the kernel pushes it.
@@ -563,6 +566,19 @@ impl Door {
             };
             first = false;
             got.outcome = Some(ret.outcome());
+            let envelope = &o.head.envelope;
+            if !envelope.diags.is_null() {
+                // SAFETY: the reply's envelope names `diags_len` entries the door's trampoline
+                // sealed, live until the next call on this thread.
+                let diags =
+                    unsafe { std::slice::from_raw_parts(envelope.diags, envelope.diags_len) };
+                got.logs.extend(
+                    diags
+                        .iter()
+                        .filter(|d| d.id_idx == busbar_contract::abi::mechanism::call::DIAG_LOG)
+                        .map(|d| read(d.text)),
+                );
+            }
             got.short |= o.units_needed != 0 || o.fields_needed != 0 || o.arena_needed != 0;
             if o.reply_status != 0 {
                 got.status = o.reply_status;
