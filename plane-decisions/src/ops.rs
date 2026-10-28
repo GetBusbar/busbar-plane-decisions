@@ -11,11 +11,10 @@
 use busbar_contract::ids::OpClassId;
 
 /// `POST /v1/systemone` — the decision call. Priced on the request it carries and metered on the
-/// usage the SUCCESS response reports (billable-success only, per the signed design's C-3).
+/// usage the success response reports (billable on success only).
 pub const OP_SYSTEMONE: OpClassId = OpClassId::new("systemone");
 
-/// `POST /api/evaluate` — the decision call of the second dialect, `nanojev` (THE DESIGN section 2:
-/// "`/api/evaluate` is its second exact claim").
+/// `POST /api/evaluate` — the decision call of the second dialect, `nanojev`.
 pub const OP_EVALUATE: OpClassId = OpClassId::new("evaluate");
 
 /// The path jev's decision call is mounted on.

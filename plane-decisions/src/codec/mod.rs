@@ -12,9 +12,8 @@
 //! The caller's body reaches the far end as the caller sent it, with two exceptions. A configured
 //! `upstream_model` that differs from the name the caller used is spliced over the top-level
 //! `model` value (`driven::spliced`). A bound request-stage hook's rewrite replaces the request's
-//! members wholesale with its document, as 1.5.5 replaced the body (`driven::rewritten`). With
-//! neither, every byte is the caller's. The far end's answer
-//! reaches the caller unchanged; its counts are read as it passes, never in place of relaying it.
+//! members wholesale with its document (`driven::rewritten`). With neither, every byte is the
+//! caller's. The far end's answer reaches the caller unchanged; its counts are read as it passes.
 
 /// The pointer a SUCCESSFUL `systemone` response reports its billable usage count at.
 ///
@@ -23,19 +22,16 @@
 pub const PTR_USAGE_UNITS: &str = "/usage/units";
 
 /// The pointers a SUCCESSFUL `systemone` response reports its input and output tokens at, where it
-/// reports them (DECISIONS Q1-5: "usage pointers are DIALECT data (/usage/units,
-/// /usage/input_tokens,/usage/output_tokens)").
+/// reports them.
 pub const PTR_USAGE_INPUT_TOKENS: &str = "/usage/input_tokens";
 /// See [`PTR_USAGE_INPUT_TOKENS`].
 pub const PTR_USAGE_OUTPUT_TOKENS: &str = "/usage/output_tokens";
 
 /// The pointer a SUCCESSFUL `nanojev` answer states the upstream's own billing unit at: the states
-/// its evaluation ran (THE DESIGN section 2: "it meters the upstream's own billing unit, counted
-/// from the answer already read (`execution.states`; an answer with no count refuses loudly").
+/// its evaluation ran (an answer with no count refuses loudly).
 pub const PTR_EXECUTION_STATES: &str = "/execution/states";
 
-/// The pointer a request names the model it is routed over at: its top-level `model` (THE DESIGN
-/// section 2, model resolution; DECISIONS D8b "REQUEST_PTRS += /model (metadata)"). Routing
+/// The pointer a request names the model it is routed over at: its top-level `model`. Routing
 /// metadata, never decision content.
 pub const PTR_MODEL: &str = "/model";
 
@@ -52,9 +48,8 @@ pub fn read_raw<'u>(body: &'u [u8], pointer: &str) -> Option<&'u [u8]> {
 
 /// The egress-auth scheme an outbound hop to the provider is decorated under.
 ///
-/// The plane NAMES the scheme and never holds what is behind it. jev's auth is the core gateway's
-/// own bearer credential (the signed design: "auth = core gateway credential, plane returns a
-/// CredentialLocator, never sees the secret") — the same seam every other plane's egress hop uses.
+/// The plane names the scheme and never holds what is behind it: jev's auth is the gateway's own
+/// bearer credential, returned as a locator the plane never resolves.
 pub(crate) const EGRESS_SCHEME: &str = "decision-egress";
 
 /// The envelope member naming the document type of an outbound body.

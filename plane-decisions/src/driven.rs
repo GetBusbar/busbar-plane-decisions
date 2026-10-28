@@ -1,5 +1,4 @@
-//! This plane's answers to the kernel plane driver (`BUSBAR-1.6.0.md` Part 3, section 12,
-//! "The plane driver"), in this plane's own vocabulary.
+//! This plane's answers to the kernel plane driver, in this plane's own vocabulary.
 //!
 //! The driver serves a unit in five crossings, and this module answers each one:
 //!
@@ -19,10 +18,10 @@
 //! Writing these answers into the host buffers of the plane ABI (`busbar_contract::abi::plane`) is
 //! the plane door's job, one generic adapter for every plane; it is not this plane's.
 //!
-//! MODEL RESOLUTION (THE DESIGN section 2, the decisions bullet; DECISIONS D8b): "a request routes
-//! by its model; one configured model and none named is the default (byte-identical); more than one
-//! and none named is 400; an unknown model is 404. `upstream_model` rewrites only the top-level model
-//! value, by span splice, when it is set and differs; otherwise the body passes through."
+//! Model resolution: a request routes by its model; one configured model and none named is the
+//! default (byte-identical); more than one and none named is 400; an unknown model is 404.
+//! `upstream_model` rewrites only the top-level model value, by span splice, when it is set and
+//! differs; otherwise the body passes through.
 //!
 //! | config | `POST /v1/systemone` |
 //! |---|---|
@@ -33,30 +32,30 @@
 //!
 //! With no model configured the snapshot publishes no claim ([`served_claims`]), so the request
 //! falls through to the kernel's unclaimed-route body,
-//! `{"error":{"code":null,"message":"the requested resource was not found","param":null,"type":"not_found_error"}}`,
-//! byte for byte as before. The top-level `model` ([`codec::PTR_MODEL`]) is the one request member
+//! `{"error":{"code":null,"message":"the requested resource was not found","param":null,"type":"not_found_error"}}`.
+//! The top-level `model` ([`codec::PTR_MODEL`]) is the one request member
 //! this plane reads, and only to route ([`route_model`]) and splice ([`spliced`]).
 //!
-//! THE SECOND DIALECT (THE DESIGN section 2): "NanoJev is the one, dialect `nanojev`: `/api/evaluate`
-//! is its second exact claim; a model's dialect is its override or its provider's protocol; a model
-//! of the wrong dialect gets that dialect's existing unknown-model refusal; it meters the upstream's
-//! own billing unit, counted from the answer already read (`execution.states`; an answer with no
-//! count refuses loudly ...), with no extra egress". Each dialect's claim is published when the
+//! The second dialect, `nanojev`: `/api/evaluate` is its exact claim; a model's dialect is its
+//! override or its provider's protocol; a model of the wrong dialect gets that dialect's existing
+//! unknown-model refusal; it meters the upstream's own billing unit, counted from the answer
+//! already read (`execution.states`; an answer with no count refuses loudly), with no extra
+//! egress. Each dialect's claim is published when the
 //! generation configures a model of that dialect ([`served_claims`]); a request routes among the
 //! models of the dialect its claim is ([`route_model`]), so a model of the other dialect is that
 //! dialect's unknown model (`404`). Its answer is read by its dialect's count
 //! ([`FarEndReading::for_dialect`]): `/execution/states`, required.
 //!
-//! WHAT THIS PLANE DOES NOT CLAIM: `GET /v1/models`. That path keeps its 1.5.5 bytes (the model
-//! list busbar already serves there, which appends this plane's listed models), so
+//! Not claimed: `GET /v1/models`. That path keeps the model list busbar serves there (which
+//! appends this plane's listed models), so
 //! [`tail::CLAIMS`] and [`tail::OP_CLASSES`] carry each dialect's decision call (`systemone`,
 //! `evaluate`) and no models operation, and [`arrive`] answers `GET /v1/models` as unclaimed.
 //!
 //! Money-blind, like the rest of the crate: the plane reports what a successful answer bills, in its
-//! billable classes, and never what it is worth (THE DESIGN section 7, the owner money rulings
-//! 2026-09-28: "bills one `decision` per successful, settled answer from every provider; its card
-//! prices `decision`, `input_tokens` and `output_tokens` (family `decision`, all three required, 0
-//! = free); the hosted provider keeps 1.5.5's `/usage/units` as the decision count").
+//! billable classes, and never what it is worth: it bills one `decision` per successful, settled
+//! answer from every provider, and the rate card prices `decision`, `input_tokens` and
+//! `output_tokens` (family `decision`, all three required, 0 = free); the hosted provider's
+//! `/usage/units` is the decision count.
 
 use busbar_contract::ids::{MeterClassId, OpClassId};
 
@@ -88,12 +87,11 @@ pub mod tail {
     pub const DIALECT_NANOJEV: u32 = 1;
 
     /// The outbound auth style a jev far end is reached under: the operator's credential as a
-    /// bearer (the signed design: "auth = core gateway credential, plane returns a
-    /// CredentialLocator, never sees the secret").
+    /// bearer, returned as a locator the plane never resolves.
     pub const OUTBOUND_STYLE: &str = "bearer";
 
-    /// Each dialect's default outbound auth style, `(dialect index, style)` (the design, "Outbound auth", step 2:
-    /// a provider entry's `auth:`, else this; ARCHITECT Q-L1-AUTH (A), 2026-10-03).
+    /// Each dialect's default outbound auth style, `(dialect index, style)`: a provider entry's
+    /// `auth:` wins, else this.
     pub const DIALECT_AUTH: &[(u32, &str)] = &[
         (DIALECT_JEV, OUTBOUND_STYLE),
         (DIALECT_NANOJEV, OUTBOUND_STYLE),
@@ -117,9 +115,8 @@ pub mod tail {
 
     /// The billable classes, in index order, each with its family: the decision count, the fee
     /// unit (also a class: the tail check holds `fee_units ⊆ billable_classes`), and the far end's
-    /// input and output tokens. THE DESIGN section 7 (owner money rulings 2026-09-28): the card
-    /// "prices `decision`, `input_tokens` and `output_tokens` (family `decision`, all three
-    /// required, 0 = free)".
+    /// input and output tokens. The card prices `decision`, `input_tokens` and `output_tokens`
+    /// (family `decision`, all three required, 0 = free).
     pub const BILLABLE_CLASSES: &[(MeterClassId, &str)] = &[
         (meta::CLASS_DECISION, DECISION_FAMILY),
         (MeterClassId::new(FEE_PER_REQUEST), FEE_FAMILY),
@@ -145,10 +142,9 @@ pub mod tail {
     /// The index of [`CLASS_OUTPUT_TOKENS`] in [`BILLABLE_CLASSES`].
     pub const CLASS_OUTPUT_TOKENS_INDEX: u32 = 3;
 
-    /// THE FEE UNIT: the request fee (`decisions.fees.per_request`), counted `1` on a unit whose
-    /// far end answered a success, so a refused or failed unit owes none (the signed design C-3,
-    /// "billable-success fee gated kernel-side", the tool plane's twin; ARCHITECT Q-L5-FEE (C)). A
-    /// fee unit is no priced class: the rate card never names it.
+    /// The fee unit: the request fee (`decisions.fees.per_request`), counted `1` on a unit whose
+    /// far end answered a success, so a refused or failed unit owes none. A fee unit is no priced
+    /// class: the rate card never names it.
     pub const FEE_PER_REQUEST: &str = busbar_contract::plane::PER_REQUEST;
 
     /// The family of the fee unit's class: a count of 0 or 1.
@@ -193,8 +189,7 @@ pub fn dialect_of(protocol: &str) -> Option<u32> {
         .and_then(|i| u32::try_from(i).ok())
 }
 
-/// Why a claimed request routes over no configured model (THE DESIGN section 2: "more than one and
-/// none named is 400; an unknown model is 404").
+/// Why a claimed request routes over no configured model.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unrouted {
     /// The request names no model and the generation configures several.
@@ -203,10 +198,9 @@ pub enum Unrouted {
     NotAName,
     /// The request names a model the generation does not configure.
     Unknown(String),
-    /// The request's `model` is the empty string: 1.5.5's missing-model refusal (v1.5.5
-    /// `crates/busbar/src/ingress/dispatch.rs:138-152`, a model that is empty is none).
+    /// The request's `model` is the empty string: a model that is empty is none.
     EmptyModel,
-    /// The body is no JSON document 1.5.5 would read: malformed, or nested past 1.5.5's parse depth
+    /// The body is no JSON document busbar reads: malformed, or nested past the parse depth
     /// ([`MAX_PARSE_DEPTH`]).
     Unparsable,
 }
@@ -228,7 +222,7 @@ impl Unrouted {
             Self::Unnamed => "the request names no model, and several decisions models are \
                               configured: name one in `model`"
                 .to_string(),
-            // 1.5.5 read a `model` that is not a string as none (v1.5.5 ingress/dispatch.rs:130-152).
+            // A `model` that is not a string reads as none.
             Self::NotAName => MISSING_MODEL.to_string(),
             Self::Unknown(model) => format!("{UNKNOWN_HEAD}{model}{UNKNOWN_TAIL}"),
             Self::Unparsable => UNPARSABLE.to_string(),
@@ -237,19 +231,17 @@ impl Unrouted {
     }
 }
 
-/// The words 1.5.5 refused a body it could not parse in, at 400 (v1.5.5
-/// `crates/busbar/src/ingress/dispatch.rs:116` and `ingress/mod.rs:650`, kind `invalid_request`).
+/// The words a body that cannot be parsed is refused in, at 400.
 pub const UNPARSABLE: &str = "We could not parse the JSON body of your request.";
 
-/// The words 1.5.5 refused a request with an empty `model` in, at 400 (v1.5.5
-/// `crates/busbar/src/ingress/dispatch.rs:152`).
+/// The words a request with an empty `model` is refused in, at 400.
 pub const MISSING_MODEL: &str = "Missing required parameter: 'model'.";
 
-/// THE PARSE DEPTH 1.5.5 READ A BODY TO (v1.5.5 `crates/busbar/src/json.rs`, `MAX_JSON_DEPTH`):
-/// a body nested deeper is refused before any document is built, as one that does not parse.
+/// The parse depth a body is read to: a body nested deeper is refused before any document is
+/// built, as one that does not parse.
 pub const MAX_PARSE_DEPTH: usize = 128;
 
-/// 1.5.5's depth scan (v1.5.5 `json.rs`, `exceeds_max_depth`): whether `bytes` nests `{`/`[` past
+/// The depth scan: whether `bytes` nests `{`/`[` past
 /// `max`, brackets inside strings (and escaped quotes) not counted.
 fn exceeds_depth(bytes: &[u8], max: usize) -> bool {
     let (mut depth, mut in_string, mut escaped) = (0_usize, false, false);
@@ -386,8 +378,7 @@ fn built(body: &[u8]) -> Option<serde_json::Value> {
     }
 }
 
-/// The unknown-model refusal's words before the echoed name: 1.5.5's (v1.5.5 ingress/mod.rs
-/// `not_found_message`), and predev's decisions refusal, byte for byte.
+/// The unknown-model refusal's words before the echoed name.
 const UNKNOWN_HEAD: &str = "The model '";
 
 /// The unknown-model refusal's words after the echoed name.
@@ -395,8 +386,7 @@ const UNKNOWN_TAIL: &str = "' does not exist or you do not have access to it.";
 
 /// The most bytes of a requested model's name an unknown-model refusal echoes: every byte the
 /// refusal's words may run (`busbar_contract::abi::plane::MAX_REFUSAL_TEXT`, past which the `arrive`
-/// is a FAULT) but the sentence's own. Every name up to it is echoed whole, as 1.5.5 and predev
-/// echoed it; only a name the refusal could not carry is cut, on a character boundary, and marked
+/// is a FAULT) but the sentence's own. Every name up to it is echoed whole; only a name the refusal could not carry is cut, on a character boundary, and marked
 /// cut.
 pub const MAX_ECHOED_MODEL: usize = busbar_contract::abi::plane::MAX_REFUSAL_TEXT as usize
     - UNKNOWN_HEAD.len()
@@ -419,10 +409,9 @@ pub fn echoed(name: &str) -> String {
     format!("{}{CUT_MARK}", &name[..cut])
 }
 
-/// THE TOP-LEVEL KEYS 1.5.5 DECODED while it validated a body (v1.5.5
-/// `crates/busbar/src/proxy/lazy_body.rs:41-52`, `captured_head_keys`): `model`, `stream`,
-/// `stream_options`, `system` and the array-stream shim key. Their values were decoded whole (so a
-/// lone surrogate escape in one refused the body); every other value was only scanned.
+/// The top-level keys decoded while a body is validated: `model`, `stream`, `stream_options`,
+/// `system` and the array-stream shim key. Their values are decoded whole (so a lone surrogate
+/// escape in one refuses the body); every other value is only scanned.
 const HEAD_KEYS: &[&str] = &[
     "__busbar_gemini_json_array",
     "model",
@@ -431,8 +420,7 @@ const HEAD_KEYS: &[&str] = &[
     "system",
 ];
 
-/// THE DEEPEST VALUE OF [`HEAD_KEYS`] 1.5.5 DECODED (sonic-rs 0.5.8 `serde/de.rs`,
-/// `MAX_ALLOWED_DEPTH` and `with_depth_limit`): its deserializer starts with `u8::MAX` (255) levels,
+/// The deepest value of [`HEAD_KEYS`] decoded (sonic-rs 0.5.8 `MAX_ALLOWED_DEPTH`): its deserializer starts with `u8::MAX` (255) levels,
 /// each object or array it builds takes one and the 255th refuses `RecursionLimitExceeded`; the root
 /// object takes the first, so a head value may nest 253 deep. 1.5.5's depth scan ([`exceeds_depth`])
 /// holds a body to 128 first, but a skipped value whose `\u` escape swallows the closing quote
@@ -441,20 +429,18 @@ const HEAD_KEYS: &[&str] = &[
 /// bounded where 1.5.5's was.
 const HEAD_VALUE_DEPTH: usize = 253;
 
-/// THE BODY AS 1.5.5 READ IT AT INGRESS (v1.5.5 `crates/busbar/src/ingress/dispatch.rs:101-116`,
-/// `LazyBody::parse`): at most [`MAX_PARSE_DEPTH`] deep by 1.5.5's scan, UTF-8 throughout, then one
-/// validating parse that builds no document (trailing bytes, a bad number, a bad escape or a
-/// truncated document refuse), decoding the top-level keys, the values of [`HEAD_KEYS`] and a root
-/// scalar (`lazy_body.rs:122-127`, `Head`: `deserialize_any`, so a root number that overflows to
-/// infinity refuses, sonic-number 0.1.2 `FloatMustBeFinite`) and only SKIPPING every other value, as
-/// sonic-rs 0.5.8 skipped it ([`Skip`]): a `\u` escape inside a skipped value is not checked for its
+/// The body as ingress reads it: at most [`MAX_PARSE_DEPTH`] deep by the depth scan, UTF-8
+/// throughout, then one validating parse that builds no document (trailing bytes, a bad number, a
+/// bad escape or a truncated document refuse), decoding the top-level keys, the values of
+/// [`HEAD_KEYS`] and a root scalar (so a root number that overflows to infinity refuses) and only
+/// skipping every other value, as sonic-rs 0.5.8 skips it ([`Skip`]): a `\u` escape inside a skipped value is not checked for its
 /// hex digits, a skipped number is not checked for its range and a skipped value has no depth bound.
-/// Answers the top-level `model`'s value, the last one where it repeats (1.5.5's map insert); `None`
-/// when the body names none or is no object.
+/// Answers the top-level `model`'s value, the last one where it repeats; `None` when the body
+/// names none or is no object.
 ///
 /// # Errors
 ///
-/// [`Unrouted::Unparsable`]: 1.5.5's 400.
+/// [`Unrouted::Unparsable`]: a 400.
 pub fn readable(body: &[u8]) -> Result<Option<serde_json::Value>, Unrouted> {
     if exceeds_depth(body, MAX_PARSE_DEPTH) {
         return Err(Unrouted::Unparsable);
@@ -852,11 +838,10 @@ pub fn named_in<'a>(
     }
 }
 
-/// THE MODEL A CLAIMED REQUEST ROUTES OVER among the `models` its claim's dialect `serves` (the
+/// The model a claimed request routes over among the `models` its claim's dialect `serves` (the
 /// generation's configured names, each with what this plane keeps of it): the one it names, else
 /// the only one of that dialect configured. Answers the configured name and its entry. A model of
-/// another dialect is this dialect's unknown model (THE DESIGN section 2: "a model of the wrong
-/// dialect gets that dialect's existing unknown-model refusal").
+/// another dialect is this dialect's unknown model.
 ///
 /// # Errors
 ///
@@ -915,20 +900,20 @@ pub fn route_read<'m, 'b, V>(
     .map(|(name, entry)| (name, entry, requested))
 }
 
-/// THE `upstream_model` SPLICE: `body` with its top-level `model` value replaced by `upstream`, when
+/// The `upstream_model` splice: `body` with its top-level `model` value replaced by `upstream`, when
 /// the body names a model and it differs from `upstream`; `None` when the body passes through
 /// unchanged. Every byte outside the value's span is kept: member order, whitespace and the rest of
 /// the document are the caller's.
 #[must_use]
 pub fn spliced(body: &[u8], upstream: &str) -> Option<Vec<u8>> {
-    // The body was held to the document 1.5.5 read at `arrive`: it is not judged again here.
+    // The body was held to the document ingress reads at `arrive`: it is not judged again here.
     let span = match busbar_contract::spans::resolve_pointer(body, codec::PTR_MODEL) {
         busbar_contract::spans::Resolved::Found(span) => span,
         busbar_contract::spans::Resolved::Missing => return None,
         busbar_contract::spans::Resolved::Malformed
         | busbar_contract::spans::Resolved::NeedMore => {
-            // The scanner cannot walk the body: the model is set in the document as 1.5.5 read
-            // it, every other member keeping its value.
+            // The scanner cannot walk the body: the model is set in the parsed document, every
+            // other member keeping its value.
             let mut document = parsed(body).ok()?;
             let named = document.get("model")?.as_str()?;
             if named == upstream {
@@ -953,13 +938,12 @@ pub fn spliced(body: &[u8], upstream: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// WHETHER [`spliced`] CAN SET `upstream` IN `body` WHERE IT MUST, as 1.5.5 could: a body naming a
-/// model other than `upstream` is one 1.5.5 rewrote on its hop, which materialized the whole
-/// document; one whose document would not parse (a string its head never decoded but the document
-/// parse refuses) was answered 500 "We received an unexpected internal error. Please try again."
-/// (v1.5.5 `crates/busbar/src/proxy/engine/mod.rs:1499-1520`, `DETAIL_INTERNAL_ERROR` at
-/// `proxy/wire.rs:726`). `arrive` answers it so, never relaying the caller's model unspliced. A body
-/// naming no model, or `upstream` itself, needs no rewrite.
+/// Whether [`spliced`] can set `upstream` in `body` where it must: a body naming a model other
+/// than `upstream` is rewritten on its hop, which materializes the whole document; one whose
+/// document would not parse (a string its head never decoded but the document parse refuses) is
+/// answered 500 "We received an unexpected internal error. Please try again." `arrive` answers it
+/// so, never relaying the caller's model unspliced. A body naming no model, or `upstream` itself,
+/// needs no rewrite.
 #[cfg(test)]
 #[must_use]
 pub fn spliceable(body: &[u8], upstream: &str) -> bool {
@@ -981,9 +965,8 @@ pub fn spliceable_named(body: &[u8], named: Option<&str>, upstream: &str) -> boo
     }
 }
 
-/// Whether the body's whole document parses, as 1.5.5's DOM parse read it (strings decoded, so a
-/// bad escape or a lone surrogate refuses; numbers read by 1.5.5's own reader,
-/// [`crate::sonic_number`]), by a walk that builds no tree ([`Skip::strict`]).
+/// Whether the body's whole document parses, as the DOM parse reads it (strings decoded, so a
+/// bad escape or a lone surrogate refuses; numbers read by [`crate::sonic_number`]), by a walk that builds no tree ([`Skip::strict`]).
 #[must_use]
 pub fn valid(body: &[u8]) -> bool {
     if exceeds_depth(body, MAX_PARSE_DEPTH) || core::str::from_utf8(body).is_err() {
@@ -1054,8 +1037,8 @@ impl<'de> serde::de::Visitor<'de> for ValidVisitor {
     }
 }
 
-/// 1.5.5's words for a request whose document would not parse where it had to be rewritten for its
-/// hop (v1.5.5 `proxy/wire.rs:726`), at 500.
+/// The words for a request whose document would not parse where it had to be rewritten for its
+/// hop, at 500.
 pub const INTERNAL_ERROR: &str = "We received an unexpected internal error. Please try again.";
 
 /// The dialect whose claim `target` names (its path; a query is not the path), where one does.
@@ -1083,7 +1066,7 @@ pub struct Projected<'r> {
     pub chars: usize,
 }
 
-/// PROJECT one request of `dialect` for the hooks: the model it routes over among the `routes` of
+/// Project one request of `dialect` for the hooks: the model it routes over among the `routes` of
 /// that dialect ([`route_model`]; `dialect_of` reads a route's dialect), the dialect's name and the
 /// size of the document. The document itself is the view's one turn and its body, as the caller
 /// sent it (or as a rewrite left it); the plane reads nothing of it for itself beyond its top-level
@@ -1130,7 +1113,7 @@ pub fn chars_of(request: &[u8]) -> usize {
     }
 }
 
-/// The document a request-stage hook's rewrite names (1.5.5's rewrite JSON, `{"messages": [...],
+/// The document a request-stage hook's rewrite names (the rewrite JSON, `{"messages": [...],
 /// "tools": [...]}`, as the kernel hands it): the last message whose `content` is a JSON object,
 /// or a string holding one, or a message with no `role` that is itself an object. `None` when no
 /// message names one.
@@ -1170,17 +1153,15 @@ pub struct ModelRewritten {
 pub enum NotApplied {
     /// The document names another model: REFUSED, the hook's failure (its `on_error`).
     Model(ModelRewritten),
-    /// The rewrite has a document and the body's whole document does not parse (a member 1.5.5's
+    /// The rewrite has a document and the body's whole document does not parse (a member the
     /// head only skipped, carrying a bad escape or a lone surrogate): FAULT, which the kernel always
     /// answers 500 `request rewrite could not be applied`, whatever the hook's `on_error`, the body
-    /// never forwarded. 1.5.5 materialized the document for its rewrite pass and failed closed when
-    /// it could not (`proxy/engine/mod.rs:749-755`).
+    /// never forwarded.
     Fault,
 }
 
-/// THE REWRITE, APPLIED IN THE DIALECT, as 1.5.5 applied one: the rewrite's document
-/// ([`rewrite_document`]) REPLACES the request wholesale (v1.5.5 `RewriteReply`: "the replacement
-/// message body"). A member the document omits is dropped, so a hook redacts by omission; a
+/// A rewrite applied in the dialect: the rewrite's document ([`rewrite_document`]) replaces the
+/// request wholesale. A member the document omits is dropped, so a hook redacts by omission; a
 /// member it states is set to its value, the caller's own bytes kept for a value it leaves as it
 /// was; a member the caller did not send is added after the caller's. The top-level `model` alone
 /// is not the document's: it stays the caller's whether or not the document repeats it, and a
@@ -1188,7 +1169,7 @@ pub enum NotApplied {
 /// provider. `routed` is the model entry the request is routed over.
 ///
 /// `Ok(None)` when the rewrite names no document, the body is not one JSON object, or the document
-/// is the request as it stands: the request goes on byte for byte as it was (1.5.5: a rewrite that
+/// is the request as it stands: the request goes on byte for byte as it was (a rewrite that
 /// cannot be applied leaves the request unmodified). A rewrite WITH a document over a body whose
 /// whole document does not parse is never applied wholesale and never skipped: it is
 /// [`NotApplied::Fault`].
@@ -1214,17 +1195,17 @@ pub fn rewritten_read(
     routed: &str,
 ) -> Result<Option<Vec<u8>>, NotApplied> {
     const MODEL: &str = "model";
-    // The caller's `model`, as `arrive` read it (1.5.5's head).
+    // The caller's `model`, as `arrive` read it.
     // A body the head could not read is no request to rewrite: FAULT, the safer answer.
     let Ok(caller_model) = read else {
         return Err(NotApplied::Fault);
     };
-    // THE BODY'S WHOLE DOCUMENT FIRST, before anything the hook answered is read: 1.5.5 materialized
-    // it for its rewrite pass before any hook ran, and failed closed when it could not. A body whose
-    // document does not parse (an array too) is a FAULT whatever the hook's rewrite says or whether
-    // the rewrite can be read at all (a hook that echoes the bad member back answers a rewrite that
-    // does not read either): never "does not apply", never applied over it, never forwarded.
-    // Read to 1.5.5's depth (the request was held to it at `arrive`), not serde's one short.
+    // The body's whole document comes first, before anything the hook answered is read. A body
+    // whose document does not parse (an array too) is a FAULT whatever the hook's rewrite says or
+    // whether the rewrite can be read at all (a hook that echoes the bad member back answers a
+    // rewrite that does not read either): never "does not apply", never applied over it, never
+    // forwarded. Read to the parse depth (the request was held to it at `arrive`), not serde's one
+    // short.
     let current = match parsed(body) {
         Ok(serde_json::Value::Object(map)) => Some(map),
         Ok(_) => None,
@@ -1389,9 +1370,7 @@ pub struct FarEndRequest {
 
 /// Answer an ATTEMPT piece of a unit of `dialect`: the same request on every attempt, whichever
 /// member the kernel picked, at the dialect's own path. Neither dialect names a provider on the
-/// wire, so the member changes nothing in the request. Named `attempt_request`, not `attempt`, so
-/// it is not a cross-plane re-spelling of llm/a2a's `attempt` (structure-lint plane-dup; ARCHITECT
-/// ruling 2b 2026-10-04).
+/// wire, so the member changes nothing in the request.
 #[must_use]
 pub fn attempt_request(dialect: u32) -> FarEndRequest {
     let target = tail::CLAIMS
@@ -1406,8 +1385,8 @@ pub fn attempt_request(dialect: u32) -> FarEndRequest {
     }
 }
 
-/// Where a count the plane reports comes from (THE DESIGN section 7 keeps the far end's own counts
-/// apart from the plane's floor; both bill).
+/// Where a count the plane reports comes from: the far end's own counts are kept apart from the
+/// plane's floor; both bill.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     /// The far end's answer states it (`UNITS_REPORTED`); the request fee is reported so too, as
@@ -1430,7 +1409,7 @@ pub struct Units {
 }
 
 /// A usage member the far end's success answer carries but that is not a whole count (or a
-/// required count it does not carry): LOCATED, never dropped (finding 395), never a silent 0. The
+/// required count it does not carry): located, never dropped, never a silent 0. The
 /// door bills the plane's floor for it ([`FarEndReading::floored`]) and says so in one log line.
 /// Names the member's pointer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1465,7 +1444,7 @@ enum Slot {
 
 /// Where a dialect's answer states its counts: the top-level member holding them, and the members
 /// under it, `(name, pointer)`, in [`Counts`]' order (decision, input tokens, output tokens).
-/// Usage pointers are dialect data (THE DESIGN section 2).
+/// Usage pointers are dialect data.
 struct Usage {
     parent: &'static [u8],
     counted: &'static [(&'static [u8], &'static str)],
@@ -1503,8 +1482,8 @@ const SCALAR_CAP: usize = 24;
 /// Every piece is relayed to the caller unchanged, as it arrives, and read as it passes: a scan of
 /// the JSON structure that keeps only what the money rule reads (whether `/error` is there and not
 /// `null`, and the dialect's counts: `/usage/*`, or `/execution/states`), in fixed space. No byte of the answer is kept, so an
-/// answer of any size is read in the same few bytes (THE DESIGN section 11.2: "no allocation and no
-/// blocking on the hot path"), and the pieces may split the answer anywhere.
+/// answer of any size is read in the same few bytes, with no allocation and no blocking on the hot
+/// path, and the pieces may split the answer anywhere.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FarEndReading {
     /// The nesting depth: `1` inside the top-level value.
@@ -1708,10 +1687,9 @@ impl FarEndReading {
         status.is_some_and(|s| (200..300).contains(&s)) && self.settled().0 != Some(true)
     }
 
-    /// WHAT THE ANSWER BILLS, read at the last piece (THE DESIGN section 7, the owner money rulings):
-    /// a non-success bills nothing; a success bills one `decision` (the plane's floor,
+    /// What the answer bills, read at the last piece: a non-success bills nothing; a success bills one `decision` (the plane's floor,
     /// [`Source::Floor`]), or the whole count its
-    /// `/usage/units` reports (the hosted provider's count, DECISIONS D9), its `/usage/input_tokens`
+    /// `/usage/units` reports (the hosted provider's count), its `/usage/input_tokens`
     /// and `/usage/output_tokens` where it reports them, and the request fee (`1` of
     /// [`tail::FEE_PER_REQUEST`]: a refused or failed unit owes none).
     ///
@@ -1737,9 +1715,9 @@ impl FarEndReading {
         Ok(Self::billed(whole))
     }
 
-    /// WHAT A SUCCESS WHOSE USAGE COULD NOT BE READ WHOLE BILLS ([`Self::counts`] answered
-    /// [`UnreadableUsage`]; owner ruling 2026-10-27: spend is always attributed, and a unit that
-    /// succeeded is never failed): the plane's floor for an unreadable decision count (one
+    /// What a success whose usage could not be read whole bills ([`Self::counts`] answered
+    /// [`UnreadableUsage`]; spend is always attributed, and a unit that succeeded is never
+    /// failed): the plane's floor for an unreadable decision count (one
     /// decision, [`Source::Floor`]), every token count it does state whole, and the request fee. A
     /// non-success bills nothing.
     #[must_use]
@@ -1806,7 +1784,7 @@ pub fn whole(raw: &[u8]) -> Option<u64> {
 /// [`NEVER_KEPT`](busbar_contract::abi::host::conn::connector::NEVER_KEPT) (`authorization`,
 /// `proxy-authorization`, `cookie`, `x-api-key`, `api-key`, `x-goog-api-key`,
 /// `x-amz-security-token`, ...): the far end is presented the member's credential by the kernel,
-/// never the caller's (CREDENTIAL-LOCKDOWN H7).
+/// never the caller's.
 pub const NOT_RELAYED: &[&str] = &[FIELD_CONTENT_TYPE, "host"];
 
 /// The caller's fields the far end receives, held in one buffer per unit: each field's name
@@ -1845,10 +1823,10 @@ fn relayed(name: &[u8]) -> bool {
         .any(|n| name.eq_ignore_ascii_case(n.as_bytes()))
 }
 
-/// THE CALLER'S FIELDS THE FAR END RECEIVES, in the order the caller sent them, a repeated name
+/// The caller's fields the far end receives, in the order the caller sent them, a repeated name
 /// keeping every value: every field the caller sent but [`NOT_RELAYED`]'s and the credential
-/// carriers' (a same-dialect relay passes every header but the governed set; ARCHITECT DEC-SERVE
-/// Q2, the OWNER's DIALECT-FIDELITY F2). Names are lowercased, as the wire compares them. Kept in one buffer sized once.
+/// carriers' (a same-dialect relay passes every header but the governed set). Names are
+/// lowercased, as the wire compares them. Kept in one buffer sized once.
 #[must_use]
 pub fn relayed_fields<'f, I>(caller: I) -> RelayedFields
 where
