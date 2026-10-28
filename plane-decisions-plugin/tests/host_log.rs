@@ -143,6 +143,8 @@ fn an_unreadable_usage_line_reaches_the_host_log_dropped_in_as_linked() {
         (a.input.head, a.out.head) = (in_head(), out_head());
         (a.input.unit, a.input.method, a.input.target) = (1, text(b"POST"), text(b"/v1/systemone"));
         a.input.body = octets(BODY);
+        let mut estimates = [z::<UnitCount>(); 4];
+        (a.input.units_buf, a.input.units_cap) = (estimates.as_mut_ptr(), estimates.len());
         assert_eq!(p.call(slot::ARRIVE, &mut a).outcome, Outcome::Ready);
 
         piece(&p, 1, FROM_KERNEL, 0, 0, b"", 1);
