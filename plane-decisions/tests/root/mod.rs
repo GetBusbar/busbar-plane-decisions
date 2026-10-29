@@ -73,7 +73,7 @@ mod hooks {
     use busbar_kernel::plane_driver::{EndPost, PlaneMoney};
 
     use super::super::door_tests::{far_end, send, CLAIMED};
-    use super::super::planes_tests::{composed_services, Published, PUBLISHING};
+    use super::super::planes_tests::{composed_services, PUBLISHING};
     use super::super::{compose_planes, door_routes, DoorEgress, HookStage};
     use crate::root::door_steps::{provider_routes, DoorReach, OutboundAuths};
     use crate::root::loader::dispatch::kinds::plane::Plane;
@@ -148,7 +148,6 @@ mod hooks {
 
     /// One served decisions door and what a cell reads of it.
     struct Served {
-        _published: Published,
         router: axum::Router,
         token: String,
         heard: tokio::sync::mpsc::UnboundedReceiver<String>,
@@ -162,7 +161,6 @@ mod hooks {
         hooks: Vec<(&'static str, busbar_kernel::config::HookCfg)>,
         bound: Bound,
     ) -> Served {
-        let published = Published(instance);
         let (port, heard) = far_end().await;
         let judge = crate::root::connector::guard_for(&busbar_kernel::config::Destinations {
             block_private_addresses: false,
@@ -261,6 +259,7 @@ mod hooks {
             crate::root::loader::dispatch::ConnTable::Host(
                 Arc::clone(&connector) as Arc<dyn DeclaredConns>
             ),
+            busbar_kernel::diagnostics::Catalogue::NEUTRAL,
         );
         let reach = DoorReach {
             providers: &providers,
@@ -303,6 +302,9 @@ mod hooks {
             gov: Arc::clone(&gov),
             journal: None,
         };
+        // THE ADMIN TABLE the door is published into, lent to the App built below as the root lends
+        // the boot generation its own (busbar #1834: the table is a value each generation carries).
+        let tables = busbar_kernel::plane_driver::serve::ServeTables::default();
         let mut composed = compose_planes(
             &[(instance.to_string(), plane)],
             &dispatcher,
@@ -315,11 +317,14 @@ mod hooks {
                 journal: Arc::clone(&post) as Arc<dyn busbar_kernel_egress::ports::Journal>,
             }),
             Some(&stage),
+            &tables,
         )
         .expect("the door plane composes, its egress sealed");
         let _ = std::fs::remove_file(&key_file);
         composed.post = Some(Arc::clone(&post));
-        let mut app = busbar_kernel::test_support::TestApp::new().keys_chain();
+        let mut app = busbar_kernel::test_support::TestApp::new()
+            .serve_tables(tables.clone())
+            .keys_chain();
         if matches!(bound, Bound::Section) && !names.is_empty() {
             app.set_container_hooks(PLANE_KEY, Vec::new(), names.clone());
         }
@@ -348,7 +353,6 @@ mod hooks {
         let (router, _admin, _handle) =
             busbar_kernel::build_split_routers_serving(Arc::clone(&app), doors, 1 << 20, 0, false);
         Served {
-            _published: published,
             router,
             token: token.expose(&busbar_kernel::seal::lend()).to_string(),
             heard,
