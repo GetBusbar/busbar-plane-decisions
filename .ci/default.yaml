@@ -240,7 +240,22 @@ env:
     exit $fail
 on:
   move: [pin, linux]
+  # The conformance check (busbar-release template/modernci/conformance.yaml, #451): it reports the
+  # truth (exits as run.sh: red when a suite did not pass) and never blocks: after every landing,
+  # daily and on request; off `move` until the engine honours `blocks: false` (ModernCI #2539).
+  landed: [conformance]
+  schedule:
+    - cron: "30 6 * * *"
+      checks: [conformance]
+  manual: [conformance]
 checks:
+  conformance:
+    priority: low
+    requires: [cc, git, curl, docker, python3-venv]
+    run: |
+      # The check exits as the driver does: red when any suite did not pass (its verdict says why).
+      exec bash testing/conformance/run.sh
+    outputs: [target/conformance/]
   pin:
     # ci / the busbar pin is one commit
     env_from_run: []
