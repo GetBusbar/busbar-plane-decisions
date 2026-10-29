@@ -74,9 +74,13 @@ busbar-contract = { workspace = true }
 # of 128 (`driven::MAX_PARSE_DEPTH`, scanned first); serde's own limit stops one level short of it.
 # `float_roundtrip`: a document the plane builds (a rewrite's) holds each number at the nearest
 # double, as sonic-rs 0.5.8 built it in 1.5.5. Whether a number 1.5.5 decoded was in range at all is
-# not serde's to say: sonic-number 0.1.2 capped an exponent at 1000 and truncated long mantissas, so
-# the plane reads it with its port of that reader (`src/sonic_number`).
+# not serde's to say: sonic-number capped an exponent at 1000 and truncated long mantissas, so the
+# plane reads it with that reader (`sonic-number`, below).
 serde_json = { workspace = true, features = ["unbounded_depth", "float_roundtrip"] }
+# The number reader 1.5.5's ingress decoded with, at the version busbar's lock carries (0.1.3; it
+# reads every number as 0.1.2 did, held to the verdicts of the port it replaced by
+# `tests/number_reader.rs`). Its one dependency is `cfg-if`.
+sonic-number = { workspace = true }
 serde = { workspace = true }
 # The one log line an unreadable usage raises (`busbar_contract::diag_warn!`): the door's call
 # capture carries it to the plugin's host log, compiled in or dropped in.

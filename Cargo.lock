@@ -363,6 +363,7 @@ dependencies = [
  "busbar-contract",
  "serde",
  "serde_json",
+ "sonic-number",
  "tracing",
 ]
 
