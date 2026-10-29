@@ -134,6 +134,55 @@ pub fn open(settings: &str) -> Door {
     open_with(settings, &[("typesafe", "jev")])
 }
 
+/// An `open` over `settings` the door will not open: its outcome, whether it handed back an
+/// instance, and its reason as the host reads it (the lent reason buffer up to `err_len` when that
+/// holds any bytes, else `head.error`).
+pub fn open_refused(settings: &str, providers: &[(&str, &str)]) -> (Outcome, bool, String) {
+    let facts: Vec<ProviderFacts> = providers
+        .iter()
+        .map(|(name, protocol)| ProviderFacts {
+            name: str_of(name.as_bytes()),
+            protocol: str_of(protocol.as_bytes()),
+            error_map: Blob::ABSENT,
+        })
+        .collect();
+    let mut err = [0_u8; 1024];
+    let mut i: PlaneOpenIn = z();
+    i.open = OpenIn {
+        head: head::<PlaneOpenIn>(life::OPEN, Ticket::NONE),
+        host: &TABLES.0,
+        settings: octets(settings.as_bytes()),
+        generation: 1,
+        err_buf: err.as_mut_ptr(),
+        err_cap: err.len(),
+        ..z()
+    };
+    (i.providers, i.providers_len) = (facts.as_ptr(), facts.len());
+    let mut o: PlaneOpenOut = z();
+    o.open = OpenOut {
+        head: out_head::<PlaneOpenOut>(),
+        ..z()
+    };
+    let f = lifecycle().open.expect("the door opens");
+    // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+    #[allow(unused_unsafe)]
+    let ret = unsafe {
+        f(
+            std::ptr::null_mut(),
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
+    let len = o.open.err_len;
+    assert!(len <= err.len(), "the reason fits the buffer the host lent");
+    let reason = if len > 0 {
+        String::from_utf8_lossy(&err[..len]).into_owned()
+    } else {
+        read(o.open.head.error)
+    };
+    (ret.outcome(), !o.open.instance.is_null(), reason)
+}
+
 /// Open the door over `settings`, the host stating each referenced provider's `(name, protocol)`.
 pub fn open_with(settings: &str, providers: &[(&str, &str)]) -> Door {
     let facts: Vec<ProviderFacts> = providers

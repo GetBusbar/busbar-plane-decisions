@@ -47,30 +47,26 @@ use std::collections::BTreeMap;
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_PROVIDER, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, InHead, OutHead, Outcome, Span};
+use busbar_contract::abi::mechanism::call::{AbiStr, Blob, OutHead, Outcome, Span};
 use busbar_contract::abi::mechanism::door::{
     Section, Statement, SECTION_CONSUMED, SECTION_DECLARING,
 };
-use busbar_contract::abi::mechanism::lifecycle::{
-    GenIn, RefreshIn, ReleaseIn, TickIn, TickOut, ValidateIn,
-};
+use busbar_contract::abi::mechanism::lifecycle::GenIn;
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::plane::{
     ArriveIn, ArriveOut, BillableClass, DialectAuth, OnPieceIn, OnPieceOut, OpClass, OutField,
-    PlaneDriveIn, PlaneDriveOut, PlaneOpenIn, PlaneOpenOut, PlaneRefreshOut, PlaneSnapshot,
-    PlaneTail, ProjectIn, ProjectOut, RefusalIn, RefusalOut, ServeIn, ServeOut, UnitCount,
-    ANSWER_LAYOUT, CANCEL_ABORTED, CANCEL_OK_PARTIAL, CLAIM_EXACT, EMIT_DONE, EMIT_TO_FAR_END,
-    FROM_CALLER, FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE, PIECE_HAS_STATUS, PIECE_LAST,
-    PRINCIPAL_REQUIRED, ROUTE_DIRECT, SHAPE_WHOLE, SPAN_ABSENT, UNITS_ESTIMATED, UNITS_FLOOR,
-    UNITS_REPORTED,
+    PlaneOpenIn, PlaneSnapshot, PlaneTail, ProjectIn, ProjectOut, RefusalIn, RefusalOut, ServeIn,
+    ServeOut, UnitCount, ANSWER_LAYOUT, CANCEL_ABORTED, CANCEL_OK_PARTIAL, CLAIM_EXACT, EMIT_DONE,
+    EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE,
+    PIECE_HAS_STATUS, PIECE_LAST, PRINCIPAL_REQUIRED, ROUTE_DIRECT, SHAPE_WHOLE, SPAN_ABSENT,
+    UNITS_ESTIMATED, UNITS_FLOOR, UNITS_REPORTED,
 };
 use busbar_contract::abi::plane::{PlaneCancelIn, PlaneCancelOut};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::life::Refusal;
+use busbar_contract::abi::sdk::plane_life::{Opened, PlaneLife, Published};
 use busbar_contract::abi::sdk::publish::{ClaimSpec, SnapshotSpec};
-use busbar_contract::abi::sdk::{
-    open_failed, Generations, HostBuf, Instance, Keyed, Lent, Out, Safe, SafeSlot,
-};
+use busbar_contract::abi::sdk::{Generations, HostBuf, Instance, Keyed, Lent, Out, Safe, SafeSlot};
 
 use crate::claims;
 use crate::codec::{CONTENT_TYPE_JSON, FIELD_CONTENT_TYPE, FIELD_RETRY_AFTER};
@@ -268,15 +264,8 @@ pub fn read_settings(settings: &[u8]) -> Result<DecisionsSection, String> {
 ///
 /// A blob that is not a map of sections, or the section's first broken rule.
 pub fn read_dealt(settings: &[u8]) -> Result<DecisionsSection, String> {
-    if settings.is_empty() {
-        return Ok(DecisionsSection::default());
-    }
-    let value: serde_json::Value = serde_json::from_slice(settings).map_err(|e| e.to_string())?;
-    let serde_json::Value::Object(mut verbs) = value else {
-        return Err("the dealt settings are not a map of the plane's sections".to_string());
-    };
-    match verbs.remove(tail::SECTION_DECLARING) {
-        None | Some(serde_json::Value::Null) => Ok(DecisionsSection::default()),
+    match busbar_contract::abi::sdk::plane::dealt_section(settings, tail::SECTION_DECLARING)? {
+        None => Ok(DecisionsSection::default()),
         Some(section) => serde_json::from_value(section).map_err(|e| e.to_string()),
     }
 }
@@ -454,28 +443,32 @@ macro_rules! slot {
     };
 }
 
-slot!(
+/// The decisions plane's lifecycle over the SDK's
+/// ([`plane_life`](busbar_contract::abi::sdk::plane_life)): `validate`, `open` and
+/// `refresh` are the plane's reads; `retire` drops a generation's snapshot and its routes (a
+/// generation the host refused is retired too, so the one it kept serving routes arrivals again);
+/// `tick`, `drive`, `release` and `close` are the SDK's defaults (no tick wanted, no unsolicited
+/// output, READY under no lease); `cancel` is the plane's own.
+impl PlaneLife for DecisionsDoor {
+    /// Each generation's routes, kept beside its snapshot.
+    type Held = Routes;
+
+    fn generations(&self) -> &Generations<PlaneSnapshot, Routes> {
+        &self.generations
+    }
+
     /// `validate`: the settings read as the section, or refused in the grammar's words.
-    Validate, ValidateIn, OutHead, |_, input, mut out| {
+    fn validate(settings: &[u8]) -> Result<(), Refusal> {
         // A model's own `protocol` must be a dialect this plane speaks; its provider's is judged
         // by the kernel against the dialects the Statement states.
-        match read_dealt(input.settings().bytes())
+        read_dealt(settings)
             .and_then(|section| spoken_overrides(&section))
-        {
-            Ok(_) => Outcome::Ready,
-            Err(words) => out.fail(Refusal::refused(words)),
-        }
+            .map_err(Refusal::refused)
     }
-);
 
-slot!(
-    /// `open`: the instance, and the first generation's snapshot.
-    Open, PlaneOpenIn, PlaneOpenOut, |instance, input, mut out| {
-        let open = input.open();
-        let section = match read_settings(open.settings().bytes()) {
-            Ok(section) => section,
-            Err(words) => return open_failed(open, &mut out, |o| &o.open.err_len, &words),
-        };
+    /// `open`: the instance, and the first generation's snapshot. FAILED with the reason.
+    fn open(input: &Lent<'_, PlaneOpenIn>) -> Result<Opened<Self>, Refusal> {
+        let section = read_settings(input.open().settings().bytes()).map_err(Refusal::failed)?;
         let protocols: BTreeMap<String, String> = input
             .providers()
             .iter()
@@ -486,75 +479,42 @@ slot!(
                 ))
             })
             .collect();
-        let routed = match routes(&section, &protocols) {
-            Ok(routed) => routed,
-            Err(words) => return open_failed(open, &mut out, |o| &o.open.err_len, &words),
-        };
-        let plane = DecisionsDoor {
-            generations: Generations::new(),
-            units: Keyed::new(),
-            protocols,
-        };
-        let spec = generation_spec(&routed);
-        out.publish_with(|o| &o.snapshot, &plane.generations, open.generation(), &spec, routed);
-        instance.open(plane);
-        Outcome::Ready
+        let routed = routes(&section, &protocols).map_err(Refusal::failed)?;
+        Ok(Opened {
+            plane: DecisionsDoor {
+                generations: Generations::new(),
+                units: Keyed::new(),
+                protocols,
+            },
+            first: Published {
+                spec: generation_spec(&routed),
+                held: routed,
+            },
+        })
     }
-);
 
-slot!(
-    /// `refresh`: the new section judged, and the next generation's snapshot.
-    Refresh, RefreshIn, PlaneRefreshOut, |instance, input, mut out| {
-        let Some(plane) = instance.get() else {
-            return Outcome::Failed;
-        };
-        let section = match read_settings(input.settings().bytes()) {
-            Ok(section) => section,
-            Err(words) => return out.fail(Refusal::refused(words)),
-        };
-        let routed = match routes(&section, &plane.protocols) {
-            Ok(routed) => routed,
-            Err(words) => return out.fail(Refusal::refused(words)),
-        };
-        // The routes ride beside the snapshot: they route arrivals once the host holds this
-        // generation as its newest, and go with it when the host retires it (a reload the host
-        // refuses after this refresh).
-        let spec = generation_spec(&routed);
-        out.publish_with(|o| &o.snapshot, &plane.generations, input.generation(), &spec, routed);
-        Outcome::Ready
+    /// `refresh`: the new section judged, and the next generation's snapshot. The routes ride
+    /// beside the snapshot: they route arrivals once the host holds this generation as its
+    /// newest, and go with it when the host retires it (a reload the host refuses after this
+    /// refresh).
+    fn refresh(&self, settings: &[u8], _: u64) -> Result<Published<Routes>, Refusal> {
+        let section = read_settings(settings).map_err(Refusal::refused)?;
+        let routed = routes(&section, &self.protocols).map_err(Refusal::refused)?;
+        Ok(Published {
+            spec: generation_spec(&routed),
+            held: routed,
+        })
     }
-);
 
-slot!(
-    /// `retire`: the generation's snapshot and its routes are dropped. A generation the host
-    /// refused is retired too, so the one it kept serving routes arrivals again.
-    Retire, GenIn, OutHead, |instance, input, _| {
-        if let Some(plane) = instance.get() {
-            plane.generations.retire(input.generation());
-        }
-        Outcome::Ready
-    }
-);
-
-slot!(
-    /// `tick`: none wanted.
-    Tick, TickIn, TickOut, |_, _, mut out| {
-        out.set(|o| &o.next_tick_ns, 0);
-        Outcome::Ready
-    }
-);
-
-slot!(
-    /// `drive`: no session has unsolicited output.
-    Drive, PlaneDriveIn, PlaneDriveOut, |_, _, _| { Outcome::Ready }
-);
-
-slot!(
     /// `cancel`: the unit the host names is dropped (`PlaneCancelIn::unit`, the key its `arrive`
     /// carried, so a unit no piece reached is found), else the one on the cancelled ticket (a
     /// cancel of an op in flight). Before its far end answered it was aborted (nothing billed);
     /// after, it was cut partway.
-    Cancel, PlaneCancelIn, PlaneCancelOut, |instance, input, mut out| {
+    fn cancel(
+        instance: Instance<'_, Self>,
+        input: Lent<'_, PlaneCancelIn>,
+        mut out: Out<'_, PlaneCancelOut>,
+    ) -> Outcome {
         let (named, ticket) = (input.unit(), input.cancel().ticket());
         let answered = instance.get().is_some_and(|plane| {
             plane.units.with_all(|units| {
@@ -572,21 +532,15 @@ slot!(
         });
         out.set(
             |o| &o.cancel.disposition,
-            if answered { CANCEL_OK_PARTIAL } else { CANCEL_ABORTED },
+            if answered {
+                CANCEL_OK_PARTIAL
+            } else {
+                CANCEL_ABORTED
+            },
         );
         Outcome::Ready
     }
-);
-
-slot!(
-    /// `release`: this plane answers under no lease.
-    Release, ReleaseIn, OutHead, |_, _, _| { Outcome::Ready }
-);
-
-slot!(
-    /// `close`: the SDK drops the instance and every snapshot it still holds.
-    Close, InHead, OutHead, |_, _, _| { Outcome::Ready }
-);
+}
 
 slot!(
     /// `arrive`: a claimed request's op class, principal need, dialect and route (the model it
@@ -1084,11 +1038,7 @@ slot!(
 busbar_contract::plugin_door! {
     ops: busbar_contract::abi::plane::Ops,
     statement: STATEMENT,
-    lifecycle: {
-        validate: Safe<Validate>, open: Safe<Open>, refresh: Safe<Refresh>, retire: Safe<Retire>,
-        tick: Safe<Tick>, drive: Safe<Drive>, cancel: Safe<Cancel>, release: Safe<Release>,
-        close: Safe<Close>,
-    },
+    lifecycle: plane_life(DecisionsDoor),
     kind_ops: {
         arrive: Safe<Arrive>, on_piece: Safe<OnPiece>, refusal: Safe<RefusalSlot>,
         serve: Safe<Serve>, hydrate: Safe<Hydrate>, start: Safe<Start>, project: Safe<Project>,
