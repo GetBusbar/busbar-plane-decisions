@@ -90,4 +90,7 @@ tracing = { workspace = true }
 # The TEST-ONLY seal (#65). `busbar_contract::plugin::TestKernelSeal` is the one blessed
 # fixture implementor of the SEALED `KernelSeal` trait. Dev-only and feature-gated, so it is absent
 # from every release build.
-busbar-contract = { workspace = true, features = ["test-seal", "alloc-counter"] }
+busbar-contract = { workspace = true, features = ["test-seal"] }
+# The counting allocator the allocation gate reads (`tests/door_alloc.rs`,
+# `busbar_test_kit::alloc_counter`).
+busbar-test-kit = { workspace = true }

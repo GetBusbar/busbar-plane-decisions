@@ -11,11 +11,11 @@
 mod door_harness;
 
 use busbar_contract::abi::mechanism::call::Outcome;
-use busbar_contract::alloc_counter::{allocations_of, Counting};
+use busbar_test_kit::alloc_counter::{allocations_of, Counting};
 use door_harness::{open, Bufs, Given};
 
-/// The test binary's allocator: busbar-contract's counting allocator (`alloc-counter`, a
-/// dev-dependency feature), the one every allocation gate of the fleet reads.
+/// The test binary's allocator: the test kit's counting allocator (a dev-dependency), the one
+/// every allocation gate of the fleet reads.
 #[global_allocator]
 static A: Counting = Counting::new();
 
