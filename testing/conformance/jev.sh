@@ -66,15 +66,23 @@ leg judge-selftest python3 -I "$judge" selftest
 leg battery battery
 leg control python3 -I "$judge" control "$out/control"
 leg negative-control python3 -I "$judge" negative "$out/negative"
+leg compose-selftest bash "$here/testing/jev-conformance/compose.sh" --selftest
 
-# The subject: busbar at the pin, its default distribution, this checkout's plane patched in.
+# The subject: busbar at the pin, its default distribution staged with its decisions row pointed at
+# this plane's door (testing/jev-conformance/compose.sh), this checkout's plane patched in.
 # Debug profile, no debug info: the served behaviour is the release's, the build a fraction of it.
 say "== build subject (busbar ${BUSBAR_PIN:-?} dist/default with this plane)"
 bin=""
-if CARGO_PROFILE_DEV_DEBUG=0 cargo build --manifest-path "$BUSBAR_CHECKOUT/dist/default/Cargo.toml" --bin busbar \
+patch="patch.\"https://github.com/GetBusbar/busbar-plane-decisions\".busbar-plane-decisions.path=\"$here/plane-decisions\""
+if ! manifest="$(bash "$here/testing/jev-conformance/compose.sh" "$BUSBAR_CHECKOUT" "$here/plane-decisions" "$out/busbar-staged" 2>"$out/compose.log")"; then
+  cat "$out/compose.log" >&2
+  verdict fail "the subject's composition could not be staged: $(tail -1 "$out/compose.log")"
+  exit 1
+fi
+cat "$out/compose.log" >&2
+if CARGO_PROFILE_DEV_DEBUG=0 cargo build --manifest-path "$manifest" --bin busbar \
       --target-dir "$target" \
-      --config "patch.\"https://github.com/GetBusbar/busbar-plane-decisions\".busbar-plane-decisions.path=\"$here/plane-decisions\"" \
-      >"$out/subject-build.log" 2>&1; then
+      --config "$patch" >"$out/subject-build.log" 2>&1; then
   bin="$target/debug/busbar"
   [ -x "$bin" ] || { say "built binary missing at $bin"; bin=""; }
 fi
@@ -86,9 +94,8 @@ fi
 # The plane busbar links must be this checkout's, not the pin's: the patch is refused silently
 # when it matches nothing, so the build log must show it compiled from here.
 if ! grep -q "busbar-plane-decisions .*($here/plane-decisions)" "$out/subject-build.log"; then
-  if ! (cd "$BUSBAR_CHECKOUT/dist/default" && cargo tree -i busbar-plane-decisions \
-        --config "patch.\"https://github.com/GetBusbar/busbar-plane-decisions\".busbar-plane-decisions.path=\"$here/plane-decisions\"" 2>/dev/null \
-        | head -1 | grep -q "($here/plane-decisions)"); then
+  if ! cargo tree --manifest-path "$manifest" -i busbar-plane-decisions --config "$patch" 2>/dev/null \
+        | head -1 | grep -q "($here/plane-decisions)"; then
     verdict fail "the subject did not link this checkout's plane (the patch matched nothing)"
     exit 1
   fi
@@ -96,6 +103,6 @@ fi
 leg subject python3 -I "$judge" subject "$out/subject" "$bin"
 
 if [ -z "$failed" ]; then
-  verdict pass "all five legs passed (judge selftest, battery, control, negative control, subject)"; exit 0
+  verdict pass "every leg passed (judge and compose selftests, battery, control, negative control, subject)"; exit 0
 fi
 verdict fail "legs failed:$failed (logs in the check output)"; exit 1
