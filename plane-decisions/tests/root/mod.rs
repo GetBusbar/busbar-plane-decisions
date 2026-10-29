@@ -105,7 +105,7 @@ mod hooks {
     fn hook_env() -> busbar_kernel::hooks::HookEnv {
         busbar_kernel::test_support::test_hook_env(
             &["test-hook"],
-            busbar_plugin_loader::sign::HookNeeds {
+            busbar_kernel::test_support::HookNeeds {
                 prompt: busbar_plugin_loader::sign::NeedLevel::Rw,
                 user: busbar_plugin_loader::sign::NeedLevel::Ro,
             },
@@ -169,7 +169,7 @@ mod hooks {
             ..Default::default()
         })
         .expect("the guard");
-        let connector = busbar_core_connector::process::build(
+        let connector = busbar_core_connector::process::build_with_secrets(
             || {
                 crate::root::connector::entries(
                     crate::LINKED_TRANSPORT_DOORS,
@@ -180,6 +180,7 @@ mod hooks {
             &[],
             Arc::new(|_, _| {}),
             busbar_core_connector::pool::PoolPosture::NONE,
+            busbar_kernel::config::secret::resolve_linked_string_at_config,
         )
         .expect("the connector builds");
         let dispatcher = Arc::new(Dispatcher::new(DispatchConfig::default()));
@@ -222,7 +223,7 @@ mod hooks {
         gov.hydrate_budgets(&CostModel::flat(1), 0)
             .expect("hydrate");
         let node = Arc::new(Node::new());
-        let book = crate::root::durability::node_book_over(Box::new(|| CARD.pin()));
+        let book = crate::root::durability::node_book();
         node.bind_book(Arc::clone(&book.durability));
         let post = Arc::new(NodeEndPost::new(Arc::clone(&node)));
         let site = Arc::clone(&post);
@@ -292,7 +293,7 @@ mod hooks {
             host: {
                 let live_app = Arc::clone(&live_app);
                 Arc::new(move || {
-                    busbar_kernel::plane_host::engine_host(
+                    busbar_kernel::plane_driver::engine_host(
                         live_app
                             .get()
                             .expect("the cell's App is built before any unit"),
@@ -300,6 +301,7 @@ mod hooks {
                 })
             },
             gov: Arc::clone(&gov),
+            journal: None,
         };
         let mut composed = compose_planes(
             &[(instance.to_string(), plane)],
