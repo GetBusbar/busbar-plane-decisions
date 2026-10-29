@@ -1007,3 +1007,30 @@ fn a_root_number_out_of_range_is_refused_and_a_skipped_value_has_no_depth_bound(
         "{served:?}"
     );
 }
+
+/// An `open` the door will not open answers FAILED with no instance, its reason in the buffer the
+/// host lent (`err_len`): a section the grammar refuses, in the grammar's words, and a model whose
+/// provider the host stated no protocol for, named with that provider.
+#[test]
+fn an_open_the_door_refuses_fails_with_its_reason() {
+    assert_eq!(
+        door_harness::open_refused(r#"{"modles":{}}"#, &[("typesafe", "jev")]),
+        (
+            Outcome::Failed,
+            false,
+            "unknown field `modles`, expected one of `models`, `hooks`, `upstream_credentials`"
+                .to_string()
+        )
+    );
+    assert_eq!(
+        door_harness::open_refused(r#"{"models":{"m":{"provider":"elsewhere"}}}"#, &[]),
+        (
+            Outcome::Failed,
+            false,
+            "decisions.models.m names provider 'elsewhere', whose protocol the host did not state \
+             when the plane opened, and states no `protocol` of its own; the decisions plane \
+             speaks only: jev, nanojev."
+                .to_string()
+        )
+    );
+}
