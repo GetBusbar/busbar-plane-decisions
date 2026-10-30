@@ -762,15 +762,16 @@ fn far_end(
     out: &mut Out<'_, OnPieceOut>,
 ) -> (Outcome, bool) {
     let given = input;
-    // The far end's trailers (`PIECE_FIELDS`) are no part of its answer: this plane reads no
-    // outcome there, so they are neither relayed nor read, and only end the unit when last.
+    // The far end's trailers (`PIECE_FIELDS`) are no part of its answer's body: they are neither
+    // relayed nor read for counts, and only end the unit when last.
     let trailers = given.flags() & PIECE_FIELDS != 0;
     let bytes = if trailers { &[] } else { input.bytes().bytes() };
     let first = !trailers && given.flags() & PIECE_HAS_STATUS != 0;
     let last = given.flags() & PIECE_LAST != 0;
     if !unit.recall {
         unit.reading.piece(bytes);
-        if first {
+        // A status read off the trailers (a transport that states it at the end) is the answer's.
+        if first || (trailers && given.flags() & PIECE_HAS_STATUS != 0) {
             unit.status = Some(given.status_code());
         }
     }
