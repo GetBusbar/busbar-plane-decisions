@@ -10,7 +10,7 @@
 //! | `on_piece`, ATTEMPT (from the kernel) | [`attempt_request`]: the request bound for the far end, verb and target explicit |
 //! | `on_piece`, from the far end | [`FarEndReading`]: the bytes relayed unchanged, and the units the answer bills |
 //! | `refusal` | [`refusal_body`]: the kernel's status and text, in this dialect's error shape |
-//! | `project` | [`project`]: the hook view of a request; [`rewritten`]: a hook's rewrite applied in the dialect |
+//! | `project` | [`project_read`]: the hook view of a request; [`rewritten_read`]: a hook's rewrite applied in the dialect |
 //!
 //! Every answer is plain data. Nothing here holds a byte across calls: [`FarEndReading`] is a value
 //! the caller owns for the length of one unit, in fixed space, and it is the only accumulating
@@ -34,7 +34,7 @@
 //! falls through to the kernel's unclaimed-route body,
 //! `{"error":{"code":null,"message":"the requested resource was not found","param":null,"type":"not_found_error"}}`.
 //! The top-level `model` ([`codec::PTR_MODEL`]) is the one request member
-//! this plane reads, and only to route ([`route_model`]) and splice ([`spliced`]).
+//! this plane reads, and only to route ([`route_named`]) and splice ([`spliced`]).
 //!
 //! The second dialect, `nanojev`: `/api/evaluate` is its exact claim; a model's dialect is its
 //! override or its provider's protocol; a model of the wrong dialect gets that dialect's existing
@@ -42,7 +42,7 @@
 //! already read (`execution.states`; a success with no count bills the plane's floor and says so in
 //! one `diag_warn` line), with no extra egress. Each dialect's claim is published when the
 //! generation configures a model of that dialect ([`served_claims`]); a request routes among the
-//! models of the dialect its claim is ([`route_model`]), so a model of the other dialect is that
+//! models of the dialect its claim is ([`route_named`]), so a model of the other dialect is that
 //! dialect's unknown model (`404`). Its answer is read by its dialect's count
 //! ([`FarEndReading::for_dialect`]): `/execution/states`, required.
 //!
@@ -816,15 +816,11 @@ pub fn named_in<'a>(
     }
 }
 
-/// The model a claimed request routes over among the `models` its claim's dialect `serves` (the
-/// generation's configured names, each with what this plane keeps of it): the one it names, else
-/// the only one of that dialect configured. Answers the configured name and its entry. A model of
-/// another dialect is this dialect's unknown model.
+/// [`route_named`] without the `model` the body named: the tests' reading.
 ///
 /// # Errors
 ///
-/// [`Unrouted`]: several configured and none named, a `model` that is not a string, or a name none
-/// of the dialect's models has.
+/// As [`route_named`].
 #[cfg(test)]
 pub fn route_model<'m, V>(
     body: &[u8],
@@ -834,12 +830,17 @@ pub fn route_model<'m, V>(
     route_named(body, models, serves).map(|(name, entry, _)| (name, entry))
 }
 
-/// [`route_model`], also answering the `model` the body named (the head's read, once), for a caller
-/// that needs it again ([`spliceable_named`]) without reading the body a second time.
+/// The model a claimed request routes over among the `models` its claim's dialect `serves` (the
+/// generation's configured names, each with what this plane keeps of it): the one it names, else
+/// the only one of that dialect configured. Answers the configured name, its entry and the `model`
+/// the body named (the head's read, once), for a caller that needs it again ([`spliceable_named`])
+/// without reading the body a second time. A model of another dialect is this dialect's unknown
+/// model.
 ///
 /// # Errors
 ///
-/// As [`route_model`].
+/// [`Unrouted`]: several configured and none named, a `model` that is not a string, or a name none
+/// of the dialect's models has.
 #[allow(clippy::type_complexity)]
 pub fn route_named<'m, 'b, V>(
     body: &'b [u8],
@@ -853,7 +854,7 @@ pub fn route_named<'m, 'b, V>(
 ///
 /// # Errors
 ///
-/// As [`route_model`].
+/// As [`route_named`].
 #[allow(clippy::type_complexity)]
 pub fn route_read<'m, 'b, V>(
     read: &Result<Option<serde_json::Value>, Unrouted>,
@@ -916,12 +917,7 @@ pub fn spliced(body: &[u8], upstream: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Whether [`spliced`] can set `upstream` in `body` where it must: a body naming a model other
-/// than `upstream` is rewritten on its hop, which materializes the whole document; one whose
-/// document would not parse (a string its head never decoded but the document parse refuses) is
-/// answered 500 "We received an unexpected internal error. Please try again." `arrive` answers it
-/// so, never relaying the caller's model unspliced. A body naming no model, or `upstream` itself,
-/// needs no rewrite.
+/// [`spliceable_named`] over the `model` the body names, read here: the tests' reading.
 #[cfg(test)]
 #[must_use]
 pub fn spliceable(body: &[u8], upstream: &str) -> bool {
@@ -933,8 +929,15 @@ pub fn spliceable(body: &[u8], upstream: &str) -> bool {
     }
 }
 
-/// [`spliceable`] for a caller that already holds the `model` the body named (the head's read, as
-/// [`route_named`] answers it): the document is only VALIDATED ([`valid`]), never built.
+/// Whether [`spliced`] can set `upstream` in `body` where it must: a body naming a model other
+/// than `upstream` is rewritten on its hop, which materializes the whole document; one whose
+/// document would not parse (a string its head never decoded but the document parse refuses) is
+/// answered 500 "We received an unexpected internal error. Please try again." `arrive` answers it
+/// so, never relaying the caller's model unspliced. A body naming no model, or `upstream` itself,
+/// needs no rewrite.
+///
+/// `named` is the `model` the body named (the head's read, as [`route_named`] answers it): the
+/// document is only VALIDATED ([`valid`]), never built.
 #[must_use]
 pub fn spliceable_named(body: &[u8], named: Option<&str>, upstream: &str) -> bool {
     match named {
@@ -1034,8 +1037,8 @@ pub fn dialect_at(target: &str) -> Option<u32> {
 /// The role the one turn of a projected request is shown under: the caller's.
 pub const PROJECTED_ROLE: &str = "user";
 
-/// What a hook is shown of one request ([`project`]): the entry it routes over, its dialect's name
-/// and the characters of the request document, which is the view's one turn and its body.
+/// What a hook is shown of one request ([`project_read`]): the entry it routes over, its dialect's
+/// name and the characters of the request document, which is the view's one turn and its body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Projected<'r> {
     /// The configured model the request routes over; empty when it routes over none.
@@ -1046,11 +1049,7 @@ pub struct Projected<'r> {
     pub chars: usize,
 }
 
-/// Project one request of `dialect` for the hooks: the model it routes over among the `routes` of
-/// that dialect ([`route_model`]; `dialect_of` reads a route's dialect), the dialect's name and the
-/// size of the document. The document itself is the view's one turn and its body, as the caller
-/// sent it (or as a rewrite left it); the plane reads nothing of it for itself beyond its top-level
-/// `model`, and mints no fact from it.
+/// [`project_read`] over a read of the request made here: the tests' reading.
 #[cfg(test)]
 #[must_use]
 pub fn project_hook<'r, V>(
@@ -1062,7 +1061,13 @@ pub fn project_hook<'r, V>(
     project_read(request, &readable(request), dialect, routes, dialect_of)
 }
 
-/// [`project`] over a read of the request already made ([`readable`], once).
+/// Project one request of `dialect` for the hooks: the model it routes over among the `routes` of
+/// that dialect ([`route_read`]; `dialect_of` reads a route's dialect), the dialect's name and the
+/// size of the document. The document itself is the view's one turn and its body, as the caller
+/// sent it (or as a rewrite left it); the plane reads nothing of it for itself beyond its top-level
+/// `model`, and mints no fact from it.
+///
+/// `read` is the head's read of the request ([`readable`], once).
 #[must_use]
 pub fn project_read<'r, V>(
     request: &[u8],
@@ -1140,13 +1145,24 @@ pub enum NotApplied {
     Fault,
 }
 
+/// [`rewritten_read`] over a read of the body made here: the tests' reading.
+///
+/// # Errors
+///
+/// As [`rewritten_read`].
+#[cfg(test)]
+pub fn rewritten(body: &[u8], rewrite: &[u8], routed: &str) -> Result<Option<Vec<u8>>, NotApplied> {
+    rewritten_read(body, &readable(body), rewrite, routed)
+}
+
 /// A rewrite applied in the dialect: the rewrite's document ([`rewrite_document`]) replaces the
 /// request wholesale. A member the document omits is dropped, so a hook redacts by omission; a
 /// member it states is set to its value, the caller's own bytes kept for a value it leaves as it
 /// was; a member the caller did not send is added after the caller's. The top-level `model` alone
 /// is not the document's: it stays the caller's whether or not the document repeats it, and a
 /// document naming another model is refused ([`NotApplied::Model`]), never a silent switch of
-/// provider. `routed` is the model entry the request is routed over.
+/// provider. `routed` is the model entry the request is routed over, and `read` the head's read of
+/// the body ([`readable`], once).
 ///
 /// `Ok(None)` when the rewrite names no document, the body is not one JSON object, or the document
 /// is the request as it stands: the request goes on byte for byte as it was (a rewrite that
@@ -1158,16 +1174,6 @@ pub enum NotApplied {
 ///
 /// [`NotApplied::Model`]: the document names a model other than `routed`; [`NotApplied::Fault`]:
 /// the body's document does not parse, or the head could not read the body at all.
-#[cfg(test)]
-pub fn rewritten(body: &[u8], rewrite: &[u8], routed: &str) -> Result<Option<Vec<u8>>, NotApplied> {
-    rewritten_read(body, &readable(body), rewrite, routed)
-}
-
-/// [`rewritten`] over a read of the body already made ([`readable`], once).
-///
-/// # Errors
-///
-/// As [`rewritten`].
 pub fn rewritten_read(
     body: &[u8],
     read: &Result<Option<serde_json::Value>, Unrouted>,
@@ -1216,7 +1222,7 @@ pub fn rewritten_read(
     Ok(Some(replaced(body, &current, &document)))
 }
 
-/// [`rewritten`]'s request: the caller's members `document` keeps (the `model` always), in the
+/// [`rewritten_read`]'s request: the caller's members `document` keeps (the `model` always), in the
 /// caller's order, each the caller's own bytes where its value is unchanged, then the members the
 /// caller did not send. A rewrite the hook answered ALWAYS applies: when a member's bytes cannot be
 /// read back (the span scanner refuses a body nested past its depth, which serde reads), the

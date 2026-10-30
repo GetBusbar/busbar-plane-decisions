@@ -18,7 +18,7 @@
 //!   binds no audience (the operation is served on the plain data plane to a keyed caller).
 //!   `retire` drops a generation.
 //! * `arrive`: [`crate::driven::arrive`], routed over the model the request names
-//!   ([`crate::driven::route_model`]); an unclaimed request is refused at 404, and one that routes
+//!   ([`crate::driven::route_named`]); an unclaimed request is refused at 404, and one that routes
 //!   over no model at its [`crate::driven::Unrouted`] status.
 //! * `on_piece`: the ATTEMPT's request head ([`crate::driven::attempt_request`]), the caller's body to the
 //!   far end unchanged ([`crate::driven::caller_piece`]) but for the routed model's `upstream_model`
@@ -27,10 +27,10 @@
 //! * `refusal`: [`crate::driven::refusal_body`]; the refused unit's state is dropped.
 //! * `cancel`: the unit the host names (`PlaneCancelIn::unit`), else the one on the cancelled
 //!   ticket, is dropped, `CANCEL_ABORTED` before its far end answered and `CANCEL_OK_PARTIAL` after.
-//! * `project`: the hook view of a unit's request ([`crate::driven::project_hook`]): the entry it routes
+//! * `project`: the hook view of a unit's request ([`crate::driven::project_read`]): the entry it routes
 //!   over as the view's pool, its dialect, the request document as the one turn a content-granted
 //!   hook reads, and a request-stage hook's rewrite applied in the dialect
-//!   ([`crate::driven::rewritten`]) and answered as the body the kernel keeps.
+//!   ([`crate::driven::rewritten_read`]) and answered as the body the kernel keeps.
 //! * `serve` is REFUSED: the plane publishes no admin route. `hydrate`, `start`, `tick`, `drive`,
 //!   `release` and `close` hold nothing.
 //!
@@ -107,7 +107,7 @@ const BUSY_WORDS: &str =
 
 /// [`ArriveOut::refusal`]: the request names a model other than its route's `upstream_model` and
 /// its document does not parse, so the far end cannot be sent the routed model
-/// ([`driven::spliceable`]); refused at [`STATUS_INTERNAL`], about the entry it routed over.
+/// ([`driven::spliceable_named`]); refused at [`STATUS_INTERNAL`], about the entry it routed over.
 pub const UNSPLICEABLE: u32 = 4;
 
 /// The status an [`UNSPLICEABLE`] arrival is refused at.
@@ -949,8 +949,8 @@ const NO_SPAN: Span = Span {
 };
 
 slot!(
-    /// `project`: the hook view of a unit's request ([`driven::project_hook`]). A request-stage
-    /// hook's rewrite is applied first, in the request's dialect ([`driven::rewritten`],
+    /// `project`: the hook view of a unit's request ([`driven::project_read`]). A request-stage
+    /// hook's rewrite is applied first, in the request's dialect ([`driven::rewritten_read`],
     /// wholesale; a rewrite naming another model is REFUSED, the hook's failure; a rewrite with a
     /// document over a body whose whole document does not parse is FAULT, the kernel's shared
     /// 500): the rewritten request is answered in `rewritten` (the body the kernel keeps and
