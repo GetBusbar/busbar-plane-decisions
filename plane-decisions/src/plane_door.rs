@@ -405,6 +405,9 @@ struct Unit {
     /// The routed model's `upstream_model`, kept from `arrive`: the caller's top-level `model` is
     /// spliced to it on the way to the far end where the two differ ([`driven::spliced`]).
     upstream: Option<String>,
+    /// The routes of the generation `arrive` routed the unit over: `project` sees the unit as it
+    /// was routed, whatever generation the host holds by then.
+    routes: Option<std::sync::Arc<Routes>>,
 }
 
 /// Every model one generation routes over, directly, by name, each with its dialect and
@@ -554,7 +557,8 @@ slot!(
         out.set(|o| &o.principal_need, PRINCIPAL_REQUIRED);
         if let Some(plane) = instance.get() {
             let body = input.body().bytes();
-            let routes: &Routes = &plane.routes();
+            let generation = plane.routes();
+            let routes: &Routes = &generation;
             let routed = driven::route_named(body, routes, |r| r.dialect == arrived.dialect);
             let (upstream, named) = match routed {
                 Ok((model, routed, requested)) => {
@@ -590,6 +594,7 @@ slot!(
                 };
                 kept.caller = caller;
                 kept.upstream = upstream;
+                kept.routes = Some(std::sync::Arc::clone(&generation));
                 true
             });
             if !kept {
@@ -725,6 +730,7 @@ fn attempt_piece(
         attempt: true,
         caller: std::mem::take(&mut unit.caller),
         upstream: unit.upstream.take(),
+        routes: unit.routes.take(),
         ticket: unit.ticket,
         owed: std::mem::take(&mut unit.owed),
         reading: FarEndReading::for_dialect(dialect),
@@ -949,7 +955,8 @@ slot!(
     /// 500): the rewritten request is answered in `rewritten` (the body the kernel keeps and
     /// re-pushes on every attempt from then on) and is the request projected; a rewrite that does
     /// not apply leaves the request as it was. The view's
-    /// pool is the entry the request routes over, its dialect the claim's, and its one turn the
+    /// pool is the entry the request routes over (in the generation `arrive` routed the unit in),
+    /// its dialect the claim's, and its one turn the
     /// request document, shown only to a hook granted the prompt. The plane reads nothing of the content
     /// for itself: the view carries the caller's bytes, and no fact is minted from them.
     Project, ProjectIn, ProjectOut, |instance, input, mut out| {
@@ -963,7 +970,13 @@ slot!(
         };
         let body = input.body().bytes();
         let rewrite = input.rewrite().bytes();
-        let routes: &Routes = &plane.routes();
+        // The unit is seen over the generation `arrive` routed it in; one it keeps no state for,
+        // over the newest the host holds.
+        let generation = plane
+            .units
+            .with_all(|units| units.get(&input.unit()).and_then(|u| u.routes.clone()))
+            .unwrap_or_else(|| plane.routes());
+        let routes: &Routes = &generation;
         // The document is checked before any rewrite hook runs, failing closed on a body that
         // would not parse: FAULT, which busbar answers 500 `request rewrite could not be
         // applied`, the body never forwarded and no hook invoked.
