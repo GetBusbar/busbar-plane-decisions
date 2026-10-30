@@ -667,11 +667,21 @@ fn pay(unit: &mut Unit, input: Lent<'_, OnPieceIn>, out: &mut Out<'_, OnPieceOut
         },
     );
     if !more {
-        // Paid: the debt's buffer goes now, not when the far end's last piece ends the unit.
-        unit.owed = Vec::new();
+        release(unit);
         unit.at = 0;
     }
     done
+}
+
+/// A paid debt's buffer: one bound for the far end (the caller's body) goes now, not when the far
+/// end's last piece ends the unit, since nothing more is owed that way while the unit waits; one
+/// of the far end's answer is kept, emptied, for its next piece.
+fn release(unit: &mut Unit) {
+    if unit.owed_flags & EMIT_TO_FAR_END != 0 {
+        unit.owed = Vec::new();
+    } else {
+        unit.owed.clear();
+    }
 }
 
 /// Owe `bytes` under `flags`: write what fits straight from `bytes`, and keep only what does not
@@ -691,8 +701,7 @@ fn owe(
         unit.owed.clear();
         unit.owed.extend_from_slice(&bytes[n..]);
     } else {
-        // Nothing owed: no buffer is held for it.
-        unit.owed = Vec::new();
+        release(unit);
     }
     out.set(|o| &o.emitted, n as u64);
     out.set(|o| &o.more, u32::from(more));
