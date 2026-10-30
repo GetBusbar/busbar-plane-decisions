@@ -48,32 +48,22 @@ fn is_comment(line: &str) -> bool {
     t.starts_with("//") || t.starts_with('*') || t.starts_with("/*")
 }
 
-/// Every OTHER plane crate's module spelling (`busbar_plane_<name>`), read live off the `crates/`
-/// directory rather than spelled by name — the forbidden list below forbids by SHAPE
-/// (`busbar-plane-*`, minus this crate itself) instead of a plane naming its siblings, which is the
-/// broker-law violation DECISION #8 forbids in the first place. It also stays true automatically if
-/// the plane roster (#48) ever changes.
-fn sibling_plane_modules() -> Vec<String> {
-    let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("this crate sits under crates/")
-        .to_path_buf();
-    let this = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .file_name()
-        .and_then(|n| n.to_str())
-        .expect("this crate has a directory name")
-        .to_string();
-    let mut out: Vec<String> = std::fs::read_dir(&crates_dir)
-        .expect("crates/ is readable")
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| e.file_name().to_str().map(str::to_string))
-        .filter(|name| name.starts_with("busbar-plane-") && *name != this)
-        .map(|name| name.replace('-', "_"))
-        .collect();
-    out.sort();
-    out
-}
+/// The crates this plane may never name in its source, by module spelling or its prefix: every
+/// sibling plane (a plane names only itself) and every crate of the other plugin kinds. A fixed
+/// list, not a directory listing: this repository holds no sibling, so a list read off the tree
+/// would be empty and the gate could never fail.
+const SIBLING_MODULES: &[&str] = &[
+    "busbar_plane_llm",
+    "busbar_plane_mcp",
+    "busbar_plane_a2a",
+    "busbar_plane_streaming",
+    "busbar_transport_",
+    "busbar_auth_",
+    "busbar_secret_",
+    "busbar_store_",
+    "busbar_export_",
+    "busbar_hook_",
+];
 
 /// The plane keeps no state of its own between calls.
 #[test]
@@ -189,7 +179,7 @@ fn named_offenders(text: &str) -> Vec<(usize, String)> {
         "busbar_core".to_string(),
         "busbar_admin".to_string(),
     ];
-    forbidden.extend(sibling_plane_modules());
+    forbidden.extend(SIBLING_MODULES.iter().map(|s| (*s).to_string()));
     let mut offenders = Vec::new();
     for (n, line) in text.lines().enumerate() {
         if is_comment(line) {

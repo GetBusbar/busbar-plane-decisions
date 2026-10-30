@@ -2,9 +2,9 @@
 //!
 //! Mirrors `busbar-plane-a2a`/`busbar-plane-mcp`'s own `invariance.rs`. The manifest names exactly
 //! one busbar crate (the contract, which holds `ModelCfg` and `UpstreamCreds`) plus the serializer.
-//! The forbidden list is `busbar-core`, `busbar-caps`, `busbar-kernel`, `busbar-unit-*`, and the
-//! sibling PLANE crates (naming another plane would be a plane reading another plane's private
-//! surface, never legitimate for any plane). `the_manifest_names_only_what_this_plane_may_name`
+//! The forbidden list is `busbar-core`, `busbar-caps`, `busbar-kernel`, `busbar-unit-*`, the
+//! sibling PLANE crates and every other plugin kind's crates ([`SIBLINGS`]: naming another plugin
+//! would be a plane reading another plugin's private surface, never legitimate for any plane). `the_manifest_names_only_what_this_plane_may_name`
 //! must never be relaxed to keep it green; if `busbar-kernel` returns to the manifest, that is the
 //! line that is supposed to fail.
 
@@ -19,30 +19,22 @@ fn manifest() -> String {
         .expect("the manifest is readable")
 }
 
-/// Every OTHER plane crate directory under `crates/`, read live off the tree rather than spelled by
-/// name — the forbidden list below forbids by SHAPE (`busbar-plane-*`, minus this crate itself)
-/// instead of a plane naming its siblings, which would be a broker-law violation. It also stays
-/// true automatically if the plane roster ever changes.
-fn sibling_plane_dirs() -> Vec<String> {
-    let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("this crate sits under crates/")
-        .to_path_buf();
-    let this = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .file_name()
-        .and_then(|n| n.to_str())
-        .expect("this crate has a directory name")
-        .to_string();
-    let mut out: Vec<String> = std::fs::read_dir(&crates_dir)
-        .expect("crates/ is readable")
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| e.file_name().to_str().map(str::to_string))
-        .filter(|name| name.starts_with("busbar-plane-") && *name != this)
-        .collect();
-    out.sort();
-    out
-}
+/// The crates this plane may never name, by name or by prefix: every sibling plane (a plane names
+/// only itself) and every crate of the other plugin kinds. A fixed list, not a directory listing:
+/// this repository holds no sibling, so a list read off the tree would be empty and the gate could
+/// never fail.
+const SIBLINGS: &[&str] = &[
+    "busbar-plane-llm",
+    "busbar-plane-mcp",
+    "busbar-plane-a2a",
+    "busbar-plane-streaming",
+    "busbar-transport-",
+    "busbar-auth-",
+    "busbar-secret-",
+    "busbar-store-",
+    "busbar-export-",
+    "busbar-hook-",
+];
 
 fn walk(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
     for entry in std::fs::read_dir(dir)
@@ -151,7 +143,7 @@ fn manifest_offenders(manifest: &str) -> Vec<String> {
         "busbar-unit-".to_string(),
         "busbar-admin".to_string(),
     ];
-    forbidden.extend(sibling_plane_dirs());
+    forbidden.extend(SIBLINGS.iter().map(|s| (*s).to_string()));
     let mut offenders = Vec::new();
     for line in deps.lines() {
         let line = line.trim();
