@@ -241,36 +241,6 @@ pub const MISSING_MODEL: &str = "Missing required parameter: 'model'.";
 /// built, as one that does not parse.
 pub const MAX_PARSE_DEPTH: usize = 128;
 
-/// The depth scan: whether `bytes` nests `{`/`[` past
-/// `max`, brackets inside strings (and escaped quotes) not counted.
-fn exceeds_depth(bytes: &[u8], max: usize) -> bool {
-    let (mut depth, mut in_string, mut escaped) = (0_usize, false, false);
-    for &b in bytes {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_string = true,
-            b'{' | b'[' => {
-                depth += 1;
-                if depth > max {
-                    return true;
-                }
-            }
-            b'}' | b']' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    false
-}
-
 /// The body as 1.5.5 read it, for a body the span scanner cannot walk: the whole document, or
 /// [`Unrouted::Unparsable`] for one 1.5.5 refused (malformed, or past [`MAX_PARSE_DEPTH`]).
 ///
@@ -422,7 +392,7 @@ const HEAD_KEYS: &[&str] = &[
 
 /// The deepest value of [`HEAD_KEYS`] decoded (sonic-rs 0.5.8 `MAX_ALLOWED_DEPTH`): its deserializer starts with `u8::MAX` (255) levels,
 /// each object or array it builds takes one and the 255th refuses `RecursionLimitExceeded`; the root
-/// object takes the first, so a head value may nest 253 deep. 1.5.5's depth scan ([`exceeds_depth`])
+/// object takes the first, so a head value may nest 253 deep. 1.5.5's depth scan ([`busbar_contract::spans::exceeds_max_depth`])
 /// holds a body to 128 first, but a skipped value whose `\u` escape swallows the closing quote
 /// ([`Skip::skip_escape`]) leaves the scan reading the rest of the body as a string, so a head value
 /// after it reaches its decode however deep it nests. Held to this, the decode's recursion is
@@ -442,7 +412,7 @@ const HEAD_VALUE_DEPTH: usize = 253;
 ///
 /// [`Unrouted::Unparsable`]: a 400.
 pub fn readable(body: &[u8]) -> Result<Option<serde_json::Value>, Unrouted> {
-    if exceeds_depth(body, MAX_PARSE_DEPTH) {
+    if busbar_contract::spans::exceeds_max_depth(body, MAX_PARSE_DEPTH) {
         return Err(Unrouted::Unparsable);
     }
     core::str::from_utf8(body).map_err(|_| Unrouted::Unparsable)?;
@@ -977,7 +947,9 @@ pub fn spliceable_named(body: &[u8], named: Option<&str>, upstream: &str) -> boo
 /// bad escape or a lone surrogate refuses; numbers read by [`number`]), by a walk that builds no tree ([`Skip::strict`]).
 #[must_use]
 pub fn valid(body: &[u8]) -> bool {
-    if exceeds_depth(body, MAX_PARSE_DEPTH) || core::str::from_utf8(body).is_err() {
+    if busbar_contract::spans::exceeds_max_depth(body, MAX_PARSE_DEPTH)
+        || core::str::from_utf8(body).is_err()
+    {
         return false;
     }
     decodes(body)
