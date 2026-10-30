@@ -1491,6 +1491,10 @@ pub struct FarEndReading {
     members: [Member; 3],
     /// The dialect the answer is in ([`USAGE`]'s index).
     dialect: u32,
+    /// The answer's first significant byte was read, and it opened an object: an answer whose
+    /// top-level value is no object states no usage a reading can find.
+    rooted: bool,
+    root_object: bool,
 }
 
 impl FarEndReading {
@@ -1622,6 +1626,10 @@ impl FarEndReading {
             }
             self.end_scalar();
         }
+        if !self.rooted && !matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
+            self.rooted = true;
+            self.root_object = b == b'{';
+        }
         match b {
             b' ' | b'\t' | b'\n' | b'\r' | b':' => {}
             b'"' => {
@@ -1676,13 +1684,17 @@ impl FarEndReading {
     /// # Errors
     ///
     /// [`UnreadableUsage`]: a success whose usage member is present but is not a whole count a
-    /// signed 64-bit count holds (negative, fractional, a string, `null`, past `i64::MAX`).
+    /// signed 64-bit count holds (negative, fractional, a string, `null`, past `i64::MAX`), and a
+    /// success whose answer is no JSON object at all (empty, an HTML page, an array).
     pub fn counts(&self, status: Option<u32>) -> Result<Counts, UnreadableUsage> {
         if !self.success(status) {
             return Ok([None; 4]);
         }
         let (_, members) = self.settled();
         let usage = self.usage();
+        if !self.root_object {
+            return Err(UnreadableUsage(usage.counted[0].1));
+        }
         let mut whole = [None; 3];
         for (i, (_, pointer)) in usage.counted.iter().enumerate() {
             whole[i] = match members[i] {

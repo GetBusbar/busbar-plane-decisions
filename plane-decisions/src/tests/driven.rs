@@ -450,6 +450,10 @@ fn by_pointer(status: u32, body: &[u8]) -> Result<Vec<(u32, u64)>, UnreadableUsa
     if !ok {
         return Ok(vec![]);
     }
+    // A success that is no JSON object states no usage at all: unreadable, never silent.
+    if !body.trim_ascii_start().starts_with(b"{") {
+        return Err(UnreadableUsage(crate::codec::PTR_USAGE_UNITS));
+    }
     let count = |p: &'static str| match read_raw(body, p) {
         None => Ok(None),
         Some(raw) => whole(raw).map(Some).ok_or(UnreadableUsage(p)),
