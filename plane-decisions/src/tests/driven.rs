@@ -516,18 +516,18 @@ fn the_reading_is_the_pointers_reading_wherever_the_pieces_split() {
     }
 }
 
-/// An answer of any size is read in the reading's own fixed space.
+/// An answer of any size is read whole, its count found past a megabyte of other bytes. That the
+/// reading keeps nothing of it (no allocation, however long the answer runs) is held by
+/// `tests/door_alloc.rs`, under a counting allocator.
 #[test]
 fn a_large_answer_is_read_without_keeping_it() {
     let mut reading = FarEndReading::default();
-    let before = std::mem::size_of_val(&reading);
     reading.piece(br#"{"answers":{"blob":""#);
     let filler = [b'x'; 4096];
     for _ in 0..256 {
         reading.piece(&filler);
     }
     reading.piece(br#""},"usage":{"units":4}}"#);
-    assert_eq!(std::mem::size_of_val(&reading), before);
     assert_eq!(
         reading.counts(Some(200)).map(|c| c[0].map(|u| u.amount)),
         Ok(Some(4))
