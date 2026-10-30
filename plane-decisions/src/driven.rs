@@ -1456,6 +1456,9 @@ const USAGE: [Usage; 2] = [
 
 /// The longest member name compared ("output_tokens"), with room.
 const KEY_CAP: usize = 16;
+/// What a member name's escape that names no ASCII character decodes to in the name read: a byte
+/// no UTF-8 text holds, so no name compared matches it.
+const NOT_ASCII: u8 = 0xFF;
 /// The longest scalar a whole count is spelled in (`u64::MAX` is 20 digits), with room.
 const SCALAR_CAP: usize = 24;
 
@@ -1478,9 +1481,13 @@ pub struct FarEndReading {
     in_str: bool,
     str_key: bool,
     escaped: bool,
-    /// The member name being read (cut at [`KEY_CAP`]: a longer one is none compared).
+    /// The member name being read, its escapes decoded (cut at [`KEY_CAP`]: a longer one is none
+    /// compared).
     key: [u8; KEY_CAP],
     key_len: usize,
+    /// In a member name: the hex digits of a `\u` escape still to read, and their value so far.
+    hex_left: u8,
+    hex: u32,
     /// The member a value at depth 1, and at depth 2, belongs to.
     at: [Slot; 3],
     /// The scalar being read for `scalar_of` (cut at [`SCALAR_CAP`]: a longer one is no count).
@@ -1593,25 +1600,65 @@ impl FarEndReading {
         }
     }
 
+    /// One decoded byte of the member name being read.
+    fn key_byte(&mut self, b: u8) {
+        if self.key_len < KEY_CAP {
+            self.key[self.key_len] = b;
+        }
+        self.key_len = self.key_len.saturating_add(1);
+    }
+
+    /// One byte of a member name, read as JSON reads it (RFC 8259 section 7): an escape decoded,
+    /// `\u0075` and `u` being one name. An escape naming no ASCII character (or one cut short) is
+    /// [`NOT_ASCII`], which no name compared holds.
+    fn key_char(&mut self, b: u8, escaped: bool) {
+        if escaped {
+            match b {
+                b'u' => (self.hex_left, self.hex) = (4, 0),
+                b'b' => self.key_byte(0x08),
+                b'f' => self.key_byte(0x0c),
+                b'n' => self.key_byte(b'\n'),
+                b'r' => self.key_byte(b'\r'),
+                b't' => self.key_byte(b'\t'),
+                other => self.key_byte(other),
+            }
+        } else if self.hex_left > 0 {
+            let digit = char::from(b).to_digit(16).unwrap_or(0x1_0000);
+            self.hex = self.hex.saturating_mul(16).saturating_add(digit);
+            self.hex_left -= 1;
+            if self.hex_left == 0 {
+                let decoded = u8::try_from(self.hex).ok().filter(u8::is_ascii);
+                self.key_byte(decoded.unwrap_or(NOT_ASCII));
+            }
+        } else {
+            self.key_byte(b);
+        }
+    }
+
     /// One byte of the answer.
     fn byte(&mut self, b: u8) {
         if self.in_str {
             if self.escaped {
                 self.escaped = false;
-            } else if b == b'"' {
+                if self.str_key {
+                    self.key_char(b, true);
+                }
+                return;
+            }
+            if self.str_key && self.hex_left > 0 && matches!(b, b'"' | b'\\') {
+                // A `\u` escape cut short names no character.
+                self.hex_left = 0;
+                self.key_byte(NOT_ASCII);
+            }
+            if b == b'"' {
                 self.in_str = false;
                 if self.str_key {
                     self.end_key();
                 }
-                return;
             } else if b == b'\\' {
                 self.escaped = true;
-            }
-            if self.str_key {
-                if self.key_len < KEY_CAP {
-                    self.key[self.key_len] = b;
-                }
-                self.key_len = self.key_len.saturating_add(1);
+            } else if self.str_key {
+                self.key_char(b, false);
             }
             return;
         }
