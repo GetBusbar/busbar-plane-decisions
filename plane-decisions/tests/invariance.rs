@@ -128,34 +128,67 @@ fn the_source_contains_no_unsafe_block() {
 /// never the legacy plugin-facing one, never a sibling plane.
 #[test]
 fn the_manifest_names_only_what_this_plane_may_name() {
-    let manifest = manifest();
+    let offenders = manifest_offenders(&manifest());
+    assert!(
+        offenders.is_empty(),
+        "the plane depends on {offenders:?}, kernel-side or a sibling plugin"
+    );
+}
+
+/// Every dependency `manifest` names that this plane may not name.
+fn manifest_offenders(manifest: &str) -> Vec<String> {
     let deps = manifest
         .split("[dependencies]")
         .nth(1)
         .expect("the manifest has a dependency section");
+    let mut forbidden: Vec<String> = vec![
+        // The edge this plane alone had, and the one that reached banned source. It is a ban,
+        // not an exception, since `UpstreamCreds` moved to `busbar-contract`.
+        "busbar-api".to_string(),
+        "busbar-core".to_string(),
+        "busbar-caps".to_string(),
+        "busbar-kernel".to_string(),
+        "busbar-unit-".to_string(),
+        "busbar-admin".to_string(),
+    ];
+    forbidden.extend(sibling_plane_dirs());
+    let mut offenders = Vec::new();
     for line in deps.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
             continue;
         }
         let name = line.split_whitespace().next().unwrap_or_default();
-        let mut forbidden: Vec<String> = vec![
-            // The edge this plane alone had, and the one that reached banned source. It is a ban,
-            // not an exception, since `UpstreamCreds` moved to `busbar-contract`.
-            "busbar-api".to_string(),
-            "busbar-core".to_string(),
-            "busbar-caps".to_string(),
-            "busbar-kernel".to_string(),
-            "busbar-unit-".to_string(),
-            "busbar-admin".to_string(),
-        ];
-        forbidden.extend(sibling_plane_dirs());
-        for forbidden in &forbidden {
-            assert!(
-                !name.starts_with(forbidden.as_str()),
-                "the plane depends on {name}, which is kernel-side or a sibling plane"
-            );
+        if forbidden.iter().any(|f| name.starts_with(f.as_str())) {
+            offenders.push(name.to_string());
         }
+    }
+    offenders
+}
+
+/// RED (audit plane-decisions round cb0ed01e04, D33): the manifest gate can fail: a sibling plane
+/// or another plugin named as a dependency is caught. RED before: the sibling list was read off a
+/// directory that holds no plane crate, so it was empty and the gate could not fail.
+#[test]
+fn the_manifest_gate_catches_a_sibling_plugin() {
+    for sibling in [
+        "busbar-plane-llm",
+        "busbar-plane-mcp",
+        "busbar-plane-a2a",
+        "busbar-plane-streaming",
+        "busbar-transport-http",
+        "busbar-auth-header",
+        "busbar-secret-env",
+        "busbar-store-memory",
+        "busbar-export-otlp",
+        "busbar-hook-ranking",
+    ] {
+        let manifest = format!("{}\n{sibling} = \"*\"\n", manifest());
+        assert_eq!(
+            manifest_offenders(&manifest),
+            vec![sibling.to_string()],
+            "{sibling} is not caught"
+        );
     }
 }
 

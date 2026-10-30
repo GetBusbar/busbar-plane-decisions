@@ -167,6 +167,20 @@ fn the_plane_performs_no_input_or_output() {
 /// `the_manifest_names_only_what_this_plane_may_name`).
 #[test]
 fn the_plane_names_no_kernel_side_crate() {
+    let mut offenders = Vec::new();
+    walk(&src_dir(), &mut |path, text| {
+        for (n, name) in named_offenders(text) {
+            offenders.push(format!("{}:{}: {name}", path.display(), n + 1));
+        }
+    });
+    assert!(
+        offenders.is_empty(),
+        "the plane names kernel-side crates: {offenders:?}"
+    );
+}
+
+/// Every `(line index, crate)` of a kernel-side or sibling crate `text` names outside a comment.
+fn named_offenders(text: &str) -> Vec<(usize, String)> {
     let mut forbidden: Vec<String> = vec![
         "busbar_api".to_string(),
         "busbar_caps".to_string(),
@@ -177,22 +191,39 @@ fn the_plane_names_no_kernel_side_crate() {
     ];
     forbidden.extend(sibling_plane_modules());
     let mut offenders = Vec::new();
-    walk(&src_dir(), &mut |path, text| {
-        for (n, line) in text.lines().enumerate() {
-            if is_comment(line) {
-                continue;
-            }
-            for name in &forbidden {
-                if line.contains(name.as_str()) {
-                    offenders.push(format!("{}:{}: {name}", path.display(), n + 1));
-                }
+    for (n, line) in text.lines().enumerate() {
+        if is_comment(line) {
+            continue;
+        }
+        for name in &forbidden {
+            if line.contains(name.as_str()) {
+                offenders.push((n, name.clone()));
             }
         }
-    });
-    assert!(
-        offenders.is_empty(),
-        "the plane names kernel-side crates: {offenders:?}"
-    );
+    }
+    offenders
+}
+
+/// RED (audit plane-decisions round cb0ed01e04, D33): the source gate can fail: a line naming a
+/// sibling plane or another plugin's crate is caught. RED before: the sibling list was read off a
+/// directory that holds no plane crate, so it was empty and the gate could not fail.
+#[test]
+fn the_source_gate_catches_a_sibling_plugin() {
+    for sibling in [
+        "busbar_plane_llm",
+        "busbar_plane_mcp",
+        "busbar_plane_a2a",
+        "busbar_plane_streaming",
+        "busbar_transport_http",
+        "busbar_auth_header",
+        "busbar_secret_env",
+        "busbar_store_memory",
+        "busbar_export_otlp",
+        "busbar_hook_ranking",
+    ] {
+        let text = format!("use {sibling}::Thing;\n");
+        assert_eq!(named_offenders(&text).len(), 1, "{sibling} is not caught");
+    }
 }
 
 /// The plane never hands back a decision, an amount or a credential.
