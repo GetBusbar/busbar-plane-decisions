@@ -98,8 +98,12 @@ pub const UNROUTED: u32 = 2;
 /// [`STATUS_BUSY`], about the entry it routed over, before anything is charged.
 pub const BUSY: u32 = 3;
 
-/// The status a [`BUSY`] arrival is refused at.
-const STATUS_BUSY: u32 = 503;
+/// The status a [`BUSY`] arrival is refused at: an arrive refusal is the caller's to retry (4xx).
+const STATUS_BUSY: u32 = 429;
+
+/// The words a [`BUSY`] arrival is refused with: the sibling planes' sentence for a full unit table.
+const BUSY_WORDS: &str =
+    "busbar is holding as many decision calls as it admits at once; retry once one has ended";
 
 /// [`ArriveOut::refusal`]: the request names a model other than its route's `upstream_model` and
 /// its document does not parse, so the far end cannot be sent the routed model
@@ -467,9 +471,10 @@ impl PlaneLife for DecisionsDoor {
             .map_err(Refusal::refused)
     }
 
-    /// `open`: the instance, and the first generation's snapshot. FAILED with the reason.
+    /// `open`: the instance, and the first generation's snapshot. REFUSED in the grammar's words,
+    /// as `validate` and `refresh` refuse the same settings.
     fn open(input: &Lent<'_, PlaneOpenIn>) -> Result<Opened<Self>, Refusal> {
-        let section = read_settings(input.open().settings().bytes()).map_err(Refusal::failed)?;
+        let section = read_settings(input.open().settings().bytes()).map_err(Refusal::refused)?;
         let protocols: BTreeMap<String, String> = input
             .providers()
             .iter()
@@ -480,7 +485,7 @@ impl PlaneLife for DecisionsDoor {
                 ))
             })
             .collect();
-        let routed = routes(&section, &protocols).map_err(Refusal::failed)?;
+        let routed = routes(&section, &protocols).map_err(Refusal::refused)?;
         Ok(Opened {
             plane: DecisionsDoor {
                 generations: Generations::new(),
@@ -592,9 +597,7 @@ slot!(
                 // is dropped to make room.
                 out.set(|o| &o.refusal, BUSY);
                 out.set(|o| &o.refusal_status, STATUS_BUSY);
-                return out.fail(Refusal::refused(
-                    "the decisions plane is serving as many requests as it holds; retry",
-                ));
+                return out.fail(Refusal::refused(BUSY_WORDS));
             }
             // The admission estimate (`admission: estimate`): the least a
             // success bills, one decision and its request fee, so a budget in estimate mode prices
