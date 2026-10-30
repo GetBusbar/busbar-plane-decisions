@@ -411,6 +411,42 @@ fn a_cut_answer_bills_only_the_counts_reported_before_the_cut() {
     assert!(a.logs.is_empty(), "{:?}", a.logs);
 }
 
+/// RED (audit plane-decisions round cb0ed01e04, D22): a success whose answer is no JSON object
+/// at all (a proxy's HTML page, an empty body, a bare array) is unreadable usage: it bills the
+/// plane's floor and its fee AND says so in one log line, as an unreadable count does. An object
+/// that only states no count stays silent. RED before: the floor was billed with no line.
+#[test]
+fn a_success_that_is_no_json_object_bills_the_floor_and_says_so() {
+    let fee = class(busbar_contract::plane::PER_REQUEST);
+    let floor = vec![
+        (
+            class("decision"),
+            busbar_contract::abi::plane::UNITS_FLOOR,
+            1,
+        ),
+        (fee, busbar_contract::abi::plane::UNITS_REPORTED, 1),
+    ];
+    for answer in [&b"<html>bad gateway</html>"[..], b"", b"  [1,2]", b"\"ok\""] {
+        let a = answered(200, answer);
+        let shown = String::from_utf8_lossy(answer);
+        assert_eq!(a.outcome, Some(Outcome::Ready), "{shown}: {a:?}");
+        assert_eq!(a.units, floor, "{shown}");
+        assert_eq!(a.bytes, answer, "relayed unchanged");
+        assert_eq!(
+            a.logs
+                .iter()
+                .filter(|l| l.contains("usage is unreadable"))
+                .count(),
+            1,
+            "{shown}: {:?}",
+            a.logs
+        );
+    }
+    let silent = answered(200, br#" {"answers":{}}"#);
+    assert_eq!(silent.units, floor);
+    assert!(silent.logs.is_empty(), "{:?}", silent.logs);
+}
+
 /// RED (audit plane-decisions round cb0ed01e04, D2): the far end's trailers (a `PIECE_FIELDS`
 /// piece) are no part of its answer: this plane reads no outcome there, so it neither relays them
 /// into the caller's body nor reads them for counts. The trailer piece that is the answer's last
