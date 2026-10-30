@@ -1242,15 +1242,17 @@ fn spliced_members(
     current: &serde_json::Map<String, serde_json::Value>,
     document: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<Vec<u8>> {
-    let span_of = |key: &str| {
-        #[cfg(test)]
-        tests::walked_root();
-        let pointer = format!("/{}", key.replace('~', "~0").replace('/', "~1"));
-        match busbar_contract::spans::resolve_pointer(body, &pointer) {
-            busbar_contract::spans::Resolved::Found(span) => Some(span),
-            _ => None,
-        }
-    };
+    // The root object walked once: each member's span, the last where a name repeats (the one
+    // the document holds, as serde's map keeps it).
+    #[cfg(test)]
+    tests::walked_root();
+    let root = busbar_contract::spans::members(body, 0)?;
+    let spans: std::collections::HashMap<&str, busbar_contract::spans::Span> = root
+        .members
+        .iter()
+        .map(|m| (m.key.as_str(), m.value()))
+        .collect();
+    let span_of = |key: &str| spans.get(key).copied();
     let mut kept: Vec<(usize, Vec<u8>)> = Vec::with_capacity(current.len());
     for (key, value) in current {
         let span = span_of(key)?;
