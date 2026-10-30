@@ -72,8 +72,20 @@ fn the_door_states_nothing_of_the_decision_content() {
         assert_eq!(answered.bytes, answer.as_bytes());
         said.extend(stated(&answered));
     }
-    // A refusal the door renders states the kernel's words, never the unit's content.
-    let (outcome, rendered) = door.refusal(3, 403, "denied", false);
+    // A refusal the door renders states the kernel's words, never the unit's content: here of a
+    // unit that arrived carrying the markers in its body and in a header the door keeps for its
+    // far end, and was refused before any piece.
+    let arrived = door.arrive_on(
+        3,
+        "POST",
+        "/v1/systemone",
+        request.as_bytes(),
+        &[("x-trace", STATE_MARKER)],
+    );
+    assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
+    said.push(arrived.entry.clone());
+    said.push(arrived.text.clone());
+    let (outcome, rendered) = door.refusal(3, 403, "denied", true);
     assert_eq!(outcome, Outcome::Ready);
     said.push(String::from_utf8_lossy(&rendered).into_owned());
 
