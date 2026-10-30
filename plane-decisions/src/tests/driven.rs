@@ -74,7 +74,6 @@ fn an_attempt_request_is_the_dialects_head() {
     assert_eq!(r.verb, "POST");
     assert_eq!(r.target, "/v1/systemone");
     assert_eq!(r.fields, [("content-type", &b"application/json"[..])]);
-    assert_eq!(r.auth, "decision-egress");
 }
 
 /// The answer's counts as `(class, amount)`, for a far end answering `status` with `body`.

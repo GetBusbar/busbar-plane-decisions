@@ -47,12 +47,6 @@ pub fn read_raw<'u>(body: &'u [u8], pointer: &str) -> Option<&'u [u8]> {
     }
 }
 
-/// The egress-auth scheme an outbound hop to the provider is decorated under.
-///
-/// The plane names the scheme and never holds what is behind it: jev's auth is the gateway's own
-/// bearer credential, returned as a locator the plane never resolves.
-pub(crate) const EGRESS_SCHEME: &str = "decision-egress";
-
 /// The envelope member naming the document type of an outbound body.
 pub(crate) const FIELD_CONTENT_TYPE: &str = "content-type";
 

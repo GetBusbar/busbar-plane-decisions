@@ -176,7 +176,8 @@ const FEE_UNITS: &[AbiStr] = &[abi_str(tail::FEE_UNITS[0])];
 const KEEP_RESPONSE_HEADERS: &[AbiStr] = &[abi_str(FIELD_CONTENT_TYPE)];
 
 /// The plane's one need ([`tail::NEEDS`]): outbound to a configured provider, over the claim's
-/// transport, decorated under the egress scheme the kernel holds the credential for.
+/// transport, decorated by the kernel in the outbound style it names ([`tail::OUTBOUND_STYLE`],
+/// the operator's credential as a bearer, which the plane never holds).
 pub const NEEDS: &[Need] = &[{
     let mut n = Need::EMPTY.with_keep_response_headers(KEEP_RESPONSE_HEADERS);
     n.direction = DIRECTION_OUTBOUND;

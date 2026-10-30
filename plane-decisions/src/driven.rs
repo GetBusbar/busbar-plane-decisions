@@ -60,7 +60,7 @@
 use busbar_contract::ids::{MeterClassId, OpClassId};
 
 use crate::codec::{
-    self, error_body, CONTENT_TYPE_JSON, EGRESS_SCHEME, FIELD_CONTENT_TYPE, PTR_EXECUTION_STATES,
+    self, error_body, CONTENT_TYPE_JSON, FIELD_CONTENT_TYPE, PTR_EXECUTION_STATES,
     PTR_USAGE_INPUT_TOKENS, PTR_USAGE_OUTPUT_TOKENS, PTR_USAGE_UNITS,
 };
 use crate::ops;
@@ -1346,10 +1346,9 @@ pub struct FarEndRequest {
     pub verb: &'static str,
     /// The target, explicit.
     pub target: &'static str,
-    /// The dialect fields. The kernel adds the auth fields for [`FarEndRequest::auth`].
+    /// The dialect fields. The kernel adds the auth fields for the outbound style the plane's
+    /// one need names ([`tail::NEEDS`], [`tail::OUTBOUND_STYLE`]).
     pub fields: [(&'static str, &'static [u8]); 1],
-    /// The auth scheme the kernel decorates the request under.
-    pub auth: &'static str,
 }
 
 /// Answer an ATTEMPT piece of a unit of `dialect`: the same request on every attempt, whichever
@@ -1365,7 +1364,6 @@ pub fn attempt_request(dialect: u32) -> FarEndRequest {
         verb: "POST",
         target,
         fields: [(FIELD_CONTENT_TYPE, CONTENT_TYPE_JSON)],
-        auth: EGRESS_SCHEME,
     }
 }
 
