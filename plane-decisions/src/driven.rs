@@ -1243,6 +1243,8 @@ fn spliced_members(
     document: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<Vec<u8>> {
     let span_of = |key: &str| {
+        #[cfg(test)]
+        tests::walked_root();
         let pointer = format!("/{}", key.replace('~', "~0").replace('/', "~1"));
         match busbar_contract::spans::resolve_pointer(body, &pointer) {
             busbar_contract::spans::Resolved::Found(span) => Some(span),

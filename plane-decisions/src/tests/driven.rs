@@ -1429,3 +1429,48 @@ fn a_member_name_is_compared_with_its_escapes_decoded() {
         Ok(vec![(DECISION, 6), (FEE, 1)])
     );
 }
+
+thread_local! {
+    /// How many walks over a request's root object [`spliced_members`] made on this thread.
+    static ROOT_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The seam [`spliced_members`] calls on each walk over the request's root object.
+pub(super) fn walked_root() {
+    ROOT_WALKS.with(|w| w.set(w.get() + 1));
+}
+
+/// RED (audit plane-decisions round cb0ed01e04, D24): a hook's rewrite is spliced over the
+/// caller's members in ONE walk of the request's root object, however many members it has, and
+/// writes the same bytes. RED before: the object was walked once per member (a pointer resolved
+/// per key), so a body of many small members cost members x body.
+#[test]
+fn a_rewrite_is_spliced_in_one_walk_of_the_root_object() {
+    const MEMBERS: usize = 2000;
+    let members: Vec<String> = (0..MEMBERS).map(|i| format!(r#""k{i}":{i}"#)).collect();
+    let body = format!(r#"{{"model":"m",{}}}"#, members.join(","));
+    // The hook drops one member and changes another.
+    let kept: Vec<String> = (1..MEMBERS)
+        .map(|i| {
+            if i == 7 {
+                r#""k7":"seven""#.to_string()
+            } else {
+                format!(r#""k{i}":{i}"#)
+            }
+        })
+        .collect();
+    let document = format!("{{{}}}", kept.join(","));
+    ROOT_WALKS.with(|w| w.set(0));
+    let out = rewritten(body.as_bytes(), &rewrite_of(&document), "m")
+        .expect("applies")
+        .expect("changes the request");
+    let walks = ROOT_WALKS.with(std::cell::Cell::get);
+    assert_eq!(
+        String::from_utf8(out).expect("UTF-8"),
+        format!(r#"{{"model":"m",{}}}"#, kept.join(","))
+    );
+    assert!(
+        walks <= 1,
+        "{MEMBERS} members walked the root object {walks} times"
+    );
+}
