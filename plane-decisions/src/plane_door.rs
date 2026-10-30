@@ -57,7 +57,7 @@ use busbar_contract::abi::plane::{
     ArriveIn, ArriveOut, BillableClass, DialectAuth, OnPieceIn, OnPieceOut, OpClass, OutField,
     PlaneOpenIn, PlaneSnapshot, PlaneTail, ProjectIn, ProjectOut, RefusalIn, RefusalOut, ServeIn,
     ServeOut, UnitCount, ANSWER_LAYOUT, CLAIM_EXACT, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER,
-    FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE, PIECE_HAS_STATUS, PIECE_LAST,
+    FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE, PIECE_CUT, PIECE_HAS_STATUS, PIECE_LAST,
     PRINCIPAL_REQUIRED, ROUTE_DIRECT, SHAPE_WHOLE, SPAN_ABSENT, UNITS_ESTIMATED, UNITS_FLOOR,
     UNITS_REPORTED,
 };
@@ -767,17 +767,22 @@ fn far_end(
     if last {
         // A success bills its decision count, its tokens and its fee. A usage member that is not a
         // whole count bills the plane's floor and is said in one log line, never a silent 0, and
-        // the unit that succeeded is not failed.
-        let counts = match unit.reading.counts(unit.status) {
-            Ok(counts) => counts,
-            Err(driven::UnreadableUsage(pointer)) => {
-                busbar_contract::diag_warn!(
+        // the unit that succeeded is not failed. An answer cut short is no delivered reply: only
+        // the counts it reported whole before the cut ([`FarEndReading::cut`]).
+        let counts = if given.flags() & PIECE_CUT != 0 {
+            unit.reading.cut(unit.status)
+        } else {
+            match unit.reading.counts(unit.status) {
+                Ok(counts) => counts,
+                Err(driven::UnreadableUsage(pointer)) => {
+                    busbar_contract::diag_warn!(
                     busbar_contract::diagnostic::USAGE_TAP_DECODE_FAILED,
                     member = pointer,
                     "the far end's answer has no whole count at `{pointer}`: usage is unreadable; \
                      billing the plane's floor, never 0"
                 );
-                unit.reading.floored(unit.status)
+                    unit.reading.floored(unit.status)
+                }
             }
         };
         for count in counts.into_iter().flatten() {

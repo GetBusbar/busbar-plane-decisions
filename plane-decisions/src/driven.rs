@@ -1716,6 +1716,33 @@ impl FarEndReading {
         Self::billed(whole)
     }
 
+    /// What an answer the far end did not finish bills (its last piece flagged `PIECE_CUT`: its
+    /// connection failed, or the send's deadline passed, after its head). It is no delivered
+    /// reply: it bills no floor and no request fee (a failed unit owes none), only each count the
+    /// far end reported whole before the cut (a count the cut ends mid-number is none), and
+    /// nothing when what it said before the cut is no success.
+    #[must_use]
+    pub fn cut(&self, status: Option<u32>) -> Counts {
+        if !self.success(status) {
+            return [None; 4];
+        }
+        // The members as read: a scalar the cut ended in is not settled into a count.
+        let reported = |class: u32, member: Member| match member {
+            Member::Whole(amount) => Some(Units {
+                class,
+                source: Source::Reported,
+                amount,
+            }),
+            Member::Absent | Member::Unreadable => None,
+        };
+        [
+            reported(tail::CLASS_DECISION_INDEX, self.members[0]),
+            reported(tail::CLASS_INPUT_TOKENS_INDEX, self.members[1]),
+            reported(tail::CLASS_OUTPUT_TOKENS_INDEX, self.members[2]),
+            None,
+        ]
+    }
+
     /// The counts of a success whose whole counts are `whole` (decision, input and output tokens).
     fn billed(whole: [Option<u64>; 3]) -> Counts {
         let reported = |class: u32, amount: u64| Units {
