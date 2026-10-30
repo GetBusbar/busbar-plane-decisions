@@ -39,8 +39,8 @@
 //! The second dialect, `nanojev`: `/api/evaluate` is its exact claim; a model's dialect is its
 //! override or its provider's protocol; a model of the wrong dialect gets that dialect's existing
 //! unknown-model refusal; it meters the upstream's own billing unit, counted from the answer
-//! already read (`execution.states`; an answer with no count refuses loudly), with no extra
-//! egress. Each dialect's claim is published when the
+//! already read (`execution.states`; a success with no count bills the plane's floor and says so in
+//! one `diag_warn` line), with no extra egress. Each dialect's claim is published when the
 //! generation configures a model of that dialect ([`served_claims`]); a request routes among the
 //! models of the dialect its claim is ([`route_model`]), so a model of the other dialect is that
 //! dialect's unknown model (`404`). Its answer is read by its dialect's count
@@ -1428,13 +1428,15 @@ enum Slot {
 struct Usage {
     parent: &'static [u8],
     counted: &'static [(&'static [u8], &'static str)],
-    /// The decision count is required: an answer with none refuses loudly.
+    /// The decision count is required: a success with none bills the plane's floor and says so in
+    /// one `diag_warn` line ([`UnreadableUsage`]).
     required: bool,
 }
 
 /// Each dialect's [`Usage`], in [`tail::DIALECTS`]' order: `jev` reads `/usage/units` (one decision
 /// when absent) and its tokens; `nanojev` reads the upstream's own billing unit,
-/// `/execution/states`, and an answer with no count refuses loudly.
+/// `/execution/states`, and a success with no count bills the plane's floor and says so in one
+/// `diag_warn` line.
 const USAGE: [Usage; 2] = [
     Usage {
         parent: b"usage",

@@ -22,7 +22,8 @@ The rules it serves:
     and the hop-by-hop set, plus the provider's own credential (`authorization: Bearer`).
   * a far-end 2xx or 4xx reaches the caller as the far end's own status and bytes; a far-end 5xx
     ends in a terminal `502` in jev's refusal shape, never the far end's bytes; a `nanojev` success
-    with no `execution.states` count is refused `502` too.
+    with no `execution.states` count is relayed as the far end wrote it (busbar bills the plane's
+    floor for it and says so in one log line; refusing it is the `refuse-uncounted` break).
   * every refusal is exactly `{"error":{"code":<word>,"message":<text>}}`, the code word chosen by
     status as `refusal_body` chooses it.
 

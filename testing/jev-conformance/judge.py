@@ -19,7 +19,7 @@ outside the governed set reaches it unchanged, the far end's 2xx and 4xx reach t
 byte, a far-end 5xx ends terminal in jev's refusal shape, an unauthenticated or forged caller is
 refused 401 before any hop, routing by model (one, several, unknown, `upstream_model` spliced),
 and the `nanojev` dialect on `/api/evaluate` (served, the wrong dialect refused, a success with no
-`execution.states` refused).
+`execution.states` relayed and billed at the plane's floor).
 
 The BUSBAR checks need busbar's admin surface and run on the subject only: billable-success-only
 on the ledger, and the gating checks, one per Teller step (authenticate, verify, admit, route, meter,
