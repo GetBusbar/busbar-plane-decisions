@@ -57,9 +57,9 @@ use busbar_contract::abi::plane::{
     ArriveIn, ArriveOut, BillableClass, DialectAuth, OnPieceIn, OnPieceOut, OpClass, OutField,
     PlaneOpenIn, PlaneSnapshot, PlaneTail, ProjectIn, ProjectOut, RefusalIn, RefusalOut, ServeIn,
     ServeOut, UnitCount, ANSWER_LAYOUT, CLAIM_EXACT, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER,
-    FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE, PIECE_CUT, PIECE_HAS_STATUS, PIECE_LAST,
-    PRINCIPAL_REQUIRED, ROUTE_DIRECT, SHAPE_WHOLE, SPAN_ABSENT, UNITS_ESTIMATED, UNITS_FLOOR,
-    UNITS_REPORTED,
+    FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE, PIECE_CUT, PIECE_FIELDS, PIECE_HAS_STATUS,
+    PIECE_LAST, PRINCIPAL_REQUIRED, ROUTE_DIRECT, SHAPE_WHOLE, SPAN_ABSENT, UNITS_ESTIMATED,
+    UNITS_FLOOR, UNITS_REPORTED,
 };
 use busbar_contract::abi::plane::{PlaneCancelIn, PlaneCancelOut};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
@@ -742,8 +742,11 @@ fn far_end(
     out: &mut Out<'_, OnPieceOut>,
 ) -> (Outcome, bool) {
     let given = input;
-    let bytes = input.bytes().bytes();
-    let first = given.flags() & PIECE_HAS_STATUS != 0;
+    // The far end's trailers (`PIECE_FIELDS`) are no part of its answer: this plane reads no
+    // outcome there, so they are neither relayed nor read, and only end the unit when last.
+    let trailers = given.flags() & PIECE_FIELDS != 0;
+    let bytes = if trailers { &[] } else { input.bytes().bytes() };
+    let first = !trailers && given.flags() & PIECE_HAS_STATUS != 0;
     let last = given.flags() & PIECE_LAST != 0;
     if !unit.recall {
         unit.reading.piece(bytes);
