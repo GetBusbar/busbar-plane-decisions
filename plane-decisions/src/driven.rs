@@ -1683,7 +1683,8 @@ impl FarEndReading {
             }
             self.end_scalar();
         }
-        if !self.rooted && !matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
+        // A UTF-8 byte order mark before the root is no value: its three bytes are passed over.
+        if !self.rooted && !matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0xEF | 0xBB | 0xBF) {
             self.rooted = true;
             self.root_object = b == b'{';
         }

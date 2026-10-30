@@ -445,6 +445,20 @@ fn a_success_that_is_no_json_object_bills_the_floor_and_says_so() {
     let silent = answered(200, br#" {"answers":{}}"#);
     assert_eq!(silent.units, floor);
     assert!(silent.logs.is_empty(), "{:?}", silent.logs);
+    // A byte order mark before the object is no value: the count after it is read, silently.
+    let bom = answered(200, b"\xEF\xBB\xBF{\"usage\":{\"units\":3}}");
+    assert_eq!(
+        bom.units,
+        vec![
+            (
+                class("decision"),
+                busbar_contract::abi::plane::UNITS_REPORTED,
+                3
+            ),
+            (fee, busbar_contract::abi::plane::UNITS_REPORTED, 1),
+        ]
+    );
+    assert!(bom.logs.is_empty(), "{:?}", bom.logs);
 }
 
 /// RED (audit plane-decisions round cb0ed01e04, D2): the far end's trailers (a `PIECE_FIELDS`
