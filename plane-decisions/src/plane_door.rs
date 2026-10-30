@@ -56,14 +56,15 @@ use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::plane::{
     ArriveIn, ArriveOut, BillableClass, DialectAuth, OnPieceIn, OnPieceOut, OpClass, OutField,
     PlaneOpenIn, PlaneSnapshot, PlaneTail, ProjectIn, ProjectOut, RefusalIn, RefusalOut, ServeIn,
-    ServeOut, UnitCount, ANSWER_LAYOUT, CANCEL_ABORTED, CANCEL_OK_PARTIAL, CLAIM_EXACT, EMIT_DONE,
-    EMIT_TO_FAR_END, FROM_CALLER, FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE,
-    PIECE_HAS_STATUS, PIECE_LAST, PRINCIPAL_REQUIRED, ROUTE_DIRECT, SHAPE_WHOLE, SPAN_ABSENT,
-    UNITS_ESTIMATED, UNITS_FLOOR, UNITS_REPORTED,
+    ServeOut, UnitCount, ANSWER_LAYOUT, CLAIM_EXACT, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER,
+    FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE, PIECE_HAS_STATUS, PIECE_LAST,
+    PRINCIPAL_REQUIRED, ROUTE_DIRECT, SHAPE_WHOLE, SPAN_ABSENT, UNITS_ESTIMATED, UNITS_FLOOR,
+    UNITS_REPORTED,
 };
 use busbar_contract::abi::plane::{PlaneCancelIn, PlaneCancelOut};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::life::Refusal;
+use busbar_contract::abi::sdk::plane::{cancel_disposition, Ending, UnitCancel};
 use busbar_contract::abi::sdk::plane_life::{Opened, PlaneLife, Published};
 use busbar_contract::abi::sdk::publish::{ClaimSpec, SnapshotSpec};
 use busbar_contract::abi::sdk::{Generations, HostBuf, Instance, Keyed, Lent, Out, Safe, SafeSlot};
@@ -515,29 +516,16 @@ impl PlaneLife for DecisionsDoor {
         input: Lent<'_, PlaneCancelIn>,
         mut out: Out<'_, PlaneCancelOut>,
     ) -> Outcome {
-        let (named, ticket) = (input.unit(), input.cancel().ticket());
+        let cancel = UnitCancel::of(&input);
         let answered = instance.get().is_some_and(|plane| {
-            plane.units.with_all(|units| {
-                let key = if named != 0 {
-                    Some(named)
-                } else {
-                    units
-                        .iter()
-                        .find(|(_, unit)| unit.ticket == Some(ticket))
-                        .map(|(key, _)| *key)
-                };
-                key.and_then(|key| units.remove(&key))
-                    .is_some_and(|unit| unit.status.is_some())
-            })
+            cancel.end(
+                &plane.units,
+                Ending::Remove,
+                |unit| unit.ticket,
+                |unit| unit.status.is_some(),
+            )
         });
-        out.set(
-            |o| &o.cancel.disposition,
-            if answered {
-                CANCEL_OK_PARTIAL
-            } else {
-                CANCEL_ABORTED
-            },
-        );
+        out.set(|o| &o.cancel.disposition, cancel_disposition(answered));
         Outcome::Ready
     }
 }
