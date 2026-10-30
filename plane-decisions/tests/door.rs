@@ -16,7 +16,7 @@ mod door_harness;
 
 use busbar_contract::abi::mechanism::call::Outcome;
 use busbar_contract::abi::plane::{PRINCIPAL_REQUIRED, ROUTE_DIRECT};
-use door_harness::{claims, open, Bufs, Given};
+use door_harness::{claims, open, open_with, Bufs, Given};
 
 const SYSTEMONE: (&str, &str) = ("POST", "/v1/systemone");
 
@@ -313,6 +313,102 @@ fn a_success_with_an_unreadable_count_bills_the_floor_and_says_so() {
             a.logs
         );
     }
+}
+
+/// One unit served over `settings` on `target` in `dialect`: its far end answers 200 with `head`,
+/// then its connection fails and the kernel hands `rest` as the answer's last piece, flagged
+/// `PIECE_CUT`. Answers the cut piece.
+fn cut(
+    settings: &str,
+    target: &str,
+    dialect: u32,
+    head: &[u8],
+    rest: &[u8],
+) -> door_harness::Answered {
+    let door = open_with(settings, &[("typesafe", "jev"), ("np", "nanojev")]);
+    let body = br#"{"state":{}}"#;
+    let arrived = door.arrive_on(1, "POST", target, body, &[]);
+    assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
+    let mut bufs = Bufs::new(1 << 16);
+    let mut attempt = Given::attempt(1);
+    attempt.dialect = dialect;
+    door.piece(1, attempt, &mut bufs);
+    let mut caller = Given::caller(body);
+    caller.dialect = dialect;
+    assert!(door.piece(1, caller, &mut bufs).far);
+    let mut first = Given::far(Some(200), false, head);
+    first.dialect = dialect;
+    assert_eq!(
+        door.piece(1, first, &mut bufs).outcome,
+        Some(Outcome::Ready)
+    );
+    let mut last = Given::far(None, true, rest);
+    last.flags |= busbar_contract::abi::plane::PIECE_CUT;
+    last.dialect = dialect;
+    door.piece(1, last, &mut bufs)
+}
+
+/// RED (audit plane-decisions round cb0ed01e04, D1): an answer the far end did not finish (its
+/// connection failed after its head: the last piece is `PIECE_CUT`) is no delivered reply. It
+/// bills no floor and no request fee (a failed unit owes none), only the whole counts the far end
+/// reported before the cut, and it is no unreadable usage: nothing is logged. The bytes are
+/// relayed and the unit ends. RED before: a cut 200 billed the floor and the fee as a success.
+#[test]
+fn a_cut_answer_bills_only_the_counts_reported_before_the_cut() {
+    let fee = class(busbar_contract::plane::PER_REQUEST);
+    let a = cut(ONE, "/v1/systemone", 0, br#"{"answers":{"#, br#""x":"#);
+    assert_eq!((a.outcome, a.done), (Some(Outcome::Ready), true), "{a:?}");
+    assert!(
+        a.units.is_empty(),
+        "a cut answer bills nothing it did not report: {a:?}"
+    );
+    assert_eq!(a.bytes, br#""x":"#, "relayed unchanged");
+    assert!(
+        a.logs.is_empty(),
+        "a cut is no unreadable usage: {:?}",
+        a.logs
+    );
+
+    // A count the far end reported whole before the cut is true, and billed as reported.
+    let a = cut(
+        ONE,
+        "/v1/systemone",
+        0,
+        br#"{"usage":{"units":3,"input_tokens":9},"#,
+        br#""answers":{"#,
+    );
+    assert_eq!(
+        a.units,
+        vec![
+            (
+                class("decision"),
+                busbar_contract::abi::plane::UNITS_REPORTED,
+                3
+            ),
+            (
+                class("input_tokens"),
+                busbar_contract::abi::plane::UNITS_REPORTED,
+                9
+            ),
+        ],
+        "{a:?}"
+    );
+    assert!(
+        !a.units.iter().any(|u| u.0 == fee),
+        "no fee on a cut: {a:?}"
+    );
+    assert!(a.logs.is_empty(), "{:?}", a.logs);
+
+    // A count the cut ends mid-number is not one the far end reported whole.
+    let a = cut(ONE, "/v1/systemone", 0, br#"{"usage":{"units":1"#, b"2");
+    assert!(a.units.is_empty(), "{a:?}");
+    assert!(a.logs.is_empty(), "{:?}", a.logs);
+
+    // nanojev: a cut answer missing its required count is no unreadable usage either.
+    let both = r#"{"models":{"nano":{"provider":"np","protocol":"nanojev"}}}"#;
+    let a = cut(both, "/api/evaluate", 1, br#"{"result":{"#, b"}");
+    assert!(a.units.is_empty(), "{a:?}");
+    assert!(a.logs.is_empty(), "{:?}", a.logs);
 }
 
 /// RED (audit plane-decisions#5): THE DESIGN section 7, "its card prices `decision`, `input_tokens`
