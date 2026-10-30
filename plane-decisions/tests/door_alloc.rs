@@ -82,3 +82,32 @@ fn a_paid_debt_is_freed_before_the_far_end_answers() {
     let last = door.piece(1, Given::whole(200, br#"{"usage":{"units":1}}"#), &mut bufs);
     assert!(last.done, "{last:?}");
 }
+
+/// The far end's answer relayed through a reply buffer smaller than its pieces: each piece is owed
+/// across re-calls, and the answer side's debt buffer is reused piece after piece, so relaying
+/// still allocates nothing (only a debt bound for the far end is let go once paid).
+#[test]
+fn relaying_pieces_larger_than_the_reply_buffer_allocates_nothing() {
+    let door = open(r#"{"models":{"jev":{"provider":"typesafe"}}}"#);
+    let mut bufs = Bufs::new(1024);
+    assert_eq!(door.arrive(1, br#"{"state":{}}"#).outcome, Outcome::Ready);
+    door.piece(1, Given::attempt(1), &mut bufs);
+    door.piece(1, Given::caller(br#"{"state":{}}"#), &mut bufs);
+    door.piece(
+        1,
+        Given::far(Some(200), false, br#"{"answers":{"blob":""#),
+        &mut bufs,
+    );
+    let filler = [b'x'; 4096];
+    let piece = Given::far(None, false, &filler);
+    // Warm: one piece outside the window.
+    door.piece(1, piece, &mut bufs);
+    let mut relayed = 0;
+    let count = allocations_of(|| {
+        for _ in 0..64 {
+            relayed += door.piece_owed(1, piece, &mut bufs);
+        }
+    });
+    assert_eq!(relayed, 64 * filler.len(), "every byte is relayed");
+    assert_eq!(count, 0, "relaying 64 owed pieces allocated {count} times");
+}
