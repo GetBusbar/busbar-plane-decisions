@@ -1,37 +1,5 @@
-# busbar-plane-decisions — THE DECISIONS PLANE, as one door over its two dialects.
-#
-# WHAT THIS CRATE IS. One implementation of the plugin contract's plane kind for the "decision"
-# protocol surface: a request routed by its model to a decision provider in either of the two
-# dialects the plane speaks, `jev` (POST /v1/systemone) and `nanojev` (POST /api/evaluate), its
-# body relayed as the caller wrote it but for the governed top-level `model`. The signed design
-# (DECISION #39, jev v5 sign-off) rules this the ONE crate for the whole plane: it holds the door
-# AND its own typed config section.
-#
-# THE SECOND NON-CONTRACT EDGE IS GONE TOO, AND WITH IT THE ONE BANNED-SOURCE PATH ANY PURE PLANE
-# HAD. This was the only pure plane whose manifest named the legacy plugin-facing crate — 1
-# occurrence here against 0 in the other four — and the single symbol it was named for,
-# `UpstreamCreds`, is now `busbar_contract::config::UpstreamCreds`, so the dependency had nothing
-# left to carry and was deleted. What it HAD been carrying was a purity breach the denylist family
-# could not see until this crate was enrolled in a kind list at all: that crate depends on `sha2`,
-# `sha2` on `cpufeatures`, `cpufeatures` on `libc`, and a pure plane may reach none of them.
-#
-# THE `busbar-kernel` EDGE IS GONE, AND SO IS THE ONLY FILE THAT NEEDED IT. Two things used to make
-# this manifest name the kernel and neither does any more. `ModelCfg`, reused VERBATIM for
-# `decisions.models.<name>`, moved to `busbar_contract::config::ModelCfg` (DECISIONS #40/#38).
-# `src/registry.rs` — a crate-local `PlaneDecl` constant typed against
-# `busbar_kernel::plane::registry::{PlaneDecl, BuildCtx}`, declared for a FUTURE root registration —
-# was DELETED rather than moved: nothing outside this crate ever named `PLANE_DECL` (the binary's
-# `register_planes()` installs llm/mcp/a2a/voice and never this crate, which is not even in the
-# binary's dependency graph), so it was unreachable generation-1 code, and #19 retires that
-# generation anyway. Deleting it closed this crate's #40 dep-wall violation outright — no extraction
-# of `PlaneDecl` into `busbar-contract` was needed, and none was done. When a real registration for
-# this plane is wired, it is written against whatever seam exists then, not against a kernel type
-# resurrected from a constant nobody read.
-#
-# WHAT THIS CRATE IS NOT. There is no governance here, no breaker, no approval decision and no
-# metering arithmetic: those are the kernel's. The door states counts, never a price; it projects a
-# request for the deployment's hooks and applies their rewrites, as every plane does, and never
-# decides on the content itself. It keeps no durable state, so it declares no record schemas.
+# busbar-plane-decisions: the decisions plane. Its door (`plane_door::door`) over the jev and
+# nanojev dialects; the cdylib twin `busbar-plane-decisions-plugin` exports the same door.
 [package]
 name = "busbar-plane-decisions"
 version = "1.6.0"
@@ -39,7 +7,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "The decisions plane for busbar: the plugin contract's plane kind implemented over the jev dialect (api.typesafe.ai byte-identity passthrough)."
+description = "The decisions plane for busbar: the plugin contract's plane kind over the jev and nanojev dialects (byte-identity passthrough of the caller's body)."
 # THE ROOT CELLS' ADDRESS: `build.rs` states `cells=<this crate>/tests/root/mod.rs` under this
 # `links` name, and the composition root's `build.rs` reads it as `DEP_BUSBAR_DOOR_CELLS_<CRATE>_CELLS`
 # (the same for a path dependency and a pinned one), so the root compiles this plane's own root cells
@@ -52,12 +20,6 @@ workspace = true
 [lib]
 name = "busbar_plane_decisions"
 path = "src/lib.rs"
-# rlib: the LINKED door, which a busbar build names as a compiled-in row
-# (`busbar_plane_decisions::door`, the root's `plane-decisions` row on the plane axis). The
-# dropped-in door is the sibling
-# `busbar-plane-decisions-plugin` cdylib, which exports this same door as its one symbol; this crate
-# exports none.
-crate-type = ["rlib"]
 
 # NO FEATURES, ON PURPOSE. A plane compiled two ways is two planes, and the kernel would have no way
 # to tell which one it registered. The contract crate holds itself to the same rule and asserts it.

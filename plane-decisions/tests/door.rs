@@ -425,8 +425,20 @@ fn past_the_cap_an_arrival_is_refused_and_no_live_unit_dropped() {
     }
     let over = door.arrive(MAX_UNITS + 1, br#"{"state":{}}"#);
     assert_eq!(
-        (over.outcome, over.status, over.route, over.entry.as_str()),
-        (Outcome::Refused, 503, ROUTE_DIRECT, "jev"),
+        (
+            over.outcome,
+            over.status,
+            over.text.as_str(),
+            over.route,
+            over.entry.as_str()
+        ),
+        (
+            Outcome::Refused,
+            429,
+            "busbar is holding as many decision calls as it admits at once; retry once one has ended",
+            ROUTE_DIRECT,
+            "jev"
+        ),
         "{over:?}"
     );
     assert!(
@@ -451,7 +463,7 @@ fn a_live_unit_not_yet_started_is_never_dropped_to_make_room() {
     let next = door.arrive(MAX_UNITS + 1, br#"{}"#);
     assert_eq!(
         (next.outcome, next.status),
-        (Outcome::Refused, 503),
+        (Outcome::Refused, 429),
         "{next:?}"
     );
     let mut bufs = Bufs::new(1 << 16);
@@ -1008,15 +1020,16 @@ fn a_root_number_out_of_range_is_refused_and_a_skipped_value_has_no_depth_bound(
     );
 }
 
-/// An `open` the door will not open answers FAILED with no instance, its reason in the buffer the
-/// host lent (`err_len`): a section the grammar refuses, in the grammar's words, and a model whose
-/// provider the host stated no protocol for, named with that provider.
+/// An `open` the door will not open answers REFUSED (as `validate` and `refresh` answer the same
+/// settings) with no instance, its reason in the buffer the host lent (`err_len`): a section the
+/// grammar refuses, in the grammar's words, and a model whose provider the host stated no protocol
+/// for, named with that provider.
 #[test]
-fn an_open_the_door_refuses_fails_with_its_reason() {
+fn an_open_the_door_refuses_is_refused_with_its_reason() {
     assert_eq!(
         door_harness::open_refused(r#"{"modles":{}}"#, &[("typesafe", "jev")]),
         (
-            Outcome::Failed,
+            Outcome::Refused,
             false,
             "unknown field `modles`, expected one of `models`, `hooks`, `upstream_credentials`"
                 .to_string()
@@ -1025,7 +1038,7 @@ fn an_open_the_door_refuses_fails_with_its_reason() {
     assert_eq!(
         door_harness::open_refused(r#"{"models":{"m":{"provider":"elsewhere"}}}"#, &[]),
         (
-            Outcome::Failed,
+            Outcome::Refused,
             false,
             "decisions.models.m names provider 'elsewhere', whose protocol the host did not state \
              when the plane opened, and states no `protocol` of its own; the decisions plane \

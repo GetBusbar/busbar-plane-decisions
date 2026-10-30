@@ -83,11 +83,7 @@ fn a_model_of_an_unstated_provider_is_refused_by_name() {
 
 #[test]
 fn the_statement_names_the_crate_version() {
-    let manifest = include_str!("../../Cargo.toml");
-    assert!(
-        manifest.contains(&format!("\nversion = \"{VERSION}\"\n")),
-        "the Statement's version is the manifest's"
-    );
+    assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
 }
 
 #[test]
