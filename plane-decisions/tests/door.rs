@@ -477,7 +477,7 @@ fn the_far_ends_trailers_are_neither_relayed_nor_read() {
     let answer = br#"{"usage":{"units":2}}"#;
     let first = door.piece(1, Given::far(Some(200), false, answer), &mut bufs);
     assert_eq!(first.outcome, Some(Outcome::Ready), "{first:?}");
-    let mut trailers = Given::far(None, true, b"x-checksum: abc\r\nusage: {\"units\":9}\r\n");
+    let mut trailers = Given::far(None, true, b"{\"error\":1,\"usage\":{\"units\":9}}\r\n");
     trailers.flags |= busbar_contract::abi::plane::PIECE_FIELDS;
     let last = door.piece(1, trailers, &mut bufs);
     assert_eq!(
@@ -507,6 +507,35 @@ fn the_far_ends_trailers_are_neither_relayed_nor_read() {
             ),
         ],
         "{last:?}"
+    );
+}
+
+/// RED (review of round cb0ed01e04, D2): a trailer piece that states the answer's status (a
+/// transport that reports it at the end) is still not relayed, but its status is the answer's: a
+/// non-success one bills nothing, as a non-success head does.
+#[test]
+fn a_trailer_status_is_the_answers_status() {
+    let door = open(ONE);
+    let body = br#"{"state":{}}"#;
+    assert_eq!(door.arrive(1, body).outcome, Outcome::Ready);
+    let mut bufs = Bufs::new(1 << 16);
+    door.piece(1, Given::attempt(1), &mut bufs);
+    assert!(door.piece(1, Given::caller(body), &mut bufs).far);
+    let answer = br#"{"usage":{"units":2}}"#;
+    let first = door.piece(1, Given::far(Some(200), false, answer), &mut bufs);
+    assert_eq!(first.status, 200, "{first:?}");
+    let mut trailers = Given::far(Some(500), true, b"grpc-status: 13\r\n");
+    trailers.flags |= busbar_contract::abi::plane::PIECE_FIELDS;
+    let last = door.piece(1, trailers, &mut bufs);
+    assert_eq!(
+        (last.outcome, last.done),
+        (Some(Outcome::Ready), true),
+        "{last:?}"
+    );
+    assert!(last.bytes.is_empty(), "{last:?}");
+    assert!(
+        last.units.is_empty(),
+        "a failed answer bills nothing: {last:?}"
     );
 }
 
