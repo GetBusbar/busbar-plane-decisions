@@ -411,6 +411,55 @@ fn a_cut_answer_bills_only_the_counts_reported_before_the_cut() {
     assert!(a.logs.is_empty(), "{:?}", a.logs);
 }
 
+/// RED (audit plane-decisions round cb0ed01e04, D2): the far end's trailers (a `PIECE_FIELDS`
+/// piece) are no part of its answer: this plane reads no outcome there, so it neither relays them
+/// into the caller's body nor reads them for counts. The trailer piece that is the answer's last
+/// ends the unit with the answer's counts. RED before: the trailer text was appended to the
+/// caller's JSON document.
+#[test]
+fn the_far_ends_trailers_are_neither_relayed_nor_read() {
+    let door = open(ONE);
+    let body = br#"{"state":{}}"#;
+    assert_eq!(door.arrive(1, body).outcome, Outcome::Ready);
+    let mut bufs = Bufs::new(1 << 16);
+    door.piece(1, Given::attempt(1), &mut bufs);
+    assert!(door.piece(1, Given::caller(body), &mut bufs).far);
+    let answer = br#"{"usage":{"units":2}}"#;
+    let first = door.piece(1, Given::far(Some(200), false, answer), &mut bufs);
+    assert_eq!(first.outcome, Some(Outcome::Ready), "{first:?}");
+    let mut trailers = Given::far(None, true, b"x-checksum: abc\r\nusage: {\"units\":9}\r\n");
+    trailers.flags |= busbar_contract::abi::plane::PIECE_FIELDS;
+    let last = door.piece(1, trailers, &mut bufs);
+    assert_eq!(
+        (last.outcome, last.done),
+        (Some(Outcome::Ready), true),
+        "{last:?}"
+    );
+    let mut relayed = first.bytes.clone();
+    relayed.extend_from_slice(&last.bytes);
+    assert_eq!(
+        String::from_utf8_lossy(&relayed),
+        String::from_utf8_lossy(answer),
+        "the caller's body is the far end's document alone"
+    );
+    assert_eq!(
+        last.units,
+        vec![
+            (
+                class("decision"),
+                busbar_contract::abi::plane::UNITS_REPORTED,
+                2
+            ),
+            (
+                class(busbar_contract::plane::PER_REQUEST),
+                busbar_contract::abi::plane::UNITS_REPORTED,
+                1
+            ),
+        ],
+        "{last:?}"
+    );
+}
+
 /// RED (audit plane-decisions#5): THE DESIGN section 7, "its card prices `decision`, `input_tokens`
 /// and `output_tokens` (family `decision`, all three required, 0 = free)": the tail declares the
 /// three in family `decision`, and a success's reported tokens are billed in them.
