@@ -1381,3 +1381,51 @@ fn spliceable_validates_without_a_second_head_read() {
         "jev-1"
     ));
 }
+
+/// RED (audit plane-decisions round cb0ed01e04, D3): a member name is read as JSON reads it, its
+/// escapes decoded (RFC 8259 section 7: `"\u0075nits"` IS `"units"`), wherever the pieces split
+/// it, so an escaped count is billed as reported and an escaped `error` is no success. RED before:
+/// the name was compared with its escapes as written, so the count billed the floor and the error
+/// answer billed a success.
+#[test]
+fn a_member_name_is_compared_with_its_escapes_decoded() {
+    /// An answer, and what it bills.
+    type Case = (&'static [u8], Vec<(u32, u64)>);
+    let cases: [Case; 5] = [
+        (
+            br#"{"usage":{"\u0075nits":7}}"#,
+            vec![(DECISION, 7), (FEE, 1)],
+        ),
+        (
+            br#"{"\u0075sage":{"units":4}}"#,
+            vec![(DECISION, 4), (FEE, 1)],
+        ),
+        (
+            br#"{"usage":{"units":2,"input\u005Ftokens":3,"\/output_tokens":5}}"#,
+            vec![(DECISION, 2), (INPUT, 3), (FEE, 1)],
+        ),
+        (
+            br#"{"\u0065rror":{"code":"x"},"usage":{"units":3}}"#,
+            vec![],
+        ),
+        (
+            br#"{"err\\or":{"code":"x"},"usage":{"units":3}}"#,
+            vec![(DECISION, 3), (FEE, 1)],
+        ),
+    ];
+    for (body, want) in cases {
+        for at in 0..=body.len() {
+            assert_eq!(
+                split_billed(200, body, at),
+                Ok(want.clone()),
+                "{} split at {at}",
+                String::from_utf8_lossy(body)
+            );
+        }
+        assert_eq!(by_pointer(200, body), Ok(want), "the pointers read it so");
+    }
+    assert_eq!(
+        nanojev_billed(200, br#"{"execution":{"\u0073tates":6}}"#),
+        Ok(vec![(DECISION, 6), (FEE, 1)])
+    );
+}
