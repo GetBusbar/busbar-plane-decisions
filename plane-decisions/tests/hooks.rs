@@ -274,3 +274,35 @@ fn a_project_with_no_rewrite_over_a_body_whose_document_does_not_parse_is_a_faul
         Some(Outcome::Ready)
     );
 }
+
+/// RED (audit plane-decisions round cb0ed01e04, D40): `project` sees the unit as `arrive` routed
+/// it, over the generation `arrive` chose: a reload landing between the two changes neither the
+/// view's pool nor which model a rewrite may name. A unit `arrive` keeps no state for is projected
+/// over the newest generation. RED before: `project` re-routed over the newest generation, so the
+/// reloaded unit's pool was empty and a rewrite naming its own model was refused.
+#[test]
+fn a_unit_is_projected_over_the_generation_it_arrived_in() {
+    let door = open(r#"{"models":{"jev":{"provider":"typesafe"}}}"#);
+    let body = br#"{"state":{"amount":7}}"#;
+    assert_eq!(door.arrive(1, body).entry, "jev");
+    door.refresh(r#"{"models":{"other":{"provider":"typesafe"}}}"#, 2);
+    let view = door.project(1, SYSTEMONE, body, None);
+    assert_eq!(
+        (view.outcome, view.pool.as_str()),
+        (Some(Outcome::Ready), "jev"),
+        "{view:?}"
+    );
+    let rewrite = rewrite_of(r#"{"model":"jev","state":{"amount":8}}"#);
+    let rewritten = door.project(1, SYSTEMONE, body, Some(&rewrite));
+    assert_eq!(
+        (rewritten.outcome, rewritten.pool.as_str()),
+        (Some(Outcome::Ready), "jev"),
+        "{rewritten:?}"
+    );
+    assert_eq!(
+        rewritten.rewritten.as_deref(),
+        Some(&br#"{"state":{"amount":8}}"#[..])
+    );
+    // No state kept for the unit: the newest generation routes it.
+    assert_eq!(door.project(9, SYSTEMONE, body, None).pool, "other");
+}
