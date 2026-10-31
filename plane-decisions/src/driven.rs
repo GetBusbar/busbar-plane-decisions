@@ -10,7 +10,7 @@
 //! | `on_piece`, ATTEMPT (from the kernel) | [`attempt_request`]: the request bound for the far end, verb and target explicit |
 //! | `on_piece`, from the far end | [`FarEndReading`]: the bytes relayed unchanged, and the units the answer bills |
 //! | `refusal` | [`refusal_body`]: the kernel's status and text, in this dialect's error shape |
-//! | `project` | [`project`]: the hook view of a request; [`rewritten`]: a hook's rewrite applied in the dialect |
+//! | `project` | [`project_read`]: the hook view of a request; [`rewritten_read`]: a hook's rewrite applied in the dialect |
 //!
 //! Every answer is plain data. Nothing here holds a byte across calls: [`FarEndReading`] is a value
 //! the caller owns for the length of one unit, in fixed space, and it is the only accumulating
@@ -34,15 +34,15 @@
 //! falls through to the kernel's unclaimed-route body,
 //! `{"error":{"code":null,"message":"the requested resource was not found","param":null,"type":"not_found_error"}}`.
 //! The top-level `model` ([`codec::PTR_MODEL`]) is the one request member
-//! this plane reads, and only to route ([`route_model`]) and splice ([`spliced`]).
+//! this plane reads, and only to route ([`route_named`]) and splice ([`spliced`]).
 //!
 //! The second dialect, `nanojev`: `/api/evaluate` is its exact claim; a model's dialect is its
 //! override or its provider's protocol; a model of the wrong dialect gets that dialect's existing
 //! unknown-model refusal; it meters the upstream's own billing unit, counted from the answer
-//! already read (`execution.states`; an answer with no count refuses loudly), with no extra
-//! egress. Each dialect's claim is published when the
+//! already read (`execution.states`; a success with no count bills the plane's floor and says so in
+//! one `diag_warn` line), with no extra egress. Each dialect's claim is published when the
 //! generation configures a model of that dialect ([`served_claims`]); a request routes among the
-//! models of the dialect its claim is ([`route_model`]), so a model of the other dialect is that
+//! models of the dialect its claim is ([`route_named`]), so a model of the other dialect is that
 //! dialect's unknown model (`404`). Its answer is read by its dialect's count
 //! ([`FarEndReading::for_dialect`]): `/execution/states`, required.
 //!
@@ -60,7 +60,7 @@
 use busbar_contract::ids::{MeterClassId, OpClassId};
 
 use crate::codec::{
-    self, error_body, CONTENT_TYPE_JSON, EGRESS_SCHEME, FIELD_CONTENT_TYPE, PTR_EXECUTION_STATES,
+    self, error_body, CONTENT_TYPE_JSON, FIELD_CONTENT_TYPE, PTR_EXECUTION_STATES,
     PTR_USAGE_INPUT_TOKENS, PTR_USAGE_OUTPUT_TOKENS, PTR_USAGE_UNITS,
 };
 use crate::ops;
@@ -816,15 +816,11 @@ pub fn named_in<'a>(
     }
 }
 
-/// The model a claimed request routes over among the `models` its claim's dialect `serves` (the
-/// generation's configured names, each with what this plane keeps of it): the one it names, else
-/// the only one of that dialect configured. Answers the configured name and its entry. A model of
-/// another dialect is this dialect's unknown model.
+/// [`route_named`] without the `model` the body named: the tests' reading.
 ///
 /// # Errors
 ///
-/// [`Unrouted`]: several configured and none named, a `model` that is not a string, or a name none
-/// of the dialect's models has.
+/// As [`route_named`].
 #[cfg(test)]
 pub fn route_model<'m, V>(
     body: &[u8],
@@ -834,12 +830,17 @@ pub fn route_model<'m, V>(
     route_named(body, models, serves).map(|(name, entry, _)| (name, entry))
 }
 
-/// [`route_model`], also answering the `model` the body named (the head's read, once), for a caller
-/// that needs it again ([`spliceable_named`]) without reading the body a second time.
+/// The model a claimed request routes over among the `models` its claim's dialect `serves` (the
+/// generation's configured names, each with what this plane keeps of it): the one it names, else
+/// the only one of that dialect configured. Answers the configured name, its entry and the `model`
+/// the body named (the head's read, once), for a caller that needs it again ([`spliceable_named`])
+/// without reading the body a second time. A model of another dialect is this dialect's unknown
+/// model.
 ///
 /// # Errors
 ///
-/// As [`route_model`].
+/// [`Unrouted`]: several configured and none named, a `model` that is not a string, or a name none
+/// of the dialect's models has.
 #[allow(clippy::type_complexity)]
 pub fn route_named<'m, 'b, V>(
     body: &'b [u8],
@@ -853,7 +854,7 @@ pub fn route_named<'m, 'b, V>(
 ///
 /// # Errors
 ///
-/// As [`route_model`].
+/// As [`route_named`].
 #[allow(clippy::type_complexity)]
 pub fn route_read<'m, 'b, V>(
     read: &Result<Option<serde_json::Value>, Unrouted>,
@@ -916,12 +917,7 @@ pub fn spliced(body: &[u8], upstream: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Whether [`spliced`] can set `upstream` in `body` where it must: a body naming a model other
-/// than `upstream` is rewritten on its hop, which materializes the whole document; one whose
-/// document would not parse (a string its head never decoded but the document parse refuses) is
-/// answered 500 "We received an unexpected internal error. Please try again." `arrive` answers it
-/// so, never relaying the caller's model unspliced. A body naming no model, or `upstream` itself,
-/// needs no rewrite.
+/// [`spliceable_named`] over the `model` the body names, read here: the tests' reading.
 #[cfg(test)]
 #[must_use]
 pub fn spliceable(body: &[u8], upstream: &str) -> bool {
@@ -933,8 +929,15 @@ pub fn spliceable(body: &[u8], upstream: &str) -> bool {
     }
 }
 
-/// [`spliceable`] for a caller that already holds the `model` the body named (the head's read, as
-/// [`route_named`] answers it): the document is only VALIDATED ([`valid`]), never built.
+/// Whether [`spliced`] can set `upstream` in `body` where it must: a body naming a model other
+/// than `upstream` is rewritten on its hop, which materializes the whole document; one whose
+/// document would not parse (a string its head never decoded but the document parse refuses) is
+/// answered 500 "We received an unexpected internal error. Please try again." `arrive` answers it
+/// so, never relaying the caller's model unspliced. A body naming no model, or `upstream` itself,
+/// needs no rewrite.
+///
+/// `named` is the `model` the body named (the head's read, as [`route_named`] answers it): the
+/// document is only VALIDATED ([`valid`]), never built.
 #[must_use]
 pub fn spliceable_named(body: &[u8], named: Option<&str>, upstream: &str) -> bool {
     match named {
@@ -1034,8 +1037,8 @@ pub fn dialect_at(target: &str) -> Option<u32> {
 /// The role the one turn of a projected request is shown under: the caller's.
 pub const PROJECTED_ROLE: &str = "user";
 
-/// What a hook is shown of one request ([`project`]): the entry it routes over, its dialect's name
-/// and the characters of the request document, which is the view's one turn and its body.
+/// What a hook is shown of one request ([`project_read`]): the entry it routes over, its dialect's
+/// name and the characters of the request document, which is the view's one turn and its body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Projected<'r> {
     /// The configured model the request routes over; empty when it routes over none.
@@ -1046,11 +1049,7 @@ pub struct Projected<'r> {
     pub chars: usize,
 }
 
-/// Project one request of `dialect` for the hooks: the model it routes over among the `routes` of
-/// that dialect ([`route_model`]; `dialect_of` reads a route's dialect), the dialect's name and the
-/// size of the document. The document itself is the view's one turn and its body, as the caller
-/// sent it (or as a rewrite left it); the plane reads nothing of it for itself beyond its top-level
-/// `model`, and mints no fact from it.
+/// [`project_read`] over a read of the request made here: the tests' reading.
 #[cfg(test)]
 #[must_use]
 pub fn project_hook<'r, V>(
@@ -1062,7 +1061,13 @@ pub fn project_hook<'r, V>(
     project_read(request, &readable(request), dialect, routes, dialect_of)
 }
 
-/// [`project`] over a read of the request already made ([`readable`], once).
+/// Project one request of `dialect` for the hooks: the model it routes over among the `routes` of
+/// that dialect ([`route_read`]; `dialect_of` reads a route's dialect), the dialect's name and the
+/// size of the document. The document itself is the view's one turn and its body, as the caller
+/// sent it (or as a rewrite left it); the plane reads nothing of it for itself beyond its top-level
+/// `model`, and mints no fact from it.
+///
+/// `read` is the head's read of the request ([`readable`], once).
 #[must_use]
 pub fn project_read<'r, V>(
     request: &[u8],
@@ -1140,13 +1145,24 @@ pub enum NotApplied {
     Fault,
 }
 
+/// [`rewritten_read`] over a read of the body made here: the tests' reading.
+///
+/// # Errors
+///
+/// As [`rewritten_read`].
+#[cfg(test)]
+pub fn rewritten(body: &[u8], rewrite: &[u8], routed: &str) -> Result<Option<Vec<u8>>, NotApplied> {
+    rewritten_read(body, &readable(body), rewrite, routed)
+}
+
 /// A rewrite applied in the dialect: the rewrite's document ([`rewrite_document`]) replaces the
 /// request wholesale. A member the document omits is dropped, so a hook redacts by omission; a
 /// member it states is set to its value, the caller's own bytes kept for a value it leaves as it
 /// was; a member the caller did not send is added after the caller's. The top-level `model` alone
 /// is not the document's: it stays the caller's whether or not the document repeats it, and a
 /// document naming another model is refused ([`NotApplied::Model`]), never a silent switch of
-/// provider. `routed` is the model entry the request is routed over.
+/// provider. `routed` is the model entry the request is routed over, and `read` the head's read of
+/// the body ([`readable`], once).
 ///
 /// `Ok(None)` when the rewrite names no document, the body is not one JSON object, or the document
 /// is the request as it stands: the request goes on byte for byte as it was (a rewrite that
@@ -1158,16 +1174,6 @@ pub enum NotApplied {
 ///
 /// [`NotApplied::Model`]: the document names a model other than `routed`; [`NotApplied::Fault`]:
 /// the body's document does not parse, or the head could not read the body at all.
-#[cfg(test)]
-pub fn rewritten(body: &[u8], rewrite: &[u8], routed: &str) -> Result<Option<Vec<u8>>, NotApplied> {
-    rewritten_read(body, &readable(body), rewrite, routed)
-}
-
-/// [`rewritten`] over a read of the body already made ([`readable`], once).
-///
-/// # Errors
-///
-/// As [`rewritten`].
 pub fn rewritten_read(
     body: &[u8],
     read: &Result<Option<serde_json::Value>, Unrouted>,
@@ -1216,7 +1222,7 @@ pub fn rewritten_read(
     Ok(Some(replaced(body, &current, &document)))
 }
 
-/// [`rewritten`]'s request: the caller's members `document` keeps (the `model` always), in the
+/// [`rewritten_read`]'s request: the caller's members `document` keeps (the `model` always), in the
 /// caller's order, each the caller's own bytes where its value is unchanged, then the members the
 /// caller did not send. A rewrite the hook answered ALWAYS applies: when a member's bytes cannot be
 /// read back (the span scanner refuses a body nested past its depth, which serde reads), the
@@ -1242,13 +1248,17 @@ fn spliced_members(
     current: &serde_json::Map<String, serde_json::Value>,
     document: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<Vec<u8>> {
-    let span_of = |key: &str| {
-        let pointer = format!("/{}", key.replace('~', "~0").replace('/', "~1"));
-        match busbar_contract::spans::resolve_pointer(body, &pointer) {
-            busbar_contract::spans::Resolved::Found(span) => Some(span),
-            _ => None,
-        }
-    };
+    // The root object walked once: each member's span, the last where a name repeats (the one
+    // the document holds, as serde's map keeps it).
+    #[cfg(test)]
+    tests::walked_root();
+    let root = busbar_contract::spans::members(body, 0)?;
+    let spans: std::collections::HashMap<&str, busbar_contract::spans::Span> = root
+        .members
+        .iter()
+        .map(|m| (m.key.as_str(), m.value()))
+        .collect();
+    let span_of = |key: &str| spans.get(key).copied();
     let mut kept: Vec<(usize, Vec<u8>)> = Vec::with_capacity(current.len());
     for (key, value) in current {
         let span = span_of(key)?;
@@ -1342,10 +1352,9 @@ pub struct FarEndRequest {
     pub verb: &'static str,
     /// The target, explicit.
     pub target: &'static str,
-    /// The dialect fields. The kernel adds the auth fields for [`FarEndRequest::auth`].
+    /// The dialect fields. The kernel adds the auth fields for the outbound style the plane's
+    /// one need names ([`tail::NEEDS`], [`tail::OUTBOUND_STYLE`]).
     pub fields: [(&'static str, &'static [u8]); 1],
-    /// The auth scheme the kernel decorates the request under.
-    pub auth: &'static str,
 }
 
 /// Answer an ATTEMPT piece of a unit of `dialect`: the same request on every attempt, whichever
@@ -1361,7 +1370,6 @@ pub fn attempt_request(dialect: u32) -> FarEndRequest {
         verb: "POST",
         target,
         fields: [(FIELD_CONTENT_TYPE, CONTENT_TYPE_JSON)],
-        auth: EGRESS_SCHEME,
     }
 }
 
@@ -1428,13 +1436,15 @@ enum Slot {
 struct Usage {
     parent: &'static [u8],
     counted: &'static [(&'static [u8], &'static str)],
-    /// The decision count is required: an answer with none refuses loudly.
+    /// The decision count is required: a success with none bills the plane's floor and says so in
+    /// one `diag_warn` line ([`UnreadableUsage`]).
     required: bool,
 }
 
 /// Each dialect's [`Usage`], in [`tail::DIALECTS`]' order: `jev` reads `/usage/units` (one decision
 /// when absent) and its tokens; `nanojev` reads the upstream's own billing unit,
-/// `/execution/states`, and an answer with no count refuses loudly.
+/// `/execution/states`, and a success with no count bills the plane's floor and says so in one
+/// `diag_warn` line.
 const USAGE: [Usage; 2] = [
     Usage {
         parent: b"usage",
@@ -1454,6 +1464,9 @@ const USAGE: [Usage; 2] = [
 
 /// The longest member name compared ("output_tokens"), with room.
 const KEY_CAP: usize = 16;
+/// What a member name's escape that names no ASCII character decodes to in the name read: a byte
+/// no UTF-8 text holds, so no name compared matches it.
+const NOT_ASCII: u8 = 0xFF;
 /// The longest scalar a whole count is spelled in (`u64::MAX` is 20 digits), with room.
 const SCALAR_CAP: usize = 24;
 
@@ -1476,9 +1489,13 @@ pub struct FarEndReading {
     in_str: bool,
     str_key: bool,
     escaped: bool,
-    /// The member name being read (cut at [`KEY_CAP`]: a longer one is none compared).
+    /// The member name being read, its escapes decoded (cut at [`KEY_CAP`]: a longer one is none
+    /// compared).
     key: [u8; KEY_CAP],
     key_len: usize,
+    /// In a member name: the hex digits of a `\u` escape still to read, and their value so far.
+    hex_left: u8,
+    hex: u32,
     /// The member a value at depth 1, and at depth 2, belongs to.
     at: [Slot; 3],
     /// The scalar being read for `scalar_of` (cut at [`SCALAR_CAP`]: a longer one is no count).
@@ -1491,6 +1508,10 @@ pub struct FarEndReading {
     members: [Member; 3],
     /// The dialect the answer is in ([`USAGE`]'s index).
     dialect: u32,
+    /// The answer's first significant byte was read, and it opened an object: an answer whose
+    /// top-level value is no object states no usage a reading can find.
+    rooted: bool,
+    root_object: bool,
 }
 
 impl FarEndReading {
@@ -1587,25 +1608,65 @@ impl FarEndReading {
         }
     }
 
+    /// One decoded byte of the member name being read.
+    fn key_byte(&mut self, b: u8) {
+        if self.key_len < KEY_CAP {
+            self.key[self.key_len] = b;
+        }
+        self.key_len = self.key_len.saturating_add(1);
+    }
+
+    /// One byte of a member name, read as JSON reads it (RFC 8259 section 7): an escape decoded,
+    /// `\u0075` and `u` being one name. An escape naming no ASCII character (or one cut short) is
+    /// [`NOT_ASCII`], which no name compared holds.
+    fn key_char(&mut self, b: u8, escaped: bool) {
+        if escaped {
+            match b {
+                b'u' => (self.hex_left, self.hex) = (4, 0),
+                b'b' => self.key_byte(0x08),
+                b'f' => self.key_byte(0x0c),
+                b'n' => self.key_byte(b'\n'),
+                b'r' => self.key_byte(b'\r'),
+                b't' => self.key_byte(b'\t'),
+                other => self.key_byte(other),
+            }
+        } else if self.hex_left > 0 {
+            let digit = char::from(b).to_digit(16).unwrap_or(0x1_0000);
+            self.hex = self.hex.saturating_mul(16).saturating_add(digit);
+            self.hex_left -= 1;
+            if self.hex_left == 0 {
+                let decoded = u8::try_from(self.hex).ok().filter(u8::is_ascii);
+                self.key_byte(decoded.unwrap_or(NOT_ASCII));
+            }
+        } else {
+            self.key_byte(b);
+        }
+    }
+
     /// One byte of the answer.
     fn byte(&mut self, b: u8) {
         if self.in_str {
             if self.escaped {
                 self.escaped = false;
-            } else if b == b'"' {
+                if self.str_key {
+                    self.key_char(b, true);
+                }
+                return;
+            }
+            if self.str_key && self.hex_left > 0 && matches!(b, b'"' | b'\\') {
+                // A `\u` escape cut short names no character.
+                self.hex_left = 0;
+                self.key_byte(NOT_ASCII);
+            }
+            if b == b'"' {
                 self.in_str = false;
                 if self.str_key {
                     self.end_key();
                 }
-                return;
             } else if b == b'\\' {
                 self.escaped = true;
-            }
-            if self.str_key {
-                if self.key_len < KEY_CAP {
-                    self.key[self.key_len] = b;
-                }
-                self.key_len = self.key_len.saturating_add(1);
+            } else if self.str_key {
+                self.key_char(b, false);
             }
             return;
         }
@@ -1621,6 +1682,11 @@ impl FarEndReading {
                 return;
             }
             self.end_scalar();
+        }
+        // A UTF-8 byte order mark before the root is no value: its three bytes are passed over.
+        if !self.rooted && !matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0xEF | 0xBB | 0xBF) {
+            self.rooted = true;
+            self.root_object = b == b'{';
         }
         match b {
             b' ' | b'\t' | b'\n' | b'\r' | b':' => {}
@@ -1676,13 +1742,17 @@ impl FarEndReading {
     /// # Errors
     ///
     /// [`UnreadableUsage`]: a success whose usage member is present but is not a whole count a
-    /// signed 64-bit count holds (negative, fractional, a string, `null`, past `i64::MAX`).
+    /// signed 64-bit count holds (negative, fractional, a string, `null`, past `i64::MAX`), and a
+    /// success whose answer is no JSON object at all (empty, an HTML page, an array).
     pub fn counts(&self, status: Option<u32>) -> Result<Counts, UnreadableUsage> {
         if !self.success(status) {
             return Ok([None; 4]);
         }
         let (_, members) = self.settled();
         let usage = self.usage();
+        if !self.root_object {
+            return Err(UnreadableUsage(usage.counted[0].1));
+        }
         let mut whole = [None; 3];
         for (i, (_, pointer)) in usage.counted.iter().enumerate() {
             whole[i] = match members[i] {
@@ -1714,6 +1784,33 @@ impl FarEndReading {
             };
         }
         Self::billed(whole)
+    }
+
+    /// What an answer the far end did not finish bills (its last piece flagged `PIECE_CUT`: its
+    /// connection failed, or the send's deadline passed, after its head). It is no delivered
+    /// reply: it bills no floor and no request fee (a failed unit owes none), only each count the
+    /// far end reported whole before the cut (a count the cut ends mid-number is none), and
+    /// nothing when what it said before the cut is no success.
+    #[must_use]
+    pub fn cut(&self, status: Option<u32>) -> Counts {
+        if !self.success(status) {
+            return [None; 4];
+        }
+        // The members as read: a scalar the cut ended in is not settled into a count.
+        let reported = |class: u32, member: Member| match member {
+            Member::Whole(amount) => Some(Units {
+                class,
+                source: Source::Reported,
+                amount,
+            }),
+            Member::Absent | Member::Unreadable => None,
+        };
+        [
+            reported(tail::CLASS_DECISION_INDEX, self.members[0]),
+            reported(tail::CLASS_INPUT_TOKENS_INDEX, self.members[1]),
+            reported(tail::CLASS_OUTPUT_TOKENS_INDEX, self.members[2]),
+            None,
+        ]
     }
 
     /// The counts of a success whose whole counts are `whole` (decision, input and output tokens).

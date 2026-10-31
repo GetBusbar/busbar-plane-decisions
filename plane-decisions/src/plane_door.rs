@@ -18,7 +18,7 @@
 //!   binds no audience (the operation is served on the plain data plane to a keyed caller).
 //!   `retire` drops a generation.
 //! * `arrive`: [`crate::driven::arrive`], routed over the model the request names
-//!   ([`crate::driven::route_model`]); an unclaimed request is refused at 404, and one that routes
+//!   ([`crate::driven::route_named`]); an unclaimed request is refused at 404, and one that routes
 //!   over no model at its [`crate::driven::Unrouted`] status.
 //! * `on_piece`: the ATTEMPT's request head ([`crate::driven::attempt_request`]), the caller's body to the
 //!   far end unchanged ([`crate::driven::caller_piece`]) but for the routed model's `upstream_model`
@@ -27,10 +27,10 @@
 //! * `refusal`: [`crate::driven::refusal_body`]; the refused unit's state is dropped.
 //! * `cancel`: the unit the host names (`PlaneCancelIn::unit`), else the one on the cancelled
 //!   ticket, is dropped, `CANCEL_ABORTED` before its far end answered and `CANCEL_OK_PARTIAL` after.
-//! * `project`: the hook view of a unit's request ([`crate::driven::project_hook`]): the entry it routes
+//! * `project`: the hook view of a unit's request ([`crate::driven::project_read`]): the entry it routes
 //!   over as the view's pool, its dialect, the request document as the one turn a content-granted
 //!   hook reads, and a request-stage hook's rewrite applied in the dialect
-//!   ([`crate::driven::rewritten`]) and answered as the body the kernel keeps.
+//!   ([`crate::driven::rewritten_read`]) and answered as the body the kernel keeps.
 //! * `serve` is REFUSED: the plane publishes no admin route. `hydrate`, `start`, `tick`, `drive`,
 //!   `release` and `close` hold nothing.
 //!
@@ -57,9 +57,9 @@ use busbar_contract::abi::plane::{
     ArriveIn, ArriveOut, BillableClass, DialectAuth, OnPieceIn, OnPieceOut, OpClass, OutField,
     PlaneOpenIn, PlaneSnapshot, PlaneTail, ProjectIn, ProjectOut, RefusalIn, RefusalOut, ServeIn,
     ServeOut, UnitCount, ANSWER_LAYOUT, CLAIM_EXACT, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER,
-    FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE, PIECE_HAS_STATUS, PIECE_LAST,
-    PRINCIPAL_REQUIRED, ROUTE_DIRECT, SHAPE_WHOLE, SPAN_ABSENT, UNITS_ESTIMATED, UNITS_FLOOR,
-    UNITS_REPORTED,
+    FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE, PIECE_CUT, PIECE_FIELDS, PIECE_HAS_STATUS,
+    PIECE_LAST, PRINCIPAL_REQUIRED, ROUTE_DIRECT, SHAPE_WHOLE, SPAN_ABSENT, UNITS_ESTIMATED,
+    UNITS_FLOOR, UNITS_REPORTED,
 };
 use busbar_contract::abi::plane::{PlaneCancelIn, PlaneCancelOut};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
@@ -107,7 +107,7 @@ const BUSY_WORDS: &str =
 
 /// [`ArriveOut::refusal`]: the request names a model other than its route's `upstream_model` and
 /// its document does not parse, so the far end cannot be sent the routed model
-/// ([`driven::spliceable`]); refused at [`STATUS_INTERNAL`], about the entry it routed over.
+/// ([`driven::spliceable_named`]); refused at [`STATUS_INTERNAL`], about the entry it routed over.
 pub const UNSPLICEABLE: u32 = 4;
 
 /// The status an [`UNSPLICEABLE`] arrival is refused at.
@@ -176,7 +176,8 @@ const FEE_UNITS: &[AbiStr] = &[abi_str(tail::FEE_UNITS[0])];
 const KEEP_RESPONSE_HEADERS: &[AbiStr] = &[abi_str(FIELD_CONTENT_TYPE)];
 
 /// The plane's one need ([`tail::NEEDS`]): outbound to a configured provider, over the claim's
-/// transport, decorated under the egress scheme the kernel holds the credential for.
+/// transport, decorated by the kernel in the outbound style it names ([`tail::OUTBOUND_STYLE`],
+/// the operator's credential as a bearer, which the plane never holds).
 pub const NEEDS: &[Need] = &[{
     let mut n = Need::EMPTY.with_keep_response_headers(KEEP_RESPONSE_HEADERS);
     n.direction = DIRECTION_OUTBOUND;
@@ -405,6 +406,9 @@ struct Unit {
     /// The routed model's `upstream_model`, kept from `arrive`: the caller's top-level `model` is
     /// spliced to it on the way to the far end where the two differ ([`driven::spliced`]).
     upstream: Option<String>,
+    /// The routes of the generation `arrive` routed the unit over: `project` sees the unit as it
+    /// was routed, whatever generation the host holds by then.
+    routes: Option<std::sync::Arc<Routes>>,
 }
 
 /// Every model one generation routes over, directly, by name, each with its dialect and
@@ -554,7 +558,8 @@ slot!(
         out.set(|o| &o.principal_need, PRINCIPAL_REQUIRED);
         if let Some(plane) = instance.get() {
             let body = input.body().bytes();
-            let routes: &Routes = &plane.routes();
+            let generation = plane.routes();
+            let routes: &Routes = &generation;
             let routed = driven::route_named(body, routes, |r| r.dialect == arrived.dialect);
             let (upstream, named) = match routed {
                 Ok((model, routed, requested)) => {
@@ -590,6 +595,7 @@ slot!(
                 };
                 kept.caller = caller;
                 kept.upstream = upstream;
+                kept.routes = Some(std::sync::Arc::clone(&generation));
                 true
             });
             if !kept {
@@ -661,10 +667,21 @@ fn pay(unit: &mut Unit, input: Lent<'_, OnPieceIn>, out: &mut Out<'_, OnPieceOut
         },
     );
     if !more {
-        unit.owed.clear();
+        release(unit);
         unit.at = 0;
     }
     done
+}
+
+/// A paid debt's buffer: one bound for the far end (the caller's body) goes now, not when the far
+/// end's last piece ends the unit, since nothing more is owed that way while the unit waits; one
+/// of the far end's answer is kept, emptied, for its next piece.
+fn release(unit: &mut Unit) {
+    if unit.owed_flags & EMIT_TO_FAR_END != 0 {
+        unit.owed = Vec::new();
+    } else {
+        unit.owed.clear();
+    }
 }
 
 /// Owe `bytes` under `flags`: write what fits straight from `bytes`, and keep only what does not
@@ -677,12 +694,14 @@ fn owe(
     out: &mut Out<'_, OnPieceOut>,
 ) -> bool {
     let n = input.reply_buf().stream(bytes);
-    unit.owed.clear();
     unit.at = 0;
     unit.owed_flags = flags;
     let more = n < bytes.len();
     if more {
+        unit.owed.clear();
         unit.owed.extend_from_slice(&bytes[n..]);
+    } else {
+        release(unit);
     }
     out.set(|o| &o.emitted, n as u64);
     out.set(|o| &o.more, u32::from(more));
@@ -721,6 +740,7 @@ fn attempt_piece(
         attempt: true,
         caller: std::mem::take(&mut unit.caller),
         upstream: unit.upstream.take(),
+        routes: unit.routes.take(),
         ticket: unit.ticket,
         owed: std::mem::take(&mut unit.owed),
         reading: FarEndReading::for_dialect(dialect),
@@ -742,12 +762,16 @@ fn far_end(
     out: &mut Out<'_, OnPieceOut>,
 ) -> (Outcome, bool) {
     let given = input;
-    let bytes = input.bytes().bytes();
-    let first = given.flags() & PIECE_HAS_STATUS != 0;
+    // The far end's trailers (`PIECE_FIELDS`) are no part of its answer's body: they are neither
+    // relayed nor read for counts, and only end the unit when last.
+    let trailers = given.flags() & PIECE_FIELDS != 0;
+    let bytes = if trailers { &[] } else { input.bytes().bytes() };
+    let first = !trailers && given.flags() & PIECE_HAS_STATUS != 0;
     let last = given.flags() & PIECE_LAST != 0;
     if !unit.recall {
         unit.reading.piece(bytes);
-        if first {
+        // A status read off the trailers (a transport that states it at the end) is the answer's.
+        if first || (trailers && given.flags() & PIECE_HAS_STATUS != 0) {
             unit.status = Some(given.status_code());
         }
     }
@@ -767,17 +791,22 @@ fn far_end(
     if last {
         // A success bills its decision count, its tokens and its fee. A usage member that is not a
         // whole count bills the plane's floor and is said in one log line, never a silent 0, and
-        // the unit that succeeded is not failed.
-        let counts = match unit.reading.counts(unit.status) {
-            Ok(counts) => counts,
-            Err(driven::UnreadableUsage(pointer)) => {
-                busbar_contract::diag_warn!(
+        // the unit that succeeded is not failed. An answer cut short is no delivered reply: only
+        // the counts it reported whole before the cut ([`FarEndReading::cut`]).
+        let counts = if given.flags() & PIECE_CUT != 0 {
+            unit.reading.cut(unit.status)
+        } else {
+            match unit.reading.counts(unit.status) {
+                Ok(counts) => counts,
+                Err(driven::UnreadableUsage(pointer)) => {
+                    busbar_contract::diag_warn!(
                     busbar_contract::diagnostic::USAGE_TAP_DECODE_FAILED,
                     member = pointer,
                     "the far end's answer has no whole count at `{pointer}`: usage is unreadable; \
                      billing the plane's floor, never 0"
                 );
-                unit.reading.floored(unit.status)
+                    unit.reading.floored(unit.status)
+                }
             }
         };
         for count in counts.into_iter().flatten() {
@@ -930,14 +959,15 @@ const NO_SPAN: Span = Span {
 };
 
 slot!(
-    /// `project`: the hook view of a unit's request ([`driven::project_hook`]). A request-stage
-    /// hook's rewrite is applied first, in the request's dialect ([`driven::rewritten`],
+    /// `project`: the hook view of a unit's request ([`driven::project_read`]). A request-stage
+    /// hook's rewrite is applied first, in the request's dialect ([`driven::rewritten_read`],
     /// wholesale; a rewrite naming another model is REFUSED, the hook's failure; a rewrite with a
     /// document over a body whose whole document does not parse is FAULT, the kernel's shared
     /// 500): the rewritten request is answered in `rewritten` (the body the kernel keeps and
     /// re-pushes on every attempt from then on) and is the request projected; a rewrite that does
     /// not apply leaves the request as it was. The view's
-    /// pool is the entry the request routes over, its dialect the claim's, and its one turn the
+    /// pool is the entry the request routes over (in the generation `arrive` routed the unit in),
+    /// its dialect the claim's, and its one turn the
     /// request document, shown only to a hook granted the prompt. The plane reads nothing of the content
     /// for itself: the view carries the caller's bytes, and no fact is minted from them.
     Project, ProjectIn, ProjectOut, |instance, input, mut out| {
@@ -951,7 +981,13 @@ slot!(
         };
         let body = input.body().bytes();
         let rewrite = input.rewrite().bytes();
-        let routes: &Routes = &plane.routes();
+        // The unit is seen over the generation `arrive` routed it in; one it keeps no state for,
+        // over the newest the host holds.
+        let generation = plane
+            .units
+            .with_all(|units| units.get(&input.unit()).and_then(|u| u.routes.clone()))
+            .unwrap_or_else(|| plane.routes());
+        let routes: &Routes = &generation;
         // The document is checked before any rewrite hook runs, failing closed on a body that
         // would not parse: FAULT, which busbar answers 500 `request rewrite could not be
         // applied`, the body never forwarded and no hook invoked.

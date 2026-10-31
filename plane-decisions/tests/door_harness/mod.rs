@@ -696,6 +696,52 @@ impl Door {
         usize::try_from(o.emitted).unwrap()
     }
 
+    /// One piece of `unit` re-called while the door says `more`, keeping nothing of the answer
+    /// (so it allocates nothing of its own): the bytes emitted over every call. Each call must be
+    /// READY.
+    pub fn piece_owed(&self, unit: u64, given: Given<'_>, bufs: &mut Bufs) -> usize {
+        let mut emitted = 0;
+        let mut first = true;
+        loop {
+            let mut i: OnPieceIn = z();
+            i.head = head::<OnPieceIn>(slot::ON_PIECE, ticket_of(unit));
+            i.unit = unit;
+            i.from = given.from;
+            i.dialect = given.dialect;
+            if first {
+                i.flags = given.flags;
+                i.bytes = octets(given.bytes);
+                i.status_code = given.status;
+                i.attempt_no = given.attempt;
+            } else {
+                i.bytes = octets(b"");
+            }
+            (i.reply_buf, i.reply_cap) = (bufs.reply.as_mut_ptr(), bufs.reply.len());
+            (i.fields_buf, i.fields_cap) = (bufs.fields.as_mut_ptr(), bufs.fields.len());
+            (i.arena_buf, i.arena_cap) = (bufs.arena.as_mut_ptr(), bufs.arena.len());
+            (i.records_buf, i.records_cap) = (bufs.records.as_mut_ptr(), bufs.records.len());
+            (i.units_buf, i.units_cap) = (bufs.units.as_mut_ptr(), bufs.units.len());
+            let mut o: OnPieceOut = z();
+            o.head = out_head::<OnPieceOut>();
+            let f = ops().on_piece.expect("on_piece");
+            // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+            #[allow(unused_unsafe)]
+            let ret = unsafe {
+                f(
+                    self.instance,
+                    std::ptr::from_ref(&i).cast(),
+                    std::ptr::from_mut(&mut o).cast(),
+                )
+            };
+            assert!(ret.outcome() == Outcome::Ready);
+            emitted += usize::try_from(o.emitted).unwrap();
+            first = false;
+            if o.more == 0 {
+                return emitted;
+            }
+        }
+    }
+
     /// `refusal` of `unit` (`0`: none arrived) at `status` with the kernel's `text`; `arrived`
     /// says the refusal is the plane's own arrival's. Answers the outcome and the rendered body.
     pub fn refusal(&self, unit: u64, status: u32, text: &str, arrived: bool) -> (Outcome, Vec<u8>) {

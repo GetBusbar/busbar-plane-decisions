@@ -4,7 +4,6 @@ use super::*;
 fn row_for_matches_systemone() {
     let row = row_for("POST", PATH_SYSTEMONE).expect("systemone is declared");
     assert_eq!(row.op, OP_SYSTEMONE);
-    assert!(row.has_request_body);
 }
 
 #[test]
@@ -41,5 +40,17 @@ fn the_method_table_is_the_tails_op_classes() {
 fn row_for_matches_evaluate() {
     let row = row_for("POST", PATH_EVALUATE).expect("evaluate is declared");
     assert_eq!(row.op, OP_EVALUATE);
-    assert!(row.has_request_body);
+}
+
+/// RED (audit plane-decisions round cb0ed01e04, D9): the method table and the claim table are one
+/// key set, in one order: a row with no claim would be served as unclaimed (404), and a claim with
+/// no row would never arrive.
+#[test]
+fn the_method_table_is_the_claim_table() {
+    let methods: Vec<_> = METHODS.iter().map(|r| (r.verb, r.path)).collect();
+    let claims: Vec<_> = crate::driven::tail::CLAIMS
+        .iter()
+        .map(|(verb, path, _)| (*verb, *path))
+        .collect();
+    assert_eq!(methods, claims);
 }

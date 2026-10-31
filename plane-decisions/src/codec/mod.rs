@@ -28,7 +28,8 @@ pub const PTR_USAGE_INPUT_TOKENS: &str = "/usage/input_tokens";
 pub const PTR_USAGE_OUTPUT_TOKENS: &str = "/usage/output_tokens";
 
 /// The pointer a SUCCESSFUL `nanojev` answer states the upstream's own billing unit at: the states
-/// its evaluation ran (an answer with no count refuses loudly).
+/// its evaluation ran (a success with no count bills the plane's floor and says so in one
+/// `diag_warn` line).
 pub const PTR_EXECUTION_STATES: &str = "/execution/states";
 
 /// The pointer a request names the model it is routed over at: its top-level `model`. Routing
@@ -45,12 +46,6 @@ pub fn read_raw<'u>(body: &'u [u8], pointer: &str) -> Option<&'u [u8]> {
         _ => None,
     }
 }
-
-/// The egress-auth scheme an outbound hop to the provider is decorated under.
-///
-/// The plane names the scheme and never holds what is behind it: jev's auth is the gateway's own
-/// bearer credential, returned as a locator the plane never resolves.
-pub(crate) const EGRESS_SCHEME: &str = "decision-egress";
 
 /// The envelope member naming the document type of an outbound body.
 pub(crate) const FIELD_CONTENT_TYPE: &str = "content-type";

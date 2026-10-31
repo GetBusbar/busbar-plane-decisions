@@ -2,9 +2,9 @@
 //!
 //! Mirrors `busbar-plane-a2a`/`busbar-plane-mcp`'s own `invariance.rs`. The manifest names exactly
 //! one busbar crate (the contract, which holds `ModelCfg` and `UpstreamCreds`) plus the serializer.
-//! The forbidden list is `busbar-core`, `busbar-caps`, `busbar-kernel`, `busbar-unit-*`, and the
-//! sibling PLANE crates (naming another plane would be a plane reading another plane's private
-//! surface, never legitimate for any plane). `the_manifest_names_only_what_this_plane_may_name`
+//! The forbidden list is `busbar-core`, `busbar-caps`, `busbar-kernel`, `busbar-unit-*`, the
+//! sibling PLANE crates and every other plugin kind's crates ([`SIBLINGS`]: naming another plugin
+//! would be a plane reading another plugin's private surface, never legitimate for any plane). `the_manifest_names_only_what_this_plane_may_name`
 //! must never be relaxed to keep it green; if `busbar-kernel` returns to the manifest, that is the
 //! line that is supposed to fail.
 
@@ -19,30 +19,22 @@ fn manifest() -> String {
         .expect("the manifest is readable")
 }
 
-/// Every OTHER plane crate directory under `crates/`, read live off the tree rather than spelled by
-/// name — the forbidden list below forbids by SHAPE (`busbar-plane-*`, minus this crate itself)
-/// instead of a plane naming its siblings, which would be a broker-law violation. It also stays
-/// true automatically if the plane roster ever changes.
-fn sibling_plane_dirs() -> Vec<String> {
-    let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("this crate sits under crates/")
-        .to_path_buf();
-    let this = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .file_name()
-        .and_then(|n| n.to_str())
-        .expect("this crate has a directory name")
-        .to_string();
-    let mut out: Vec<String> = std::fs::read_dir(&crates_dir)
-        .expect("crates/ is readable")
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| e.file_name().to_str().map(str::to_string))
-        .filter(|name| name.starts_with("busbar-plane-") && *name != this)
-        .collect();
-    out.sort();
-    out
-}
+/// The crates this plane may never name, by name or by prefix: every sibling plane (a plane names
+/// only itself) and every crate of the other plugin kinds. A fixed list, not a directory listing:
+/// this repository holds no sibling, so a list read off the tree would be empty and the gate could
+/// never fail.
+const SIBLINGS: &[&str] = &[
+    "busbar-plane-llm",
+    "busbar-plane-mcp",
+    "busbar-plane-a2a",
+    "busbar-plane-streaming",
+    "busbar-transport-",
+    "busbar-auth-",
+    "busbar-secret-",
+    "busbar-store-",
+    "busbar-export-",
+    "busbar-hook-",
+];
 
 fn walk(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
     for entry in std::fs::read_dir(dir)
@@ -128,34 +120,67 @@ fn the_source_contains_no_unsafe_block() {
 /// never the legacy plugin-facing one, never a sibling plane.
 #[test]
 fn the_manifest_names_only_what_this_plane_may_name() {
-    let manifest = manifest();
+    let offenders = manifest_offenders(&manifest());
+    assert!(
+        offenders.is_empty(),
+        "the plane depends on {offenders:?}, kernel-side or a sibling plugin"
+    );
+}
+
+/// Every dependency `manifest` names that this plane may not name.
+fn manifest_offenders(manifest: &str) -> Vec<String> {
     let deps = manifest
         .split("[dependencies]")
         .nth(1)
         .expect("the manifest has a dependency section");
+    let mut forbidden: Vec<String> = vec![
+        // The edge this plane alone had, and the one that reached banned source. It is a ban,
+        // not an exception, since `UpstreamCreds` moved to `busbar-contract`.
+        "busbar-api".to_string(),
+        "busbar-core".to_string(),
+        "busbar-caps".to_string(),
+        "busbar-kernel".to_string(),
+        "busbar-unit-".to_string(),
+        "busbar-admin".to_string(),
+    ];
+    forbidden.extend(SIBLINGS.iter().map(|s| (*s).to_string()));
+    let mut offenders = Vec::new();
     for line in deps.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
             continue;
         }
         let name = line.split_whitespace().next().unwrap_or_default();
-        let mut forbidden: Vec<String> = vec![
-            // The edge this plane alone had, and the one that reached banned source. It is a ban,
-            // not an exception, since `UpstreamCreds` moved to `busbar-contract`.
-            "busbar-api".to_string(),
-            "busbar-core".to_string(),
-            "busbar-caps".to_string(),
-            "busbar-kernel".to_string(),
-            "busbar-unit-".to_string(),
-            "busbar-admin".to_string(),
-        ];
-        forbidden.extend(sibling_plane_dirs());
-        for forbidden in &forbidden {
-            assert!(
-                !name.starts_with(forbidden.as_str()),
-                "the plane depends on {name}, which is kernel-side or a sibling plane"
-            );
+        if forbidden.iter().any(|f| name.starts_with(f.as_str())) {
+            offenders.push(name.to_string());
         }
+    }
+    offenders
+}
+
+/// RED (audit plane-decisions round cb0ed01e04, D33): the manifest gate can fail: a sibling plane
+/// or another plugin named as a dependency is caught. RED before: the sibling list was read off a
+/// directory that holds no plane crate, so it was empty and the gate could not fail.
+#[test]
+fn the_manifest_gate_catches_a_sibling_plugin() {
+    for sibling in [
+        "busbar-plane-llm",
+        "busbar-plane-mcp",
+        "busbar-plane-a2a",
+        "busbar-plane-streaming",
+        "busbar-transport-http",
+        "busbar-auth-header",
+        "busbar-secret-env",
+        "busbar-store-memory",
+        "busbar-export-otlp",
+        "busbar-hook-ranking",
+    ] {
+        let manifest = format!("{}\n{sibling} = \"*\"\n", manifest());
+        assert_eq!(
+            manifest_offenders(&manifest),
+            vec![sibling.to_string()],
+            "{sibling} is not caught"
+        );
     }
 }
 

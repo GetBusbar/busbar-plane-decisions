@@ -74,7 +74,6 @@ fn an_attempt_request_is_the_dialects_head() {
     assert_eq!(r.verb, "POST");
     assert_eq!(r.target, "/v1/systemone");
     assert_eq!(r.fields, [("content-type", &b"application/json"[..])]);
-    assert_eq!(r.auth, "decision-egress");
 }
 
 /// The answer's counts as `(class, amount)`, for a far end answering `status` with `body`.
@@ -450,6 +449,10 @@ fn by_pointer(status: u32, body: &[u8]) -> Result<Vec<(u32, u64)>, UnreadableUsa
     if !ok {
         return Ok(vec![]);
     }
+    // A success that is no JSON object states no usage at all: unreadable, never silent.
+    if !body.trim_ascii_start().starts_with(b"{") {
+        return Err(UnreadableUsage(crate::codec::PTR_USAGE_UNITS));
+    }
     let count = |p: &'static str| match read_raw(body, p) {
         None => Ok(None),
         Some(raw) => whole(raw).map(Some).ok_or(UnreadableUsage(p)),
@@ -513,18 +516,18 @@ fn the_reading_is_the_pointers_reading_wherever_the_pieces_split() {
     }
 }
 
-/// An answer of any size is read in the reading's own fixed space.
+/// An answer of any size is read whole, its count found past a megabyte of other bytes. That the
+/// reading keeps nothing of it (no allocation, however long the answer runs) is held by
+/// `tests/door_alloc.rs`, under a counting allocator.
 #[test]
 fn a_large_answer_is_read_without_keeping_it() {
     let mut reading = FarEndReading::default();
-    let before = std::mem::size_of_val(&reading);
     reading.piece(br#"{"answers":{"blob":""#);
     let filler = [b'x'; 4096];
     for _ in 0..256 {
         reading.piece(&filler);
     }
     reading.piece(br#""},"usage":{"units":4}}"#);
-    assert_eq!(std::mem::size_of_val(&reading), before);
     assert_eq!(
         reading.counts(Some(200)).map(|c| c[0].map(|u| u.amount)),
         Ok(Some(4))
@@ -1376,4 +1379,97 @@ fn spliceable_validates_without_a_second_head_read() {
         Some("jev"),
         "jev-1"
     ));
+}
+
+/// RED (audit plane-decisions round cb0ed01e04, D3): a member name is read as JSON reads it, its
+/// escapes decoded (RFC 8259 section 7: `"\u0075nits"` IS `"units"`), wherever the pieces split
+/// it, so an escaped count is billed as reported and an escaped `error` is no success. RED before:
+/// the name was compared with its escapes as written, so the count billed the floor and the error
+/// answer billed a success.
+#[test]
+fn a_member_name_is_compared_with_its_escapes_decoded() {
+    /// An answer, and what it bills.
+    type Case = (&'static [u8], Vec<(u32, u64)>);
+    let cases: [Case; 5] = [
+        (
+            br#"{"usage":{"\u0075nits":7}}"#,
+            vec![(DECISION, 7), (FEE, 1)],
+        ),
+        (
+            br#"{"\u0075sage":{"units":4}}"#,
+            vec![(DECISION, 4), (FEE, 1)],
+        ),
+        (
+            br#"{"usage":{"units":2,"input\u005Ftokens":3,"\/output_tokens":5}}"#,
+            vec![(DECISION, 2), (INPUT, 3), (FEE, 1)],
+        ),
+        (
+            br#"{"\u0065rror":{"code":"x"},"usage":{"units":3}}"#,
+            vec![],
+        ),
+        (
+            br#"{"err\\or":{"code":"x"},"usage":{"units":3}}"#,
+            vec![(DECISION, 3), (FEE, 1)],
+        ),
+    ];
+    for (body, want) in cases {
+        for at in 0..=body.len() {
+            assert_eq!(
+                split_billed(200, body, at),
+                Ok(want.clone()),
+                "{} split at {at}",
+                String::from_utf8_lossy(body)
+            );
+        }
+        assert_eq!(by_pointer(200, body), Ok(want), "the pointers read it so");
+    }
+    assert_eq!(
+        nanojev_billed(200, br#"{"execution":{"\u0073tates":6}}"#),
+        Ok(vec![(DECISION, 6), (FEE, 1)])
+    );
+}
+
+thread_local! {
+    /// How many walks over a request's root object [`spliced_members`] made on this thread.
+    static ROOT_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The seam [`spliced_members`] calls on each walk over the request's root object.
+pub(super) fn walked_root() {
+    ROOT_WALKS.with(|w| w.set(w.get() + 1));
+}
+
+/// RED (audit plane-decisions round cb0ed01e04, D24): a hook's rewrite is spliced over the
+/// caller's members in ONE walk of the request's root object, however many members it has, and
+/// writes the same bytes. RED before: the object was walked once per member (a pointer resolved
+/// per key), so a body of many small members cost members x body.
+#[test]
+fn a_rewrite_is_spliced_in_one_walk_of_the_root_object() {
+    const MEMBERS: usize = 2000;
+    let members: Vec<String> = (0..MEMBERS).map(|i| format!(r#""k{i}":{i}"#)).collect();
+    let body = format!(r#"{{"model":"m",{}}}"#, members.join(","));
+    // The hook drops one member and changes another.
+    let kept: Vec<String> = (1..MEMBERS)
+        .map(|i| {
+            if i == 7 {
+                r#""k7":"seven""#.to_string()
+            } else {
+                format!(r#""k{i}":{i}"#)
+            }
+        })
+        .collect();
+    let document = format!("{{{}}}", kept.join(","));
+    ROOT_WALKS.with(|w| w.set(0));
+    let out = rewritten(body.as_bytes(), &rewrite_of(&document), "m")
+        .expect("applies")
+        .expect("changes the request");
+    let walks = ROOT_WALKS.with(std::cell::Cell::get);
+    assert_eq!(
+        String::from_utf8(out).expect("UTF-8"),
+        format!(r#"{{"model":"m",{}}}"#, kept.join(","))
+    );
+    assert!(
+        walks <= 1,
+        "{MEMBERS} members walked the root object {walks} times"
+    );
 }

@@ -23,8 +23,8 @@ pub const PATH_SYSTEMONE: &str = "/v1/systemone";
 /// The path the `nanojev` dialect's decision call is mounted on.
 pub const PATH_EVALUATE: &str = "/api/evaluate";
 
-/// One row of the method table: which `(verb, path)` is which operation, and whether the request
-/// carries a body this plane must wait for.
+/// One row of the method table: which `(verb, path)` is which operation. Its `(verb, path)` keys
+/// are the claim table's ([`crate::driven::tail::CLAIMS`]), in its order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MethodRow {
     /// The operation class this row declares.
@@ -33,9 +33,6 @@ pub struct MethodRow {
     pub verb: &'static str,
     /// The path the request arrives on.
     pub path: &'static str,
-    /// Whether this operation's REQUEST carries a body this plane must read before it is complete:
-    /// each decision call is a POST with a JSON body.
-    pub has_request_body: bool,
 }
 
 /// The method table, in declaration order.
@@ -44,13 +41,11 @@ pub const METHODS: &[MethodRow] = &[
         op: OP_SYSTEMONE,
         verb: "POST",
         path: PATH_SYSTEMONE,
-        has_request_body: true,
     },
     MethodRow {
         op: OP_EVALUATE,
         verb: "POST",
         path: PATH_EVALUATE,
-        has_request_body: true,
     },
 ];
 
