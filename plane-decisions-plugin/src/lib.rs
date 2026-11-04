@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The `decisions` plane as a droppable busbar plugin: the `cdylib` a signed tarball carries
+//! (`kind: plane`, key `decision`, dialects `jev` and `nanojev`).
 
 #![deny(unsafe_code)]
 

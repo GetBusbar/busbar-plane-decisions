@@ -4,6 +4,7 @@
 //! The number corpus the reader's verdicts are frozen over (`tests/fixtures/number_verdicts.txt`):
 
 /// The mantissas of the grid: a digit, the `u64` and `i64` limits and past them, a mantissa past
+/// 19 digits, and the doubles at the edges of the range.
 pub const MANTISSAS: [&str; 19] = [
     "0",
     "1",
@@ -27,6 +28,7 @@ pub const MANTISSAS: [&str; 19] = [
 ];
 
 /// The exponents of the grid, none among them: at and past the double's range, at and past the
+/// reader's exponent cap (1000), and one past `i32`.
 pub const EXPONENTS: [&str; 27] = [
     "",
     "e0",
@@ -61,6 +63,8 @@ pub const EXPONENTS: [&str; 27] = [
 pub const LONG: [usize; 8] = [100, 290, 308, 309, 400, 700, 800, 2000];
 
 /// The corpus, in rows: each row's label and its numbers, in the fixture's order. A grid row is
+/// one mantissa under every exponent, unsigned then negative; a long row is the seven long forms
+/// of one digit count; the last row holds the cases the exponent cap decides.
 #[must_use]
 pub fn rows() -> Vec<(String, Vec<String>)> {
     let zeros = |n: usize| "0".repeat(n);

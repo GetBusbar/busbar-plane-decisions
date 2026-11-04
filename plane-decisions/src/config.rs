@@ -62,6 +62,7 @@ pub struct DecisionsSection {
 }
 
 /// The first of the two wire dialects this plane speaks ([`PROTOCOLS`]): `jev`, the hosted
+/// provider's.
 pub const PROTOCOL: &str = "jev";
 
 /// The second wire dialect, `nanojev`, whose request spine differs from `jev`'s; `/api/evaluate`

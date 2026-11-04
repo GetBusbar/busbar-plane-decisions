@@ -3,7 +3,8 @@
 
 //! The decisions plane's door: the plane kind's memory-ABI table (`busbar_contract::abi::plane`)
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Mutex;
 
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_PROVIDER, KEEP_NAMED,
@@ -43,6 +44,7 @@ pub const VERSION: &str = "1.6.0";
 const MAX_INFLIGHT: u32 = 64;
 
 /// The most units the instance keeps state for at once; past it, a new arrival is refused
+/// ([`BUSY`]) and no live unit is dropped.
 pub const MAX_UNITS: usize = 4096;
 
 /// [`ArriveOut::refusal`]: the request names no operation this plane claims.
@@ -55,6 +57,7 @@ const STATUS_NOT_FOUND: u32 = 404;
 pub const UNROUTED: u32 = 2;
 
 /// [`ArriveOut::refusal`]: the instance holds [`MAX_UNITS`] live units; the arrival is refused at
+/// [`STATUS_BUSY`], about the entry it routed over, before anything is charged.
 pub const BUSY: u32 = 3;
 
 /// The status a [`BUSY`] arrival is refused at: an arrive refusal is the caller's to retry (4xx).
@@ -65,6 +68,8 @@ const BUSY_WORDS: &str =
     "busbar is holding as many decision calls as it admits at once; retry once one has ended";
 
 /// [`ArriveOut::refusal`]: the request names a model other than its route's `upstream_model` and
+/// its document does not parse, so the far end cannot be sent the routed model
+/// ([`driven::spliceable_named`]); refused at [`STATUS_INTERNAL`], about the entry it routed over.
 pub const UNSPLICEABLE: u32 = 4;
 
 /// The status an [`UNSPLICEABLE`] arrival is refused at.
@@ -74,6 +79,7 @@ const STATUS_INTERNAL: u32 = 500;
 const LABEL: &str = "Decisions";
 
 /// `decisions:` declared, `providers:` consumed ([`tail::SECTION_DECLARING`],
+/// [`tail::SECTIONS_CONSUMED`]).
 const SECTIONS: &[Section] = &[
     Section {
         name: abi_str(tail::SECTION_DECLARING),
@@ -88,6 +94,17 @@ const SECTIONS: &[Section] = &[
 ];
 
 const DIALECTS: &[AbiStr] = &[abi_str(tail::DIALECTS[0]), abi_str(tail::DIALECTS[1])];
+
+// Each ABI table below lists [`tail`]'s rows by index: a row added there and not here fails to build,
+// so the Statement never advertises fewer dialects, op classes or billable classes than the plane has.
+const _: () = assert!(
+    DIALECTS.len() == tail::DIALECTS.len()
+        && DIALECT_AUTH.len() == tail::DIALECT_AUTH.len()
+        && OP_CLASSES.len() == tail::OP_CLASSES.len()
+        && BILLABLE_CLASSES.len() == tail::BILLABLE_CLASSES.len()
+        && FEE_UNITS.len() == tail::FEE_UNITS.len()
+        && SCOPE_KINDS.len() == tail::SCOPE_KINDS.len()
+);
 
 /// Each dialect's default outbound style ([`tail::DIALECT_AUTH`]).
 const DIALECT_AUTH: &[DialectAuth] = &[dialect_auth(0), dialect_auth(1)];
@@ -132,6 +149,8 @@ const FEE_UNITS: &[AbiStr] = &[abi_str(tail::FEE_UNITS[0])];
 const KEEP_RESPONSE_HEADERS: &[AbiStr] = &[abi_str(FIELD_CONTENT_TYPE)];
 
 /// The plane's one need ([`tail::NEEDS`]): outbound to a configured provider, over the claim's
+/// transport, decorated by the kernel in the outbound style it names ([`tail::OUTBOUND_STYLE`],
+/// the operator's credential as a bearer, which the plane never holds).
 pub const NEEDS: &[Need] = &[{
     let mut n = Need::EMPTY.with_keep_response_headers(KEEP_RESPONSE_HEADERS);
     n.direction = DIRECTION_OUTBOUND;
@@ -172,6 +191,7 @@ busbar_contract::statement_extensions!(
 );
 
 /// The Statement: the plane's key and version, its sections, its need, its tail and its
+/// extensions.
 pub const STATEMENT: Statement = Statement {
     extensions: EXTENSIONS,
     ..statement(PLANE_KEY, VERSION, MAX_INFLIGHT)
@@ -206,6 +226,7 @@ pub fn read_settings(settings: &[u8]) -> Result<DecisionsSection, String> {
 }
 
 /// `validate`'s blob (`{<verb>: <section>}`), read at the `decisions:` section. An empty blob, or one that writes no
+/// `decisions:`, is the empty section.
 pub fn read_dealt(settings: &[u8]) -> Result<DecisionsSection, String> {
     match busbar_contract::abi::sdk::plane::dealt_section(settings, tail::SECTION_DECLARING)? {
         None => Ok(DecisionsSection::default()),
@@ -214,6 +235,8 @@ pub fn read_dealt(settings: &[u8]) -> Result<DecisionsSection, String> {
 }
 
 /// One generation's snapshot for a section whose models are of `dialects`: the claims
+/// [`driven::served_claims`] serves, each an exact target over the claim's transport, wearing its
+/// own dialect for a refusal before `arrive`.
 #[must_use]
 pub fn snapshot_spec(dialects: &[u32]) -> SnapshotSpec {
     SnapshotSpec {
@@ -238,6 +261,7 @@ pub struct ModelRoute {
 }
 
 /// Every model's route under `section`: its dialect, its own `protocol` override or else its
+/// provider's protocol (`protocols`, the provider facts the host handed at `open`).
 pub fn routes(
     section: &DecisionsSection,
     protocols: &BTreeMap<String, String>,
@@ -271,6 +295,8 @@ pub fn routes(
 }
 
 /// Every model's own `protocol` override under `section` is a dialect this plane speaks
+/// (`validate`, handed no provider facts: a provider's protocol is judged by the kernel against
+/// the dialects the Statement states).
 pub fn spoken_overrides(section: &DecisionsSection) -> Result<(), String> {
     section
         .models
@@ -280,6 +306,7 @@ pub fn spoken_overrides(section: &DecisionsSection) -> Result<(), String> {
 }
 
 /// The index of `protocol`, model `name`'s resolved one, in [`tail::DIALECTS`], or the refusal
+/// naming the dialects the plane speaks.
 fn dialect_named(name: &str, protocol: &str) -> Result<u32, String> {
     driven::dialect_of(protocol).ok_or_else(|| {
         format!(
@@ -291,6 +318,8 @@ fn dialect_named(name: &str, protocol: &str) -> Result<u32, String> {
 }
 
 /// One generation's snapshot for `section`'s `routes`: [`snapshot_spec`]'s claims for its models'
+/// dialects, and every model it configures listed (the kernel scope-filters them; `/v1/models`
+/// appends them), in ascending name order.
 #[must_use]
 pub fn generation_spec(routes: &BTreeMap<String, ModelRoute>) -> SnapshotSpec {
     let dialects: Vec<u32> = routes.values().map(|r| r.dialect).collect();
@@ -332,6 +361,7 @@ struct Unit {
 }
 
 /// Every model one generation routes over, directly, by name, each with its dialect and
+/// `upstream_model`.
 pub type Routes = BTreeMap<String, ModelRoute>;
 
 /// One instance: every live generation's snapshot with the routes it was built from, and the units
@@ -344,10 +374,33 @@ pub struct DecisionsDoor {
     units: Keyed<u64, Unit>,
     /// Each provider's protocol, as the host stated it at `open` (`PlaneOpenIn::providers`).
     protocols: BTreeMap<String, String>,
+    /// Each `(dialect, member)` whose unreadable count this instance has warned of: 5029 is
+    /// benign-recurring, warned once per instance and member, and logged at debug after that.
+    unreadable: Mutex<BTreeSet<(u32, &'static str)>>,
 }
 
 impl DecisionsDoor {
+    /// An instance over the providers' `protocols`, holding no unit: its units are kept in shards,
+    /// so a piece holds only its unit's shard, rather than every live unit.
+    fn new(protocols: BTreeMap<String, String>) -> Self {
+        Self {
+            generations: Generations::new(),
+            units: Keyed::sharded(),
+            protocols,
+            unreadable: Mutex::new(BTreeSet::new()),
+        }
+    }
+
+    /// Whether an unreadable count at `member` in `dialect` is the first this instance has met.
+    fn first_unreadable(&self, dialect: u32, member: &'static str) -> bool {
+        self.unreadable
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert((dialect, member))
+    }
+
     /// The routes of the newest generation the host holds: a refused generation, retired by the
+    /// host, routes nothing, and the one it kept serving routes again.
     fn routes(&self) -> std::sync::Arc<Routes> {
         self.generations.current().unwrap_or_default()
     }
@@ -371,6 +424,11 @@ macro_rules! slot {
 }
 
 /// The decisions plane's lifecycle over the SDK's
+/// ([`plane_life`](busbar_contract::abi::sdk::plane_life)): `validate`, `open` and
+/// `refresh` are the plane's reads; `retire` drops a generation's snapshot and its routes (a
+/// generation the host refused is retired too, so the one it kept serving routes arrivals again);
+/// `tick`, `drive`, `release` and `close` are the SDK's defaults (no tick wanted, no unsolicited
+/// output, READY under no lease); `cancel` is the plane's own.
 impl PlaneLife for DecisionsDoor {
     /// Each generation's routes, kept beside its snapshot.
     type Held = Routes;
@@ -387,6 +445,7 @@ impl PlaneLife for DecisionsDoor {
     }
 
     /// `open`: the instance, and the first generation's snapshot. REFUSED in the grammar's words,
+    /// as `validate` and `refresh` refuse the same settings.
     fn open(input: &Lent<'_, PlaneOpenIn>) -> Result<Opened<Self>, Refusal> {
         let section = read_settings(input.open().settings().bytes()).map_err(Refusal::refused)?;
         let protocols: BTreeMap<String, String> = input
@@ -401,11 +460,7 @@ impl PlaneLife for DecisionsDoor {
             .collect();
         let routed = routes(&section, &protocols).map_err(Refusal::refused)?;
         Ok(Opened {
-            plane: DecisionsDoor {
-                generations: Generations::new(),
-                units: Keyed::new(),
-                protocols,
-            },
+            plane: DecisionsDoor::new(protocols),
             first: Published {
                 spec: generation_spec(&routed),
                 held: routed,
@@ -414,6 +469,9 @@ impl PlaneLife for DecisionsDoor {
     }
 
     /// `refresh`: the new section judged, and the next generation's snapshot. The routes ride
+    /// beside the snapshot: they route arrivals once the host holds this generation as its
+    /// newest, and go with it when the host retires it (a reload the host refuses after this
+    /// refresh).
     fn refresh(&self, settings: &[u8], _: u64) -> Result<Published<Routes>, Refusal> {
         let section = read_settings(settings).map_err(Refusal::refused)?;
         let routed = routes(&section, &self.protocols).map_err(Refusal::refused)?;
@@ -424,6 +482,7 @@ impl PlaneLife for DecisionsDoor {
     }
 
     /// `cancel`: the unit the host names is dropped (`PlaneCancelIn::unit`, the key its `arrive`
+    /// kept), subject to the SDK's ticket and completion checks.
     fn cancel(
         instance: Instance<'_, Self>,
         input: Lent<'_, PlaneCancelIn>,
@@ -494,17 +553,14 @@ slot!(
                 f.value().bytes(),
             )
         }));
-        let unit = input.unit();
-        let kept = plane.units.with_all(|units| {
-            let Some(kept) = unit_of(units, unit) else {
-                return false;
-            };
-            kept.caller = caller;
-            kept.upstream = upstream;
-            kept.routes = Some(std::sync::Arc::clone(&generation));
-            true
-        });
-        if !kept {
+        let kept = plane
+            .units
+            .with_or_insert_within(input.unit(), MAX_UNITS, Unit::default, |kept| {
+                kept.caller = caller;
+                kept.upstream = upstream;
+                kept.routes = Some(std::sync::Arc::clone(&generation));
+            });
+        if kept.is_none() {
             // Full: the arrival is refused, about the entry it routed over, and no live unit
             // is dropped to make room.
             out.set(|o| &o.refusal, BUSY);
@@ -554,6 +610,7 @@ fn settle(
 }
 
 /// Write what `unit` owes into the reply buffer, as much as fits; `more = 1` while any is left,
+/// and its flags (with `EMIT_DONE` held back until the last byte) on every write.
 fn pay(unit: &mut Unit, input: Lent<'_, OnPieceIn>, out: &mut Out<'_, OnPieceOut>) -> bool {
     let n = input.reply_buf().stream(&unit.owed[unit.at..]);
     unit.at += n;
@@ -577,6 +634,8 @@ fn pay(unit: &mut Unit, input: Lent<'_, OnPieceIn>, out: &mut Out<'_, OnPieceOut
 }
 
 /// A paid debt's buffer: one bound for the far end (the caller's body) goes now, not when the far
+/// end's last piece ends the unit, since nothing more is owed that way while the unit waits; one
+/// of the far end's answer is kept, emptied, for its next piece.
 fn release(unit: &mut Unit) {
     if unit.owed_flags & EMIT_TO_FAR_END != 0 {
         unit.owed = Vec::new();
@@ -586,6 +645,7 @@ fn release(unit: &mut Unit) {
 }
 
 /// Owe `bytes` under `flags`: write what fits straight from `bytes`, and keep only what does not
+/// fit for the re-calls `more = 1` asks for.
 fn owe(
     unit: &mut Unit,
     bytes: &[u8],
@@ -610,13 +670,18 @@ fn owe(
 }
 
 /// An attempt: the request bound for the far end, its verb, target and dialect fields. A new
+/// attempt starts a new far-end answer.
 fn attempt_piece(
     unit: &mut Unit,
     input: Lent<'_, OnPieceIn>,
     out: &mut Out<'_, OnPieceOut>,
 ) -> Outcome {
     let dialect = input.dialect();
-    let request = driven::attempt_request(dialect);
+    // A dialect no claim of this plane names (a host the plane never answered it to) is refused,
+    // never dialled at another dialect's path.
+    let Some(request) = driven::attempt_request(dialect) else {
+        return Outcome::Refused;
+    };
     let (mut fields, units, mut arena) = (input.fields_buf(), input.units_buf(), input.arena_buf());
     let verb = arena.span(request.verb.as_bytes());
     let target = arena.span(request.target.as_bytes());
@@ -653,22 +718,22 @@ fn attempt_piece(
 }
 
 /// One piece of the far end's answer: read, and relayed to the caller unchanged with its status
+/// and document type on the first piece and its count on the last.
 fn far_end(
+    plane: &DecisionsDoor,
     unit: &mut Unit,
     input: Lent<'_, OnPieceIn>,
     out: &mut Out<'_, OnPieceOut>,
 ) -> (Outcome, bool) {
-    let given = input;
-
-    let trailers = given.flags() & PIECE_FIELDS != 0;
+    let trailers = input.flags() & PIECE_FIELDS != 0;
     let bytes = if trailers { &[] } else { input.bytes().bytes() };
-    let first = !trailers && given.flags() & PIECE_HAS_STATUS != 0;
-    let last = given.flags() & PIECE_LAST != 0;
+    let first = !trailers && input.flags() & PIECE_HAS_STATUS != 0;
+    let last = input.flags() & PIECE_LAST != 0;
     if !unit.recall {
         unit.reading.piece(bytes);
 
-        if first || (trailers && given.flags() & PIECE_HAS_STATUS != 0) {
-            unit.status = Some(given.status_code());
+        if first || (trailers && input.flags() & PIECE_HAS_STATUS != 0) {
+            unit.status = Some(input.status_code());
         }
     }
     let (mut fields, mut units, mut arena) =
@@ -686,7 +751,7 @@ fn far_end(
     }
     let mut unreadable = None;
     if last {
-        let counts = if given.flags() & PIECE_CUT != 0 {
+        let counts = if input.flags() & PIECE_CUT != 0 {
             unit.reading.cut(unit.status)
         } else {
             match unit.reading.counts(unit.status) {
@@ -714,28 +779,29 @@ fn far_end(
     }
 
     if let Some(pointer) = unreadable {
-        busbar_contract::diag_warn!(
-            busbar_contract::diagnostic::USAGE_TAP_DECODE_FAILED,
-            member = pointer,
-            "the far end's answer has no whole count at `{pointer}`: usage is \
-             unreadable; an unreadable decision count bills the plane's floor of \
-             one, never 0, and an unreadable token count is not billed"
-        );
+        if plane.first_unreadable(input.dialect(), pointer) {
+            busbar_contract::diag_warn!(
+                busbar_contract::diagnostic::USAGE_TAP_DECODE_FAILED,
+                member = pointer,
+                "the far end's answer has no whole count at `{pointer}`: usage is \
+                 unreadable; an unreadable decision count bills the plane's floor of \
+                 one, never 0, and an unreadable token count is not billed"
+            );
+        } else {
+            busbar_contract::diag_debug!(
+                busbar_contract::diagnostic::USAGE_TAP_DECODE_FAILED,
+                member = pointer,
+                "the far end's answer again has no whole count at `{pointer}`; billed \
+                 as before"
+            );
+        }
     }
     unit.recall = false;
     if first {
-        out.set(|o| &o.reply_status, given.status_code());
+        out.set(|o| &o.reply_status, input.status_code());
     }
     let done = owe(unit, bytes, if last { EMIT_DONE } else { 0 }, input, out);
     (Outcome::Ready, done)
-}
-
-/// `unit`'s state in `units`, a new entry when it has none; `None` when it has none and
-fn unit_of(units: &mut BTreeMap<u64, Unit>, key: u64) -> Option<&mut Unit> {
-    if units.len() >= MAX_UNITS && !units.contains_key(&key) {
-        return None;
-    }
-    Some(units.entry(key).or_default())
 }
 
 slot!(
@@ -745,27 +811,27 @@ slot!(
         let Some(plane) = instance.get() else {
             return Outcome::Failed;
         };
-        let given = input;
         let bytes = input.bytes().bytes();
-        plane.units.with_all(|units| {
+        let key = input.unit();
+        let (outcome, done) = plane.units.with(&key, |unit| {
             // Only a unit `arrive` keeps state for is served: one whose state is gone (cancelled,
             // refused, or never arrived) would cross without its `upstream_model` and its caller
             // fields.
-            let Some(unit) = units.get_mut(&given.unit()) else {
-                return Outcome::Refused;
+            let Some(unit) = unit else {
+                return (Outcome::Refused, false);
             };
-            unit.ticket = Some(given.head().ticket());
+            unit.ticket = Some(input.head().ticket());
             // A re-call after `more = 1` carries no bytes, no flags and no attempt: it is paid from
             // what is owed.
-            let continues = bytes.is_empty() && given.flags() == 0 && given.attempt_no() == 0;
-            let (outcome, done) = if continues && unit.at < unit.owed.len() {
+            let continues = bytes.is_empty() && input.flags() == 0 && input.attempt_no() == 0;
+            if continues && unit.at < unit.owed.len() {
                 (Outcome::Ready, pay(unit, input, &mut out))
             } else {
-                match given.from() {
-                    FROM_KERNEL if given.attempt_no() != 0 => {
+                match input.from() {
+                    FROM_KERNEL if input.attempt_no() != 0 => {
                         (attempt_piece(unit, input, &mut out), false)
                     }
-                    FROM_CALLER => match driven::caller_piece(bytes, given.flags() & PIECE_LAST != 0) {
+                    FROM_CALLER => match driven::caller_piece(bytes, input.flags() & PIECE_LAST != 0) {
                         CallerAnswer::Empty => (Outcome::Refused, true),
                         CallerAnswer::Keep if unit.attempt => {
                             let spliced =
@@ -775,15 +841,15 @@ slot!(
                         }
                         CallerAnswer::Keep => (Outcome::Ready, false),
                     },
-                    FROM_FAR_END => far_end(unit, input, &mut out),
+                    FROM_FAR_END => far_end(plane, unit, input, &mut out),
                     _ => (Outcome::Refused, false),
                 }
-            };
-            if done {
-                units.remove(&given.unit());
             }
-            outcome
-        })
+        });
+        if done {
+            plane.units.remove(&key);
+        }
+        outcome
     }
 );
 
@@ -792,14 +858,13 @@ slot!(
     /// wait the kernel handed beside it (`retry_after_s`, a limit's rolling window or the walk's
     /// floor) as `Retry-After`, as every plane answers it.
     RefusalSlot, RefusalIn, RefusalOut, |instance, input, mut out| {
-        let given = input;
         // The refusal ends the unit: its state goes with it.
         if let Some(plane) = instance.get() {
-            if given.unit() != 0 {
-                plane.units.remove(&given.unit());
+            if input.unit() != 0 {
+                plane.units.remove(&input.unit());
             }
         }
-        let status = u16::try_from(given.status()).unwrap_or(0);
+        let status = u16::try_from(input.status()).unwrap_or(0);
         let text = input.text().as_str().unwrap_or_default();
         let body = driven::refusal_body(status, text);
         let (mut reply, mut fields, mut arena) =
@@ -809,8 +874,8 @@ slot!(
             name: arena.span(FIELD_CONTENT_TYPE.as_bytes()),
             value: arena.span(CONTENT_TYPE_JSON),
         });
-        if given.retry_after_s() > 0 {
-            let wait = given.retry_after_s().to_string();
+        if input.retry_after_s() > 0 {
+            let wait = input.retry_after_s().to_string();
             fields.push(OutField {
                 name: arena.span(FIELD_RETRY_AFTER.as_bytes()),
                 value: arena.span(wait.as_bytes()),
@@ -858,11 +923,13 @@ const NO_SPAN: Span = Span {
 slot!(
     /// `project`: the hook view of a unit's request ([`driven::project_read`]). A request-stage
     /// hook's rewrite is applied first, in the request's dialect ([`driven::rewritten_read`],
-    /// wholesale; a rewrite naming another model is REFUSED, the hook's failure; a rewrite with a
+    /// wholesale; a rewrite naming another model is REFUSED, and the kernel refuses the unit; a rewrite with a
     /// document over a body whose whole document does not parse is FAULT, the kernel's shared
     /// 500): the rewritten request is answered in `rewritten` (the body the kernel keeps and
-    /// re-pushes on every attempt from then on) and is the request projected; a rewrite that does
-    /// not apply leaves the request as it was. The view's
+    /// re-pushes on every attempt from then on) and is the request projected; a rewrite naming no
+    /// document is answered READY with no rewritten body (the plane leaves the request as it was,
+    /// and the kernel, which never forwards a body un-rewritten, refuses a unit whose rewrite named
+    /// messages). The view's
     /// pool is the entry the request routes over (in the generation `arrive` routed the unit in),
     /// its dialect the claim's, and its one turn the
     /// request document, shown only to a hook granted the prompt. The plane reads nothing of the content
@@ -882,7 +949,7 @@ slot!(
         // over the newest the host holds.
         let generation = plane
             .units
-            .with_all(|units| units.get(&input.unit()).and_then(|u| u.routes.clone()))
+            .with(&input.unit(), |unit| unit.and_then(|u| u.routes.clone()))
             .unwrap_or_else(|| plane.routes());
         let routes: &Routes = &generation;
         // The document is checked before any rewrite hook runs, failing closed on a body that
@@ -903,9 +970,20 @@ slot!(
         } else {
             match driven::rewritten_read(body, &read, rewrite, view.entry) {
                 Ok(rewritten) => rewritten,
-                // A rewrite naming another model is the hook's failure, never a switch of provider:
-                // REFUSED, and the kernel answers it by that hook's `on_error`.
-                Err(driven::NotApplied::Model(_)) => return Outcome::Refused,
+                // A rewrite naming another model is never a switch of provider: REFUSED (and said
+                // so in the plugin's log), and the kernel refuses the unit.
+                Err(driven::NotApplied::Model(refused)) => {
+                    let named = driven::echoed(&refused.named);
+                    let named = named.escape_debug();
+                    tracing::warn!(
+                        entry = view.entry,
+                        "a request-stage hook's rewrite names another model, `{named}`, than \
+                         `{}`, the one the request routes over; the plane refuses the rewrite, \
+                         never switching the provider",
+                        view.entry.escape_debug()
+                    );
+                    return Outcome::Refused;
+                }
                 // The body's whole document does not parse: the kernel always answers 500 `request
                 // rewrite could not be applied`, whatever the hook's `on_error`, and the body is
                 // never forwarded.

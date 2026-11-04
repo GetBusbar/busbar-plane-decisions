@@ -28,10 +28,13 @@ pub mod tail {
     /// The index of `nanojev` in [`DIALECTS`].
     pub const DIALECT_NANOJEV: u32 = 1;
 
-    /// The outbound auth style a jev far end is reached under: the operator's credential as a
+    /// The outbound auth style both dialects default to ([`DIALECT_AUTH`]) and the plane's one
+    /// Need names ([`NEEDS`]): the operator's credential as a bearer, returned as a locator the
+    /// plane never resolves.
     pub const OUTBOUND_STYLE: &str = "bearer";
 
     /// Each dialect's default outbound auth style, `(dialect index, style)`: a provider entry's
+    /// `auth:` wins, else this.
     pub const DIALECT_AUTH: &[(u32, &str)] = &[
         (DIALECT_JEV, OUTBOUND_STYLE),
         (DIALECT_NANOJEV, OUTBOUND_STYLE),
@@ -50,9 +53,12 @@ pub mod tail {
     pub const AUDIT_KIND: &str = SCOPE_KINDS[0];
 
     /// The op classes this plane serves, in index order: each dialect's decision call (see the
+    /// module doc).
     pub const OP_CLASSES: &[OpClassId] = &[ops::OP_SYSTEMONE, ops::OP_EVALUATE];
 
     /// The billable classes, in index order, each with its family: the decision count, the fee
+    /// unit (also a class: the tail check holds `fee_units ⊆ billable_classes`), and the far end's
+    /// input and output tokens.
     pub const BILLABLE_CLASSES: &[(MeterClassId, &str)] = &[
         (meta::CLASS_DECISION, DECISION_FAMILY),
         (MeterClassId::new(FEE_PER_REQUEST), FEE_FAMILY),
@@ -79,6 +85,7 @@ pub mod tail {
     pub const CLASS_OUTPUT_TOKENS_INDEX: u32 = 3;
 
     /// The fee unit: the request fee (`decisions.fees.per_request`), counted `1` on a unit whose
+    /// far end answered a success, so a refused or failed unit owes none.
     pub const FEE_PER_REQUEST: &str = busbar_contract::plane::PER_REQUEST;
 
     /// The family of the fee unit's class: a count of 0 or 1.
@@ -91,9 +98,11 @@ pub mod tail {
     pub const FEE_UNITS: &[&str] = &[FEE_PER_REQUEST];
 
     /// The connection needs, `(transport, auth)`, for the far-end direction: its dialect's style, the
+    /// one a member resolves to by default (a member is bound on the need its resolved style names).
     pub const NEEDS: &[(&str, &str)] = &[(claims::TRANSPORT, OUTBOUND_STYLE)];
 
     /// The claims a generation snapshot may publish, `(verb, target, dialect)`: each dialect's one
+    /// exact claim.
     pub const CLAIMS: &[(&str, &str, u32)] = &[
         ("POST", ops::PATH_SYSTEMONE, DIALECT_JEV),
         ("POST", ops::PATH_EVALUATE, DIALECT_NANOJEV),
@@ -122,8 +131,10 @@ pub fn dialect_of(protocol: &str) -> Option<u32> {
 /// Why a claimed request routes over no configured model.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unrouted {
-    /// The request names no model and the generation configures several.
+    /// The request names no model and the generation configures several of its dialect.
     Unnamed,
+    /// The generation configures no model of the request's dialect: naming one cannot route it.
+    NoModel,
     /// The request's `model` is not a string.
     NotAName,
     /// The request names a model the generation does not configure.
@@ -141,7 +152,7 @@ impl Unrouted {
     pub const fn status(&self) -> u16 {
         match self {
             Self::Unnamed | Self::NotAName | Self::EmptyModel | Self::Unparsable => 400,
-            Self::Unknown(_) => 404,
+            Self::Unknown(_) | Self::NoModel => 404,
         }
     }
 
@@ -152,11 +163,10 @@ impl Unrouted {
             Self::Unnamed => "the request names no model, and several decisions models are \
                               configured: name one in `model`"
                 .to_string(),
-
-            Self::NotAName => MISSING_MODEL.to_string(),
+            Self::NoModel => NO_MODEL.to_string(),
+            Self::NotAName | Self::EmptyModel => MISSING_MODEL.to_string(),
             Self::Unknown(model) => format!("{UNKNOWN_HEAD}{model}{UNKNOWN_TAIL}"),
             Self::Unparsable => UNPARSABLE.to_string(),
-            Self::EmptyModel => MISSING_MODEL.to_string(),
         }
     }
 }
@@ -167,10 +177,15 @@ pub const UNPARSABLE: &str = "We could not parse the JSON body of your request."
 /// The words a request with an empty `model` is refused in, at 400.
 pub const MISSING_MODEL: &str = "Missing required parameter: 'model'.";
 
+/// The words a request is refused in, at 404, when no configured model speaks its dialect.
+pub const NO_MODEL: &str = "no decisions model is configured for this operation";
+
 /// The parse depth a body is read to: a body nested deeper is refused before any document is
+/// built, as one that does not parse.
 pub const MAX_PARSE_DEPTH: usize = 128;
 
 /// The body as 1.5.5 read it, for a body the span scanner cannot walk: the whole document, or
+/// [`Unrouted::Unparsable`] for one 1.5.5 refused (malformed, or past [`MAX_PARSE_DEPTH`]).
 pub fn parsed(body: &[u8]) -> Result<serde_json::Value, Unrouted> {
     if !valid(body) {
         return Err(Unrouted::Unparsable);
@@ -188,12 +203,15 @@ pub fn parsed(body: &[u8]) -> Result<serde_json::Value, Unrouted> {
 }
 
 /// An open container of [`built`]: an array's items so far, or an object's members so far and
+/// the key of the member being read.
 enum OpenValue {
     Array(Vec<serde_json::Value>),
     Object(serde_json::Map<String, serde_json::Value>, String),
 }
 
 /// [`parsed`]'s document for a body [`valid`] holds to be one, built without recursion from the
+/// walk [`Skip`] makes, each number as 1.5.5's reader read it ([`number`]), each
+/// string decoded; a repeated key keeps its last value, as serde's map does.
 fn built(body: &[u8]) -> Option<serde_json::Value> {
     use serde_json::Value;
     let mut at = Skip::lenient(body);
@@ -271,6 +289,8 @@ const UNKNOWN_HEAD: &str = "The model '";
 const UNKNOWN_TAIL: &str = "' does not exist or you do not have access to it.";
 
 /// The most bytes of a requested model's name an unknown-model refusal echoes: every byte the
+/// refusal's words may run (`busbar_contract::abi::plane::MAX_REFUSAL_TEXT`, past which the `arrive`
+/// is a FAULT) but the sentence's own.
 pub const MAX_ECHOED_MODEL: usize = busbar_contract::abi::plane::MAX_REFUSAL_TEXT as usize
     - UNKNOWN_HEAD.len()
     - UNKNOWN_TAIL.len();
@@ -279,6 +299,7 @@ pub const MAX_ECHOED_MODEL: usize = busbar_contract::abi::plane::MAX_REFUSAL_TEX
 const CUT_MARK: &str = "...";
 
 /// What an unknown-model refusal echoes of `name`: the whole name up to [`MAX_ECHOED_MODEL`] bytes,
+/// else its first bytes to a character boundary, followed by `...`, within the same bound.
 #[must_use]
 pub fn echoed(name: &str) -> String {
     if name.len() <= MAX_ECHOED_MODEL {
@@ -291,19 +312,30 @@ pub fn echoed(name: &str) -> String {
     format!("{}{CUT_MARK}", &name[..cut])
 }
 
+/// The request member a request names its model in, and routes by ([`codec::PTR_MODEL`]).
+const MODEL: &str = "model";
+
 /// The top-level keys decoded while a body is validated: `model`, `stream`, `stream_options`,
+/// `system` and the array-stream shim key.
 const HEAD_KEYS: &[&str] = &[
     "__busbar_gemini_json_array",
-    "model",
+    MODEL,
     "stream",
     "stream_options",
     "system",
 ];
 
 /// The deepest value of [`HEAD_KEYS`] decoded (sonic-rs 0.5.8 `MAX_ALLOWED_DEPTH`): its deserializer starts with `u8::MAX` (255) levels,
+/// each object or array it builds takes one and the 255th refuses `RecursionLimitExceeded`; the root
+/// object takes the first, so a head value may nest 253 deep.
 const HEAD_VALUE_DEPTH: usize = 253;
 
 /// The body as ingress reads it: at most [`MAX_PARSE_DEPTH`] deep by the depth scan, UTF-8
+/// throughout, then one validating parse that builds no document (trailing bytes, a bad number, a
+/// bad escape or a truncated document refuse), decoding the top-level keys, the values of
+/// [`HEAD_KEYS`] and a root scalar (so a root number that overflows to infinity refuses) and only
+/// skipping every other value, as sonic-rs 0.5.8 skips it ([`Skip`]): a `\u` escape inside a skipped value is not checked for its
+/// hex digits, a skipped number is not checked for its range and a skipped value has no depth bound.
 pub fn readable(body: &[u8]) -> Result<Option<serde_json::Value>, Unrouted> {
     if busbar_contract::spans::exceeds_max_depth(body, MAX_PARSE_DEPTH) {
         return Err(Unrouted::Unparsable);
@@ -318,12 +350,16 @@ pub fn readable(body: &[u8]) -> Result<Option<serde_json::Value>, Unrouted> {
 }
 
 /// Whether `span` is one value as 1.5.5 DECODED it (a top-level key, a value of [`HEAD_KEYS`], a
+/// root scalar), read strictly ([`Skip::strict`]): every escape whole, every surrogate paired and
+/// every number one 1.5.5's reader took ([`number`]).
 fn decodes(span: &[u8]) -> bool {
     let mut strict = Skip::strict(span);
     strict.skip_one().is_ok() && strict.next_non_space().is_none()
 }
 
 /// [`decodes`], and the value built. A number serde reads as out of range where 1.5.5's reader did
+/// not (the exponent cap of [`number`]) is built as `null`: only the `model` is kept,
+/// and a `model` that is no string is none ([`Unrouted::NotAName`]) either way.
 fn decoded(span: &[u8]) -> Result<serde_json::Value, ()> {
     if !decodes(span) {
         return Err(());
@@ -334,6 +370,10 @@ fn decoded(span: &[u8]) -> Result<serde_json::Value, ()> {
 }
 
 /// sonic-rs 0.5.8's CHECKED SKIP (`Parser::skip_one(true)`, what `serde::de::IgnoredAny` ran in
+/// 1.5.5's head parse), over a body: structure, numbers, literals, control characters and the
+/// simple escapes are validated, and a `\u` escape is skipped WITHOUT looking at its hex
+/// (`skip_escaped_chars`: after a backslash it consumes the next byte, and for `u` four more, which
+/// may be anything but the buffer's end).
 struct Skip<'b> {
     bytes: &'b [u8],
     at: usize,
@@ -341,6 +381,8 @@ struct Skip<'b> {
 }
 
 /// The value 1.5.5's reader read `bytes` as (one JSON number, held to the JSON grammar): an
+/// unsigned or a negative integer, or a finite float; `None` where it refused the number
+/// (`FloatMustBeFinite`, the parse 400).
 fn number(bytes: &[u8]) -> Option<sonic_number::ParserNumber> {
     let negative = bytes.first() == Some(&b'-');
     let mut at = usize::from(negative);
@@ -392,6 +434,7 @@ impl<'b> Skip<'b> {
     }
 
     /// The root value: an object's keys and head values decoded, an array's elements skipped, a
+    /// root scalar (string, number or literal) decoded.
     fn top_level(&mut self) -> Result<Option<serde_json::Value>, ()> {
         self.eat_spaces();
         match self.peek() {
@@ -438,7 +481,7 @@ impl<'b> Skip<'b> {
                     return Err(());
                 }
                 let span = &self.bytes[start..self.at];
-                if key == "model" {
+                if key == MODEL {
                     model = Some(decoded(span)?);
                 } else if !decodes(span) {
                     return Err(());
@@ -453,6 +496,7 @@ impl<'b> Skip<'b> {
     }
 
     /// One value skipped (`skip_one(true)`, with sonic's `skip_object` and `skip_array`), without
+    /// recursion: the containers still open are kept innermost last (`true` an object).
     fn skip_one(&mut self) -> Result<usize, ()> {
         let mut open: Vec<bool> = Vec::new();
         let mut deepest = 0;
@@ -572,6 +616,7 @@ impl<'b> Skip<'b> {
     }
 
     /// `do_skip_number`: an optional `-`, a digit (no leading zero before another), at most one
+    /// fraction (a digit required) and an exponent (a digit required).
     fn skip_number(&mut self, first: u8) -> Result<(), ()> {
         let start = self.at - 1;
         self.skip_number_token(first)?;
@@ -625,6 +670,7 @@ impl<'b> Skip<'b> {
     }
 
     /// `skip_string`, the opening quote consumed: a control character refuses, a backslash is
+    /// followed by [`Self::skip_escape`].
     fn skip_string(&mut self) -> Result<(), ()> {
         let start = self.at - 1;
         self.skip_string_token()?;
@@ -647,6 +693,8 @@ impl<'b> Skip<'b> {
     }
 
     /// `skip_escaped_chars`, the backslash consumed. `u` needs six bytes left (itself, four more and
+    /// the byte after) and eats five, unchecked; any other byte is eaten and must be a simple
+    /// escape.
     fn skip_escape(&mut self) -> Result<(), ()> {
         match self.peek().ok_or(())? {
             b'u' if self.bytes.len() - self.at < 6 => Err(()),
@@ -663,51 +711,43 @@ impl<'b> Skip<'b> {
 }
 
 /// What a read of the body ([`readable`], once) names as its model: the model of a
-pub fn named_in<'a>(
+/// read already made.
+pub fn named_in(
     read: &Result<Option<serde_json::Value>, Unrouted>,
-) -> Result<Option<std::borrow::Cow<'a, str>>, Unrouted> {
+) -> Result<Option<String>, Unrouted> {
     match read {
         Err(unrouted) => Err(unrouted.clone()),
         Ok(None) => Ok(None),
         Ok(Some(serde_json::Value::String(name))) if name.is_empty() => Err(Unrouted::EmptyModel),
-        Ok(Some(serde_json::Value::String(name))) => {
-            Ok(Some(std::borrow::Cow::Owned(name.clone())))
-        }
+        Ok(Some(serde_json::Value::String(name))) => Ok(Some(name.clone())),
         Ok(Some(_)) => Err(Unrouted::NotAName),
     }
 }
 
-/// [`route_named`] without the `model` the body named: the tests' reading.
-#[cfg(test)]
-pub fn route_model<'m, V>(
+/// A routed request: the configured model's name and entry, and the `model` the body named.
+pub type Routed<'m, V> = (&'m str, &'m V, Option<String>);
+
+/// The model a claimed request routes over among the `models` its claim's dialect `serves` (the
+/// generation's configured names, each with what this plane keeps of it): the one it names, else
+/// the only one of that dialect configured.
+pub fn route_named<'m, V>(
     body: &[u8],
     models: &'m std::collections::BTreeMap<String, V>,
     serves: impl Fn(&V) -> bool,
-) -> Result<(&'m str, &'m V), Unrouted> {
-    route_named(body, models, serves).map(|(name, entry, _)| (name, entry))
-}
-
-/// The model a claimed request routes over among the `models` its claim's dialect `serves` (the
-#[allow(clippy::type_complexity)]
-pub fn route_named<'m, 'b, V>(
-    body: &'b [u8],
-    models: &'m std::collections::BTreeMap<String, V>,
-    serves: impl Fn(&V) -> bool,
-) -> Result<(&'m str, &'m V, Option<std::borrow::Cow<'b, str>>), Unrouted> {
+) -> Result<Routed<'m, V>, Unrouted> {
     route_read(&readable(body), models, serves)
 }
 
 /// [`route_named`] over a read of the body already made ([`readable`], once).
-#[allow(clippy::type_complexity)]
-pub fn route_read<'m, 'b, V>(
+pub fn route_read<'m, V>(
     read: &Result<Option<serde_json::Value>, Unrouted>,
     models: &'m std::collections::BTreeMap<String, V>,
     serves: impl Fn(&V) -> bool,
-) -> Result<(&'m str, &'m V, Option<std::borrow::Cow<'b, str>>), Unrouted> {
+) -> Result<Routed<'m, V>, Unrouted> {
     let requested = named_in(read)?;
     match &requested {
         Some(name) => models
-            .get_key_value(name.as_ref())
+            .get_key_value(name.as_str())
             .filter(|(_, v)| serves(v))
             .map(|(k, v)| (k.as_str(), v))
             .ok_or_else(|| Unrouted::Unknown(echoed(name))),
@@ -715,7 +755,8 @@ pub fn route_read<'m, 'b, V>(
             let mut all = models.iter().filter(|(_, v)| serves(v));
             match (all.next(), all.next()) {
                 (Some((k, v)), None) => Ok((k.as_str(), v)),
-                _ => Err(Unrouted::Unnamed),
+                (None, _) => Err(Unrouted::NoModel),
+                (Some(_), Some(_)) => Err(Unrouted::Unnamed),
             }
         }
     }
@@ -723,6 +764,8 @@ pub fn route_read<'m, 'b, V>(
 }
 
 /// The `upstream_model` splice: `body` with its top-level `model` value replaced by `upstream`, when
+/// the body names a model and it differs from `upstream`; `None` when the body passes through
+/// unchanged.
 #[must_use]
 pub fn spliced(body: &[u8], upstream: &str) -> Option<Vec<u8>> {
     let span = match busbar_contract::spans::resolve_pointer(body, codec::PTR_MODEL) {
@@ -731,12 +774,12 @@ pub fn spliced(body: &[u8], upstream: &str) -> Option<Vec<u8>> {
         busbar_contract::spans::Resolved::Malformed
         | busbar_contract::spans::Resolved::NeedMore => {
             let mut document = parsed(body).ok()?;
-            let named = document.get("model")?.as_str()?;
+            let named = document.get(MODEL)?.as_str()?;
             if named == upstream {
                 return None;
             }
             document.as_object_mut()?.insert(
-                "model".to_string(),
+                MODEL.to_string(),
                 serde_json::Value::String(upstream.to_string()),
             );
             return Some(document.to_string().into_bytes());
@@ -754,28 +797,22 @@ pub fn spliced(body: &[u8], upstream: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// [`spliceable_named`] over the `model` the body names, read here: the tests' reading.
-#[cfg(test)]
-#[must_use]
-pub fn spliceable(body: &[u8], upstream: &str) -> bool {
-    match readable(body) {
-        Ok(Some(serde_json::Value::String(named))) => {
-            spliceable_named(body, Some(&named), upstream)
-        }
-        _ => true,
-    }
-}
-
 /// Whether [`spliced`] can set `upstream` in `body` where it must: a body naming a model other
+/// than `upstream` is rewritten on its hop, which materializes the whole document; one whose
+/// document would not parse (a string its head never decoded but the document parse refuses) is
+/// answered 500 ([`INTERNAL_ERROR`]) by `arrive`, never relayed with the caller's model unspliced.
 #[must_use]
 pub fn spliceable_named(body: &[u8], named: Option<&str>, upstream: &str) -> bool {
     match named {
-        Some(named) if named != upstream => valid(body),
+        // `named` came from a read [`readable`] accepted, so the body is UTF-8 and within the parse
+        // depth already: only its strict walk is left to judge.
+        Some(named) if named != upstream => decodes(body),
         _ => true,
     }
 }
 
 /// Whether the body's whole document parses, as the DOM parse reads it (strings decoded, so a
+/// bad escape or a lone surrogate refuses; numbers read by [`number`]), by a walk that builds no tree ([`Skip::strict`]).
 #[must_use]
 pub fn valid(body: &[u8]) -> bool {
     if busbar_contract::spans::exceeds_max_depth(body, MAX_PARSE_DEPTH)
@@ -787,6 +824,7 @@ pub fn valid(body: &[u8]) -> bool {
 }
 
 /// Whether `span`, one string with its quotes, decodes as 1.5.5 decoded a string: every escape
+/// whole and every surrogate paired.
 fn string_decodes(span: &[u8]) -> bool {
     let mut de = serde_json::Deserializer::from_slice(span);
     <Valid as serde::Deserialize>::deserialize(&mut de).is_ok() && de.end().is_ok()
@@ -848,16 +886,22 @@ impl<'de> serde::de::Visitor<'de> for ValidVisitor {
 }
 
 /// The words for a request whose document would not parse where it had to be rewritten for its
+/// hop, at 500.
 pub const INTERNAL_ERROR: &str = "We received an unexpected internal error. Please try again.";
 
 /// The dialect whose claim `target` names (its path; a query is not the path), where one does.
 #[must_use]
 pub fn dialect_at(target: &str) -> Option<u32> {
-    let path = target.split_once('?').map_or(target, |(path, _)| path);
+    let path = path_of(target);
     tail::CLAIMS
         .iter()
         .find(|(_, t, _)| *t == path)
         .map(|(_, _, dialect)| *dialect)
+}
+
+/// A request target's path: the target up to its query, if it has one.
+fn path_of(target: &str) -> &str {
+    target.split_once('?').map_or(target, |(path, _)| path)
 }
 
 /// The role the one turn of a projected request is shown under: the caller's.
@@ -875,19 +919,9 @@ pub struct Projected<'r> {
     pub chars: usize,
 }
 
-/// [`project_read`] over a read of the request made here: the tests' reading.
-#[cfg(test)]
-#[must_use]
-pub fn project_hook<'r, V>(
-    request: &[u8],
-    dialect: u32,
-    routes: &'r std::collections::BTreeMap<String, V>,
-    dialect_of: impl Fn(&V) -> u32,
-) -> Projected<'r> {
-    project_read(request, &readable(request), dialect, routes, dialect_of)
-}
-
 /// Project one request of `dialect` for the hooks: the model it routes over among the `routes` of
+/// that dialect ([`route_read`]; `dialect_of` reads a route's dialect), the dialect's name and the
+/// size of the document.
 #[must_use]
 pub fn project_read<'r, V>(
     request: &[u8],
@@ -919,18 +953,29 @@ pub fn chars_of(request: &[u8]) -> usize {
 }
 
 /// The document a request-stage hook's rewrite names (the rewrite JSON, `{"messages": [...],
+/// "tools": [...]}`, as the kernel hands it): the last message whose `content` is a JSON object,
+/// or a string holding one, or a message with no `role` that is itself an object.
 fn rewrite_document(rewrite: &[u8]) -> Option<serde_json::Map<String, serde_json::Value>> {
-    let reply: serde_json::Value = serde_json::from_slice(rewrite).ok()?;
+    use serde_json::Value;
+    let Value::Object(mut reply) = serde_json::from_slice(rewrite).ok()? else {
+        return None;
+    };
+    let Value::Array(messages) = reply.remove("messages")? else {
+        return None;
+    };
     let mut document = None;
-    for message in reply.get("messages")?.as_array()? {
-        let candidate = match message.get("content") {
-            Some(content) => content,
-            None if message.get("role").is_none() => message,
-            None => continue,
+    for message in messages {
+        let candidate = match message {
+            Value::Object(mut fields) => match fields.remove("content") {
+                Some(content) => content,
+                None if !fields.contains_key("role") => Value::Object(fields),
+                None => continue,
+            },
+            other => other,
         };
         let resolved = match candidate {
-            serde_json::Value::Object(map) => Some(map.clone()),
-            serde_json::Value::String(text) => serde_json::from_str(text).ok(),
+            Value::Object(map) => Some(map),
+            Value::String(text) => serde_json::from_str(&text).ok(),
             _ => None,
         };
         if resolved.is_some() {
@@ -942,8 +987,8 @@ fn rewrite_document(rewrite: &[u8]) -> Option<serde_json::Map<String, serde_json
 
 /// A rewrite the plane will not apply: its document names a top-level `model` other than the model
 /// the request is routed over. The model is no rewritable member (a rewrite never switches the
-/// provider a request goes to); the rewrite is that hook's FAILURE, which the kernel answers by the
-/// hook's own `on_error`.
+/// provider a request goes to); the plane REFUSES it, and the kernel refuses the unit, never
+/// forwarding the body un-rewritten (`busbar_contract::abi::plane::project_faults`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelRewritten {
     /// The model the document names.
@@ -953,7 +998,7 @@ pub struct ModelRewritten {
 /// A rewrite that cannot be applied, and how the plane answers it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NotApplied {
-    /// The document names another model: REFUSED, the hook's failure (its `on_error`).
+    /// The document names another model: REFUSED, and the kernel refuses the unit.
     Model(ModelRewritten),
     /// The rewrite has a document and the body's whole document does not parse (a member the
     /// head only skipped, carrying a bad escape or a lone surrogate): FAULT, which the kernel always
@@ -962,21 +1007,14 @@ pub enum NotApplied {
     Fault,
 }
 
-/// [`rewritten_read`] over a read of the body made here: the tests' reading.
-#[cfg(test)]
-pub fn rewritten(body: &[u8], rewrite: &[u8], routed: &str) -> Result<Option<Vec<u8>>, NotApplied> {
-    rewritten_read(body, &readable(body), rewrite, routed)
-}
-
 /// A rewrite applied in the dialect: the rewrite's document ([`rewrite_document`]) replaces the
+/// request wholesale.
 pub fn rewritten_read(
     body: &[u8],
     read: &Result<Option<serde_json::Value>, Unrouted>,
     rewrite: &[u8],
     routed: &str,
 ) -> Result<Option<Vec<u8>>, NotApplied> {
-    const MODEL: &str = "model";
-
     let Ok(caller_model) = read else {
         return Err(NotApplied::Fault);
     };
@@ -1017,6 +1055,8 @@ pub fn rewritten_read(
 }
 
 /// [`rewritten_read`]'s request: the caller's members `document` keeps (the `model` always), in the
+/// caller's order, each the caller's own bytes where its value is unchanged, then the members the
+/// caller did not send.
 fn replaced(
     body: &[u8],
     current: &serde_json::Map<String, serde_json::Value>,
@@ -1024,8 +1064,8 @@ fn replaced(
 ) -> Vec<u8> {
     spliced_members(body, current, document).unwrap_or_else(|| {
         let mut whole = document.clone();
-        if let Some(model) = current.get("model") {
-            whole.insert("model".to_string(), model.clone());
+        if let Some(model) = current.get(MODEL) {
+            whole.insert(MODEL.to_string(), model.clone());
         }
         serde_json::Value::Object(whole).to_string().into_bytes()
     })
@@ -1044,7 +1084,7 @@ fn spliced_members(
     let mut kept: Vec<(usize, Vec<u8>)> = Vec::with_capacity(current.len());
     for (key, value) in current {
         let span = span_of(key)?;
-        let bytes = if key == "model" || document.get(key) == Some(value) {
+        let bytes = if key == MODEL || document.get(key) == Some(value) {
             body.get(span.start..span.end)?.to_vec()
         } else if let Some(wanted) = document.get(key) {
             wanted.to_string().into_bytes()
@@ -1068,12 +1108,10 @@ fn spliced_members(
 }
 
 /// Each member of the request's root object with its value's span, the last where a name repeats.
-/// The only place [`spliced_members`] walks the body; a walk is counted by the test seam.
+/// The only place [`spliced_members`] walks the body.
 fn root_spans(
     body: &[u8],
 ) -> Option<std::collections::HashMap<String, busbar_contract::spans::Span>> {
-    #[cfg(test)]
-    tests::walked_root();
     let root = busbar_contract::spans::members(body, 0)?;
     Some(
         root.members
@@ -1105,9 +1143,10 @@ pub struct Arrived {
 }
 
 /// Classify an arriving request by its verb and target: its operation, and the dialect its claim
+/// is.
 #[must_use]
 pub fn arrive(verb: &str, target: &str) -> Option<Arrived> {
-    let target = target.split_once('?').map_or(target, |(path, _)| path);
+    let target = path_of(target);
     let row = ops::row_for(verb, target)?;
     let op_class = tail::OP_CLASSES.iter().position(|op| *op == row.op)?;
     let dialect = tail::CLAIMS
@@ -1154,17 +1193,19 @@ pub struct FarEndRequest {
 }
 
 /// Answer an ATTEMPT piece of a unit of `dialect`: the same request on every attempt, whichever
+/// member the kernel picked, at the verb and path of the dialect's claim; `None` for a dialect no
+/// claim names.
 #[must_use]
-pub fn attempt_request(dialect: u32) -> FarEndRequest {
-    let target = tail::CLAIMS
+pub fn attempt_request(dialect: u32) -> Option<FarEndRequest> {
+    let (verb, target, _) = tail::CLAIMS
         .iter()
-        .find(|(_, _, d)| *d == dialect)
-        .map_or(ops::PATH_SYSTEMONE, |(_, t, _)| t);
-    FarEndRequest {
-        verb: "POST",
+        .copied()
+        .find(|(_, _, d)| *d == dialect)?;
+    Some(FarEndRequest {
+        verb,
         target,
         fields: [(FIELD_CONTENT_TYPE, CONTENT_TYPE_JSON)],
-    }
+    })
 }
 
 /// Where a count the plane reports comes from: the far end's own counts are kept apart from the
@@ -1197,7 +1238,8 @@ pub struct Units {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnreadableUsage(pub &'static str);
 
-/// What one answer bills, in [`tail::BILLABLE_CLASSES`]' order of reading: the decision count,
+/// What one answer bills: the decision count, the input and output tokens, and the request fee,
+/// each [`Units`] naming its own [`tail::BILLABLE_CLASSES`] class. `None` = nothing in that class.
 pub type Counts = [Option<Units>; 4];
 
 /// A usage member as the answer states it.
@@ -1224,14 +1266,18 @@ enum Slot {
 }
 
 /// Where a dialect's answer states its counts: the top-level member holding them, and the members
+/// under it, `(name, pointer)`, in [`Counts`]' order (decision, input tokens, output tokens).
 struct Usage {
     parent: &'static [u8],
     counted: &'static [(&'static [u8], &'static str)],
-    /// The decision count is required: a success with none bills the plane's floor and says so in
+    /// The decision count is required: a success with none bills the plane's floor and raises
+    /// 5029 ([`UnreadableUsage`]).
     required: bool,
 }
 
 /// Each dialect's [`Usage`], in [`tail::DIALECTS`]' order: `jev` reads `/usage/units` (one decision
+/// when absent) and its tokens; `nanojev` reads the upstream's own billing unit,
+/// `/execution/states`, and a success with no count bills the plane's floor and raises 5029.
 const USAGE: [Usage; 2] = [
     Usage {
         parent: b"usage",
@@ -1249,9 +1295,13 @@ const USAGE: [Usage; 2] = [
     },
 ];
 
+// Every dialect has its usage row: a dialect added without one fails to build.
+const _: () = assert!(USAGE.len() == tail::DIALECTS.len());
+
 /// The longest member name compared ("output_tokens"), with room.
 const KEY_CAP: usize = 16;
 /// What a member name's escape that names no ASCII character decodes to in the name read: a byte
+/// no UTF-8 text holds, so no name compared matches it.
 const NOT_ASCII: u8 = 0xFF;
 /// The longest scalar a whole count is spelled in (`u64::MAX` is 20 digits), with room.
 const SCALAR_CAP: usize = 24;
@@ -1390,6 +1440,15 @@ impl FarEndReading {
                 .position(|(name, _)| *name == key)
                 .map_or(Slot::Other, Slot::Count)
         };
+        // A repeated usage parent, or a repeated count inside it, supersedes what was read before
+        // it from the key on: an answer cut before the new value is read whole bills none of it.
+        match (self.depth, named) {
+            (1, Slot::Usage) => self.members = [Member::Absent; 3],
+            (2, Slot::Count(i)) if self.object[2] && self.at[1] == Slot::Usage => {
+                self.members[i] = Member::Absent;
+            }
+            _ => {}
+        }
         if let 1 | 2 = self.depth {
             self.at[self.depth as usize] = named;
         }
@@ -1404,6 +1463,7 @@ impl FarEndReading {
     }
 
     /// One byte of a member name, read as JSON reads it (RFC 8259 section 7): an escape decoded,
+    /// `\u0075` and `u` being one name.
     fn key_char(&mut self, b: u8, escaped: bool) {
         if escaped {
             match b {
@@ -1514,12 +1574,17 @@ impl FarEndReading {
     }
 
     /// Whether the answer, with the far end's `status`, is a SUCCESS: a `2xx` status and no
+    /// `/error` member (a `null` one is none).
     #[must_use]
     pub fn success(&self, status: Option<u32>) -> bool {
         status.is_some_and(|s| (200..300).contains(&s)) && self.settled().0 != Some(true)
     }
 
     /// What the answer bills, read at the last piece: a non-success bills nothing; a success bills one `decision` (the plane's floor,
+    /// [`Source::Floor`]), or the whole count its
+    /// `/usage/units` reports (the hosted provider's count), its `/usage/input_tokens`
+    /// and `/usage/output_tokens` where it reports them, and the request fee (`1` of
+    /// [`tail::FEE_PER_REQUEST`]: a refused or failed unit owes none).
     pub fn counts(&self, status: Option<u32>) -> Result<Counts, UnreadableUsage> {
         if !self.success(status) {
             return Ok([None; 4]);
@@ -1542,6 +1607,9 @@ impl FarEndReading {
     }
 
     /// What a success whose usage could not be read whole bills ([`Self::counts`] answered
+    /// [`UnreadableUsage`]; spend is always attributed, and a unit that succeeded is never
+    /// failed): the plane's floor for an unreadable decision count (one
+    /// decision, [`Source::Floor`]), every token count it does state whole, and the request fee.
     #[must_use]
     pub fn floored(&self, status: Option<u32>) -> Counts {
         if !self.success(status) {
@@ -1559,6 +1627,9 @@ impl FarEndReading {
     }
 
     /// What an answer the far end did not finish bills (its last piece flagged `PIECE_CUT`: its
+    /// connection failed, or the send's deadline passed, after its head): only each count the far
+    /// end reported whole before the cut and did not supersede by repeating its member or its
+    /// usage parent, and nothing for a non-success.
     #[must_use]
     pub fn cut(&self, status: Option<u32>) -> Counts {
         if !self.success(status) {
@@ -1607,6 +1678,7 @@ impl FarEndReading {
 }
 
 /// A usage member's raw bytes read as a whole count a signed 64-bit count holds: ASCII digits
+/// alone, at most `i64::MAX`.
 #[must_use]
 pub fn whole(raw: &[u8]) -> Option<u64> {
     if raw.is_empty() || !raw.iter().all(u8::is_ascii_digit) {
@@ -1620,6 +1692,7 @@ pub fn whole(raw: &[u8]) -> Option<u64> {
 }
 
 /// THE CALLER FIELDS THE FAR END NEVER RECEIVES, besides the credential carriers: the ones the
+/// plane writes itself (the document type) and the ones naming the hop (`host`).
 pub const NOT_RELAYED: &[&str] = &[FIELD_CONTENT_TYPE, "host"];
 
 /// The caller's fields the far end receives, held in one buffer per unit: each field's name
@@ -1641,13 +1714,6 @@ impl RelayedFields {
             field
         })
     }
-
-    /// Whether no field is relayed.
-    #[cfg(test)]
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.ends.is_empty()
-    }
 }
 
 /// Whether the caller's field `name` reaches the far end.
@@ -1659,6 +1725,8 @@ fn relayed(name: &[u8]) -> bool {
 }
 
 /// The caller's fields the far end receives, in the order the caller sent them, a repeated name
+/// keeping every value: every field the caller sent but [`NOT_RELAYED`]'s and the credential
+/// carriers' (a same-dialect relay passes every header but the governed set).
 #[must_use]
 pub fn relayed_fields<'f, I>(caller: I) -> RelayedFields
 where

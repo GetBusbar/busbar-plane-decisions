@@ -22,8 +22,9 @@ route's `upstream_model`):
 
 A dialect's route is served only while some configured model uses it. It bills in the classes
 `decision`, `input_tokens` and `output_tokens`: `jev` reads `usage.units` (one decision when absent)
-and the usage's tokens; `nanojev` reads `execution.states`. A successful answer without that count
-is relayed unchanged, bills one decision at the plane's floor and raises a usage warning.
+and the usage's tokens; `nanojev` reads `execution.states`. A successful answer without a decision
+count is relayed unchanged and bills one decision at the plane's floor. A missing `nanojev` count
+also raises a usage warning; an absent `jev` count does not.
 
 ## Config
 
@@ -36,12 +37,17 @@ section. Unknown keys are refused.
   the plane does not speak is refused, naming `jev, nanojev`.
 - `hooks`: hook names (from the top-level `hooks:`) bound to every decisions request.
 - `upstream_credentials`: `own` (the default) or `passthrough`.
+- `rate_card` and `fees`: the prices of the plane's classes (`decision`, `input_tokens`,
+  `output_tokens`) and of its `per_request` fee. busbar reads these two itself, before the section
+  reaches the plane, so they are not refused as unknown.
 
 ## Diagnostics
 
 `declares.json` states the plane's need (`http`) and no diagnostic code of its own: an answer whose
-usage is not a whole count raises the core-owned 5029 (`usage-tap-decode-failed`) and bills one
-decision.
+usage is not a whole count raises the core-owned 5029 (`usage-tap-decode-failed`). An unreadable
+decision count bills one decision; an unreadable token count is not billed, and other whole counts
+are retained. 5029 is benign-recurring: each plane instance warns once per dialect and member, and logs
+later occurrences at debug.
 
 ## Build
 

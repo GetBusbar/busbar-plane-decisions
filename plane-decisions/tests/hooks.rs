@@ -14,6 +14,7 @@ const SYSTEMONE: &str = "/v1/systemone";
 const TWO: &str = r#"{"models":{"a":{"provider":"typesafe"},"b":{"provider":"typesafe"}}}"#;
 
 /// A hook's rewrite (1.5.5's rewrite JSON, as the kernel hands it): one turn whose content is the
+/// request document `document`.
 fn rewrite_of(document: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "messages": [{ "role": "user", "content": document }],
@@ -143,7 +144,11 @@ fn a_redaction_applies_over_a_deeply_nested_body() {
     assert_eq!(door.arrive(1, br#"{"model":"a"}"#).outcome, Outcome::Ready);
     door.piece(1, Given::attempt(1), &mut bufs);
     let sent = door.piece(1, Given::caller(&kept), &mut bufs);
-    assert!(sent.far && !String::from_utf8_lossy(&sent.bytes).contains("123-45-6789"));
+    assert!(sent.far, "{sent:?}");
+    assert_eq!(
+        sent.bytes, kept,
+        "the far end is sent the kept rewrite, byte for byte"
+    );
 }
 
 #[test]
@@ -157,6 +162,15 @@ fn a_rewrite_naming_another_model_is_refused() {
         Some(&rewrite_of(r#"{"model":"b","state":{}}"#)),
     );
     assert_eq!(switched.outcome, Some(Outcome::Refused), "{switched:?}");
+    // The refusal is the plane's, and its log says so, naming the model the rewrite tried.
+    assert!(
+        switched
+            .logs
+            .iter()
+            .any(|l| l.contains("names another model, `b`")),
+        "{:?}",
+        switched.logs
+    );
     let same = door.project(
         1,
         SYSTEMONE,
@@ -170,7 +184,24 @@ fn a_rewrite_naming_another_model_is_refused() {
     );
 }
 
+#[test]
+fn a_refused_rewrite_cannot_inject_control_characters_into_its_log() {
+    let door = open(TWO);
+    let body = br#"{"model":"a","state":{}}"#;
+    let document = serde_json::json!({"model": "forged\n\r\u{1b}[31m", "state": {}}).to_string();
+    let view = door.project(1, SYSTEMONE, body, Some(&rewrite_of(&document)));
+    assert_eq!(view.outcome, Some(Outcome::Refused), "{view:?}");
+    let log = view
+        .logs
+        .iter()
+        .find(|line| line.contains("names another model"))
+        .expect("refusal log");
+    assert!(log.contains(r"forged\n\r\u{1b}[31m"), "{log:?}");
+    assert!(!log.chars().any(char::is_control), "{log:?}");
+}
+
 /// A rewrite that does not apply leaves the request as it was (1.5.5): the view is the caller's
+/// request, and nothing is answered as rewritten.
 #[test]
 fn a_rewrite_that_does_not_apply_leaves_the_request() {
     let door = open(TWO);
@@ -217,6 +248,7 @@ fn a_redaction_applies_at_1_5_5s_parse_depth() {
 }
 
 /// A request whose document does not parse (a member 1.5.5's head never decoded, carrying a lone
+/// surrogate escape or a bad `\u` escape) passes `arrive`, as 1.5.5's head scan passed it.
 #[test]
 fn a_rewrite_over_a_body_whose_document_does_not_parse_is_a_fault() {
     let door = open(TWO);

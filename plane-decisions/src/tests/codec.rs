@@ -1,5 +1,14 @@
 use super::*;
 
+/// The raw bytes at one declared pointer of a body: the crate's tests' reference reader (the door
+/// reads the far end's answer in one pass instead).
+pub(crate) fn read_raw<'u>(body: &'u [u8], pointer: &str) -> Option<&'u [u8]> {
+    match busbar_contract::spans::resolve_pointer(body, pointer) {
+        busbar_contract::spans::Resolved::Found(span) => body.get(span.start..span.end),
+        _ => None,
+    }
+}
+
 const SUCCESS: &[u8] =
     br#"{"request_id":"req_1","usage":{"units":42},"answers":{"decision":"approve"}}"#;
 
@@ -10,6 +19,7 @@ fn reads_the_declared_pointers_off_a_success_body() {
 }
 
 /// A request is read at its top-level `model` alone (DECISIONS D8b), never at a `model` nested in
+/// its `state`.
 #[test]
 fn a_request_is_read_at_its_top_level_model() {
     assert_eq!(
@@ -20,6 +30,7 @@ fn a_request_is_read_at_its_top_level_model() {
 }
 
 /// No pointer the plane reads passes through a `state` or `answers` member (a member merely
+/// spelled with those letters, as NanoJev's `/execution/states`, is another member).
 #[test]
 fn no_declared_pointer_names_state_or_answers() {
     for p in [

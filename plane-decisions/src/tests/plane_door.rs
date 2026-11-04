@@ -142,6 +142,8 @@ fn a_generation_lists_every_configured_model_in_name_order() {
 }
 
 /// `validate` reads the blob stage 3g deals (`{decisions: <section>}`): the section inside it is
+/// judged (a typo refused), a blob that writes no `decisions:` is the empty section, and the bare
+/// section is not the dealt shape.
 #[test]
 fn validate_reads_the_dealt_blob_at_its_section() {
     assert!(read_dealt(b"").is_ok());
@@ -167,6 +169,7 @@ fn the_section_under_its_verb_reads_as_the_section() {
 }
 
 /// The unit ceiling `tests/door.rs` drives the door to, spelled there as a number because the
+/// crate's only public item is the door: the two are one value.
 #[test]
 fn the_unit_ceiling_is_the_one_the_door_tests_drive() {
     assert_eq!(MAX_UNITS, 4096);
@@ -199,4 +202,38 @@ fn the_refusal_names_the_first_bad_model_in_name_order() {
         let err = routes(&section, &facts).expect_err("neither protocol is spoken");
         assert!(err.contains("decisions.models.a "), "{err}");
     }
+}
+
+/// One unit's piece never holds every other unit's: while one unit's entry is held (its piece being
+/// read, its body spliced), another unit's entry is reached at once.
+#[test]
+fn one_units_piece_does_not_hold_every_other_unit() {
+    let door = std::sync::Arc::new(DecisionsDoor::new(BTreeMap::new()));
+    for unit in 0..64_u64 {
+        door.units.insert(unit, Unit::default());
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reached = door.units.with(&0, |held| {
+        assert!(held.is_some(), "unit 0 is held");
+        for unit in 1..64_u64 {
+            let (door, tx) = (std::sync::Arc::clone(&door), tx.clone());
+            std::thread::spawn(move || {
+                door.units.with(&unit, |_| ());
+                let _ = tx.send(unit);
+            });
+        }
+        rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok()
+    });
+    assert!(reached, "every other unit waited on the one held");
+}
+
+/// 5029 is benign-recurring: an instance warns of an unreadable count once per dialect and member.
+#[test]
+fn an_unreadable_member_is_warned_of_once_per_dialect() {
+    let door = DecisionsDoor::new(BTreeMap::new());
+    let units = crate::codec::PTR_USAGE_UNITS;
+    assert!(door.first_unreadable(tail::DIALECT_JEV, units));
+    assert!(!door.first_unreadable(tail::DIALECT_JEV, units));
+    assert!(door.first_unreadable(tail::DIALECT_NANOJEV, crate::codec::PTR_EXECUTION_STATES));
+    assert!(door.first_unreadable(tail::DIALECT_JEV, crate::codec::PTR_USAGE_INPUT_TOKENS));
 }

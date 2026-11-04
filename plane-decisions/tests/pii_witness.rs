@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE PII WITNESS, OVER THE SERVED DOOR. A decision request carries the caller's `state` and the
+//! provider's answer carries its `answers`: the decision content.
 
 #![allow(unsafe_code)]
 
@@ -21,6 +22,7 @@ fn leaks(text: &str) -> bool {
 }
 
 /// Everything an `on_piece` answer states beside the bytes it relays: its request line, its head
+/// fields, its counts and its log lines.
 fn stated(a: &Answered) -> Vec<String> {
     let mut out = vec![a.request.clone()];
     out.extend(a.fields.iter().map(|(n, v)| format!("{n}: {v}")));

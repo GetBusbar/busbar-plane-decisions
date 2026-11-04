@@ -162,6 +162,7 @@ fn upstream_model_is_spliced_into_the_top_level_model() {
 }
 
 /// One unit served over [`ONE`]: its ATTEMPT, the caller's body, and the far end's whole answer,
+/// `status` with `answer`.
 fn answered(status: u32, answer: &[u8]) -> door_harness::Answered {
     let door = open(ONE);
     assert_eq!(door.arrive(1, br#"{"state":{}}"#).outcome, Outcome::Ready);
@@ -286,6 +287,8 @@ fn a_success_with_an_unreadable_count_bills_the_floor_and_says_so() {
 }
 
 /// One unit served over `settings` on `target` in `dialect`: its far end answers 200 with `head`,
+/// then its connection fails and the kernel hands `rest` as the answer's last piece, flagged
+/// `PIECE_CUT`.
 fn cut(
     settings: &str,
     target: &str,
@@ -512,6 +515,7 @@ fn the_tokens_a_success_reports_are_billed_in_family_decision() {
 }
 
 /// The most units the door keeps state for at once (its `MAX_UNITS`, pinned to this value in-crate by
+/// `the_unit_ceiling_is_the_one_the_door_tests_drive`).
 const MAX_UNITS: u64 = 4096;
 
 /// A live unit over [`ONE`]: arrived, its ATTEMPT crossed.
@@ -888,6 +892,7 @@ fn a_body_1_5_5_could_not_parse_is_refused_before_routing() {
 }
 
 /// The exact edge of 1.5.5's parse depth (128, v1.5.5 json.rs `MAX_JSON_DEPTH`): a body 128 deep is
+/// read, 129 and 130 are refused.
 #[test]
 fn the_parse_depth_edge_is_1_5_5s() {
     let two = open(TWO);
@@ -1106,6 +1111,9 @@ fn a_root_number_out_of_range_is_refused_and_a_skipped_value_has_no_depth_bound(
 }
 
 /// An `open` the door will not open answers REFUSED (as `validate` and `refresh` answer the same
+/// settings) with no instance, its reason in the buffer the host lent (`err_len`): a section the
+/// grammar refuses, in the grammar's words, and a model whose provider the host stated no protocol
+/// for, named with that provider.
 #[test]
 fn an_open_the_door_refuses_is_refused_with_its_reason() {
     assert_eq!(
@@ -1131,6 +1139,7 @@ fn an_open_the_door_refuses_is_refused_with_its_reason() {
 }
 
 /// The provider's final usage parent is the only one the served door bills. An absent optional
+/// jev count is a silent floor; an absent required nanojev count is a floor with one warning.
 #[test]
 fn repeated_usage_parents_bill_only_their_replacement_over_every_fragment_split() {
     let settings = r#"{"models":{"jev":{"provider":"typesafe"},"nano":{"provider":"np","protocol":"nanojev"}}}"#;
@@ -1298,6 +1307,37 @@ fn an_unreadable_usage_warns_once_after_a_short_answer_fits() {
         1,
         "{recalled:?}"
     );
+}
+
+/// 5029 is benign-recurring (warn-once, latched): the same unreadable member on a second answer of
+/// the same instance bills the same floor and says so at debug, not with a second warning.
+#[test]
+fn an_unreadable_usage_warns_once_per_instance_not_per_answer() {
+    let door = open(ONE);
+    let answer = br#"{"usage":{"units":"bad"}}"#;
+    let mut warnings = Vec::new();
+    for unit in 1..=3 {
+        let mut bufs = Bufs::new(1 << 16);
+        live(&door, unit, &mut bufs);
+        assert!(still_live(&door, unit, &mut bufs));
+        let a = door.piece(unit, Given::whole(200, answer), &mut bufs);
+        assert_eq!((a.outcome, a.done), (Some(Outcome::Ready), true), "{a:?}");
+        assert_eq!(
+            counts(&a),
+            vec![
+                (class("decision"), 1),
+                (class(busbar_contract::plane::PER_REQUEST), 1)
+            ],
+            "unit {unit}"
+        );
+        warnings.push(
+            a.logs
+                .iter()
+                .filter(|l| l.contains("usage is unreadable"))
+                .count(),
+        );
+    }
+    assert_eq!(warnings, vec![1, 0, 0]);
 }
 
 /// RED: a body that does not parse, projected with no rewrite hook bound, is the plane's own FAULT

@@ -3,6 +3,7 @@
 use busbar_contract::ids::OpClassId;
 
 /// `POST /v1/systemone` — the decision call. Priced on the request it carries and metered on the
+/// usage the success response reports (billable on success only).
 pub const OP_SYSTEMONE: OpClassId = OpClassId::new("systemone");
 
 /// `POST /api/evaluate` — the decision call of the second dialect, `nanojev`.

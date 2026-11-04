@@ -170,6 +170,8 @@ fn a_paid_debt_is_freed_before_the_far_end_answers() {
 }
 
 /// The far end's answer relayed through a reply buffer smaller than its pieces: each piece is owed
+/// across re-calls, and the answer side's debt buffer is reused piece after piece, so relaying
+/// still allocates nothing (only a debt bound for the far end is let go once paid).
 #[test]
 fn relaying_pieces_larger_than_the_reply_buffer_allocates_nothing() {
     let door = open(r#"{"models":{"jev":{"provider":"typesafe"}}}"#);

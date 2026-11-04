@@ -17,6 +17,7 @@ fn the_statement_states_the_whole_declares_document() {
 }
 
 /// The packaging recipe's `declares:` for this plugin (busbar's `plugins.yaml` entry, which replaced
+/// the per-repo `release.yml`'s `declares_file:`).
 const SIGNED: &str = "plane-decisions/declares.json";
 
 /// The release signs the file the Statement carries (`SIGNED`, the one named constant; the first test
@@ -26,9 +27,22 @@ fn the_release_signs_the_statements_declares_file() {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
     // The recipe itself, when the busbar tree is at hand (`BUSBAR_PLUGINS_YAML`, or a sibling
     // checkout): its entry for this repo names the same file.
-    let yaml = std::env::var("BUSBAR_PLUGINS_YAML")
-        .unwrap_or_else(|_| format!("{root}/../busbar/plugins.yaml"));
-    if let Ok(yaml) = std::fs::read_to_string(yaml) {
+    let named_path = std::env::var("BUSBAR_PLUGINS_YAML").ok();
+    let path = named_path
+        .clone()
+        .unwrap_or_else(|| format!("{root}/../busbar/plugins.yaml"));
+    let read = std::fs::read_to_string(&path);
+    // A recipe named outright, or any CI run (which checks busbar out beside the plugin), must be
+    // read: only a local run without the busbar tree may pass without judging it, and says so.
+    let required = named_path.is_some() || std::env::var_os("CI").is_some();
+    match &read {
+        Err(e) if required => panic!("the packaging recipe {path} cannot be read: {e}"),
+        Err(_) => eprintln!(
+            "the packaging recipe {path} is not at hand: the release's declares file is not judged"
+        ),
+        Ok(_) => {}
+    }
+    if let Ok(yaml) = read {
         let entry = yaml
             .split("\n  - repo: ")
             .find(|e| {

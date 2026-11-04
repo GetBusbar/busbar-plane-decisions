@@ -30,14 +30,16 @@ target="${CARGO_TARGET_DIR:-$here/target}"
 judge="$here/testing/jev-conformance/judge.py"
 
 say() { printf 'jev: %s\n' "$*" >&2; }
+# The negative controls the verdict's plan counts: reference_relay.BREAKS, read where it is defined.
+breaks="$(python3 -I -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import reference_relay; print(len(reference_relay.BREAKS))' "$here/testing/jev-conformance" 2>/dev/null || echo "?")"
 failed=""
 
 verdict() { # <status> <reason>
-  python3 -I - "$out/verdict.json" "$1" "$2" <<'PY'
+  python3 -I - "$out/verdict.json" "$1" "$2" "$breaks" <<'PY'
 import json, sys
-path, status, reason = sys.argv[1:4]
+path, status, reason, breaks = sys.argv[1:5]
 json.dump({"suite": "jev", "status": status, "armed": True, "standard": "jev decision plane",
-           "plan": "plane battery + reference-relay control + 11 broken-relay negative controls + "
+           "plan": f"plane battery + reference-relay control + {breaks} broken-relay negative controls + "
                    "served POST /v1/systemone (one model; two models with upstream_model) and "
                    "POST /api/evaluate (nanojev) on booted busbars, with the ledger, audit and "
                    "Teller-step gating checks",
@@ -62,6 +64,7 @@ battery() {
   [ "$n" -gt 0 ] || { echo "battery: cargo test passed 0 tests; a battery that selects nothing proves nothing"; return 1; }
 }
 
+leg judge-regressions python3 -I -B "$here/testing/jev-conformance/test_judge.py"
 leg battery battery
 leg control python3 -I "$judge" control "$out/control"
 leg negative-control python3 -I "$judge" negative "$out/negative"
@@ -71,13 +74,26 @@ leg negative-control python3 -I "$judge" negative "$out/negative"
 # Debug profile, no debug info: the served behaviour is the release's, the build a fraction of it.
 say "== build subject (busbar ${BUSBAR_PIN:-?} dist/default with this plane)"
 bin=""
-patch="patch.\"https://github.com/GetBusbar/busbar-plane-decisions\".busbar-plane-decisions.path=\"$here/plane-decisions\""
 if ! manifest="$(bash "$here/testing/jev-conformance/compose.sh" "$BUSBAR_CHECKOUT" "$here/plane-decisions" "$out/busbar-staged" 2>"$out/compose.log")"; then
   cat "$out/compose.log" >&2
   verdict fail "the subject's composition could not be staged: $(tail -1 "$out/compose.log")"
   exit 1
 fi
 cat "$out/compose.log" >&2
+# Cargo keys a [patch] by the dependency's source URL, so the patch names the git source the staged
+# distribution pulls this plane from (its `busbar-plane-decisions = { git = ... }` row), whatever host
+# that is at the pin.
+source="$(python3 -I - "$manifest" <<'PY'
+import re, sys
+m = re.search(r'^busbar-plane-decisions\s*=\s*\{[^}\n]*\bgit\s*=\s*"([^"]+)"', open(sys.argv[1]).read(), re.M)
+print(m.group(1) if m else "")
+PY
+)"
+if [ -z "$source" ]; then
+  verdict fail "the staged distribution ($manifest) names no git source for busbar-plane-decisions to patch"
+  exit 1
+fi
+patch="patch.\"$source\".busbar-plane-decisions.path=\"$here/plane-decisions\""
 if CARGO_PROFILE_DEV_DEBUG=0 cargo build --manifest-path "$manifest" --bin busbar \
       --target-dir "$target" \
       --config "$patch" >"$out/subject-build.log" 2>&1; then

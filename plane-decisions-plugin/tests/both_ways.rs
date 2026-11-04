@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE DOOR, BOTH WAYS: the logic crate's `door` linked and this crate's dropped-in image (the
+//! `busbar-plane-decisions-plugin` cdylib `cargo test` builds beside the test), each loaded through
+//! busbar's real loader and driven alike.
 
 use std::mem::zeroed;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -131,6 +133,8 @@ fn load(d: &Dispatcher, dropped_in: bool, sink: Arc<HostLog>) -> Plugin<Plane> {
 }
 
 /// An `open` over settings the grammar refuses is REFUSED, as `validate` and `refresh` refuse
+/// them, and the host's operator text for it (`plugin '<name>' open failed: <words>`) is the same
+/// linked and dropped in.
 #[test]
 fn an_open_the_grammar_refuses_reads_the_same_both_ways() {
     let d = Dispatcher::new(DispatchConfig::default());

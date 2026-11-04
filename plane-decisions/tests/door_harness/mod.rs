@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE DOOR, DRIVEN OVER ITS OWN ABI as the kernel's plane driver drives it: `open`, `refresh`,
+//! `arrive`, `on_piece`, `refusal` and `cancel`, each a frame of plain C data crossing the door's
+//! table.
 
 #![allow(dead_code)]
 
@@ -126,11 +128,15 @@ pub struct Door {
 }
 
 /// Open the door over `settings` (the `decisions:` section, as written), the host stating provider
+/// `typesafe`'s protocol `jev` as it states every provider the section references
+/// (`busbar_contract::plane_calls::dialect_facts`).
 pub fn open(settings: &str) -> Door {
     open_with(settings, &[("typesafe", "jev")])
 }
 
 /// An `open` over `settings` the door will not open: its outcome, whether it handed back an
+/// instance, and its reason as the host reads it (the lent reason buffer up to `err_len` when that
+/// holds any bytes, else `head.error`).
 pub fn open_refused(settings: &str, providers: &[(&str, &str)]) -> (Outcome, bool, String) {
     let facts: Vec<ProviderFacts> = providers
         .iter()
@@ -289,6 +295,8 @@ pub struct Projected {
     /// Whether the answer is the plane's own FAULT over an unparseable body (the kernel's
     /// `project_fault_unparseable` judgement).
     pub fault_unparseable: bool,
+    /// The log records the call's envelope carried (the plane's `tracing` lines), as text.
+    pub logs: Vec<String>,
 }
 
 /// What one `on_piece` answered, re-called while it said `more`.
@@ -393,6 +401,7 @@ impl<'a> Given<'a> {
 }
 
 /// The host buffers one `on_piece` is lent, reused across calls so a measured call allocates only
+/// what the door does.
 pub struct Bufs {
     reply: Vec<u8>,
     fields: Vec<OutField>,
@@ -427,6 +436,7 @@ impl Door {
     }
 
     /// `refresh` onto `generation` over `settings`: its outcome, its refusal's words and the new
+    /// generation's claims (none unless it is ready).
     pub fn try_refresh(
         &self,
         settings: &str,
@@ -514,6 +524,7 @@ impl Door {
     }
 
     /// `retire` of `generation`, as the host retires a generation it no longer serves (or one it
+    /// refused after the plane's `refresh`).
     pub fn retire(&self, generation: u64) -> Outcome {
         let i = GenIn {
             head: head::<GenIn>(life::RETIRE, Ticket::NONE),
@@ -534,6 +545,7 @@ impl Door {
     }
 
     /// `project` of `unit`'s request on `target` with `body`, and a request-stage hook's
+    /// `rewrite` when one is given, over host buffers of the kernel's sizes.
     pub fn project(
         &self,
         unit: u64,
@@ -573,6 +585,18 @@ impl Door {
             ),
             ..Projected::default()
         };
+        let envelope = &o.head.envelope;
+        if !envelope.diags.is_null() {
+            // SAFETY: the reply's envelope names `diags_len` entries the door's trampoline
+            // sealed, live until the next call on this thread.
+            let diags = unsafe { std::slice::from_raw_parts(envelope.diags, envelope.diags_len) };
+            got.logs.extend(
+                diags
+                    .iter()
+                    .filter(|d| d.id_idx == busbar_contract::abi::mechanism::call::DIAG_LOG)
+                    .map(|d| read(d.text)),
+            );
+        }
         if ret.outcome() != Outcome::Ready {
             return got;
         }
@@ -694,6 +718,7 @@ impl Door {
     }
 
     /// One crossing of `unit`'s piece that keeps nothing of the answer (so it allocates nothing
+    /// of its own): the bytes emitted.
     pub fn piece_bytes(&self, unit: u64, given: Given<'_>, bufs: &mut Bufs) -> usize {
         let mut i: OnPieceIn = z();
         i.head = head::<OnPieceIn>(slot::ON_PIECE, ticket_of(unit));
@@ -726,6 +751,7 @@ impl Door {
     }
 
     /// One piece of `unit` re-called while the door says `more`, keeping nothing of the answer
+    /// (so it allocates nothing of its own): the bytes emitted over every call.
     pub fn piece_owed(&self, unit: u64, given: Given<'_>, bufs: &mut Bufs) -> usize {
         self.piece_owed_with_flags(unit, given, bufs, 0)
     }
@@ -852,6 +878,7 @@ impl Door {
     }
 
     /// `cancel` of `unit` as the host cancels a unit it minted (`PlaneCancelIn::unit`), on no unit
+    /// ticket: the outcome and the disposition.
     pub fn cancel_unit(&self, unit: u64) -> (Outcome, u32) {
         self.cancel_as(Ticket::NONE, unit)
     }

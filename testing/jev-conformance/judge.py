@@ -31,6 +31,7 @@ import http.server
 import json
 import os
 import secrets
+import signal
 import socket
 import subprocess
 import sys
@@ -86,6 +87,26 @@ class Red(Exception):
 def check(ok, finding):
     if not ok:
         raise Red(finding() if callable(finding) else finding)
+
+
+# What a check that could not read its target raises, beside a Red: a dropped or reset connection,
+# a timeout, a malformed answer, a body of an unexpected shape. Graded red per check, never a crash.
+UNREAD = (OSError, ValueError, AttributeError, TypeError, KeyError, http.client.HTTPException)
+
+
+def run_checks(pairs):
+    """Each (name, fn) run in turn, as (name, None | finding) pairs: a Red is its finding, and a
+    target the check could not read is a finding too, so one bad answer never loses the others."""
+    out = []
+    for name, fn in pairs:
+        try:
+            fn()
+            out.append((name, None))
+        except Red as e:
+            out.append((name, str(e)))
+        except UNREAD as e:
+            out.append((name, f"the check could not read the target: {type(e).__name__}: {e}"))
+    return out
 
 
 # ── the far end ──────────────────────────────────────────────────────────────────────────────
@@ -303,14 +324,10 @@ def judge_audit_window(rng, want):
 
 def wire_one(t):
     """The one-model boot's wire checks, as (name, Ok|finding) pairs."""
-    out = []
+    checks = []
 
     def run(name, fn):
-        try:
-            fn()
-            out.append((name, None))
-        except Red as e:
-            out.append((name, str(e)))
+        checks.append((name, fn))
 
     absent = http_call(t.data, "POST", ABSENT_PATH, b"{}", {"content-type": "application/json", "authorization": t.bearer})[0]
     t.far.reply((200, SUCCESS))
@@ -364,6 +381,7 @@ def wire_one(t):
     def null_model():
         judge_refused_before_dial(t.call(PATH, b'{"model":null}'), 400, "invalid_request")
     run("models.null-400", null_model)
+    out = run_checks(checks)
     t.far.reply((200, SUCCESS))
     return out
 
@@ -371,11 +389,8 @@ def wire_one(t):
 def wire_transient(t):
     """Last on a boot: the sole member down benches it for its cooldown."""
     t.far.reply((503, UNAVAILABLE), (503, UNAVAILABLE))
-    try:
-        judge_terminal_5xx(t.call(PATH, REQUEST), UNAVAILABLE)
-        return [("relay.transient-terminal", None)]
-    except Red as e:
-        return [("relay.transient-terminal", str(e))]
+    return run_checks([("relay.transient-terminal",
+                        lambda: judge_terminal_5xx(t.call(PATH, REQUEST), UNAVAILABLE))])
 
 
 def models_request(model):
@@ -385,14 +400,12 @@ def models_request(model):
 
 
 def wire_models(t):
-    out = []
-
     def splice(sent, expected):
         t.far.reply((200, SUCCESS))
         c = t.call(PATH, sent)
         judge_upstream_model(c, sent, (t.far.last() or {}).get("body", b""), expected=expected)
 
-    for name, fn in [
+    return run_checks([
         ("models.unnamed-400", lambda: judge_refused_before_dial(t.call(PATH, models_request(None)), 400, "invalid_request")),
         ("models.unknown-404", lambda: judge_refused_before_dial(t.call(PATH, models_request("jev-no-such-model")), 404, "invalid_params")),
         ("models.upstream-model", lambda: (t.far.reply((200, SUCCESS)),
@@ -406,18 +419,10 @@ def wire_models(t):
         ("models.escaped-model-spliced", lambda: splice(
             br'{"mod\u0065l":"jev-2","state":{}}',
             br'{"mod\u0065l":"jev-upstream-2","state":{}}')),
-    ]:
-        try:
-            fn()
-            out.append((name, None))
-        except Red as e:
-            out.append((name, str(e)))
-    return out
+    ])
 
 
 def wire_nanojev(t):
-    out = []
-
     def served():
         t.far.reply((200, NANOJEV_SUCCESS))
         c = t.call(PATH_EVALUATE, NANOJEV_REQUEST)
@@ -433,7 +438,7 @@ def wire_nanojev(t):
         # Owner ruling 2026-10-27 (plane-decisions #46): a success with no decision count is relayed
         # as the far end wrote it and bills the plane's floor; a unit that succeeded is never failed.
         t.far.reply((200, NANOJEV_NO_COUNT))
-        before = spend_of(t) if t.admin else None
+        before = quiet(lambda: spend_of(t)) if t.admin else None
         c = t.call(PATH_EVALUATE, NANOJEV_REQUEST)
         served_once(c, NANOJEV_NO_COUNT)
         if before is not None:
@@ -441,14 +446,8 @@ def wire_nanojev(t):
             check(after[0] - before[0] == 1 and after[1] - before[1] == FLOOR_UNITS,
                   lambda: f"an uncounted success moved the caller's ledger from {before} to {after}; one fee at the plane's floor of {FLOOR_UNITS} decision is owed")
 
-    for name, fn in [("nanojev.served", served), ("nanojev.wrong-dialect-404", wrong_dialect),
-                     ("nanojev.no-count-floor", no_count)]:
-        try:
-            fn()
-            out.append((name, None))
-        except Red as e:
-            out.append((name, str(e)))
-    return out
+    return run_checks([("nanojev.served", served), ("nanojev.wrong-dialect-404", wrong_dialect),
+                       ("nanojev.no-count-floor", no_count)])
 
 
 # ── the BUSBAR checks: the subject's admin surface ───────────────────────────────────────────
@@ -464,19 +463,40 @@ def settled(read, done):
         time.sleep(0.1)
 
 
+def quiet(read):
+    """`read()` once the node has stopped moving it: the work an earlier check left in flight (its
+    ledger row, its audit seal) has landed, so a baseline taken now is this check's own."""
+    deadline = time.time() + OWED_WITHIN
+    last = read()
+    while True:
+        time.sleep(SETTLE)
+        now = read()
+        if now == last or time.time() >= deadline:
+            return now
+        last = now
+
+
+def admin_object(body, what):
+    try:
+        v = json.loads(body)
+    except ValueError as e:
+        raise Red(f"{what} is not JSON ({e}): {show(body)}")
+    check(isinstance(v, dict), lambda: f"{what} is not a JSON object: {show(body)}")
+    return v
+
+
 def busbar_checks(t):
-    out = []
     spend = lambda bucket: ledger_spend(t.admin_get("/api/v1/admin/ledger/totals"), bucket)  # noqa: E731
 
     def requests_of(key):
         body = t.admin_get(f"/api/v1/admin/keys/{key}/usage")
-        n = json.loads(body).get("requests")
+        n = admin_object(body, "the key's usage").get("requests")
         check(isinstance(n, int), lambda: f"the key's usage carries no `requests` count: {show(body)}")
         return n
 
     def next_seq():
         body = t.admin_get("/api/v1/admin/audit/head")
-        n = json.loads(body).get("next_seq")
+        n = admin_object(body, "the audit head").get("next_seq")
         check(isinstance(n, int), lambda: f"the audit head carries no `next_seq`: {show(body)}")
         return n
 
@@ -511,21 +531,21 @@ def busbar_checks(t):
         unchanged(before, after)
 
     def meter():
-        before = spend(t.client_id)
+        before = quiet(lambda: spend(t.client_id))
         c = success()
         after = settled(lambda: spend(t.client_id), lambda s: s[0] >= before[0] + 1)
         served_once(c)
         moved_by(before, after, 1)
 
     def audit():
-        frm = next_seq()
+        frm = quiet(next_seq)
         c = success()
         served_once(c)
         judge_audit_window(sealed_since(frm, 1), 1)
 
     def exit_():
-        frm = next_seq()
-        before = spend(t.client_id)
+        frm = quiet(next_seq)
+        before = quiet(lambda: spend(t.client_id))
         calls = [success(), success()]
         after = settled(lambda: spend(t.client_id), lambda s: s[0] >= before[0] + 2)
         for c in calls:
@@ -569,28 +589,46 @@ def busbar_checks(t):
         unchanged(before, after)
 
     # Last: the down lane benches the sole member for its cooldown.
-    for name, fn in [("usage.billable-success-only", billable), ("h2-authenticate-refusal", authenticate),
-                     ("h2-meter-row", meter), ("h2-audit-record", audit), ("h2-exit-terminal", exit_),
-                     ("h2-verify-refusal", verify), ("h2-admit-refusal", admit), ("h2-route-terminal", route)]:
-        try:
-            fn()
-            out.append((name, None))
-        except Red as e:
-            out.append((name, str(e)))
-        except (OSError, ValueError) as e:
-            out.append((name, f"the check could not read the node: {e}"))
-    return out
+    return run_checks([("usage.billable-success-only", billable), ("h2-authenticate-refusal", authenticate),
+                       ("h2-meter-row", meter), ("h2-audit-record", audit), ("h2-exit-terminal", exit_),
+                       ("h2-verify-refusal", verify), ("h2-admit-refusal", admit), ("h2-route-terminal", route)])
 
 
 # ── the targets: the reference relay, or busbar ──────────────────────────────────────────────
 
 
+def free_ports(n):
+    """`n` distinct loopback ports, all held until all are chosen (so no two are the same); each is
+    free again for the target to bind."""
+    held = []
+    try:
+        for _ in range(n):
+            s = socket.socket()
+            held.append(s)
+            s.bind(("127.0.0.1", 0))
+        return [s.getsockname()[1] for s in held]
+    finally:
+        for s in held:
+            s.close()
+
+
 def free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]
-    s.close()
-    return p
+    return free_ports(1)[0]
+
+
+def wait_listening(port, proc, budget, log=None):
+    """The target accepts connections on `port` (a listener with no /healthz of its own)."""
+    deadline = time.time() + budget
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            tail = open(log, errors="replace").read()[-4000:] if log else ""
+            raise Red(f"the target exited ({proc.returncode}) before it listened on {port}: {tail}")
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=5).close()
+            return
+        except OSError:
+            time.sleep(0.1)
+    raise Red(f"the target did not listen on {port} within {budget}s")
 
 
 def wait_healthy(port, proc, budget, log=None):
@@ -620,15 +658,20 @@ SCENARIOS = {
 
 def relay_target(scenario, workdir, brk=""):
     providers, models = SCENARIOS[scenario]
-    far, port = FarEnd(), free_port()
-    caller, provider_key = secrets.token_hex(16), secrets.token_hex(16)
-    cfg = {"listen": port, "far": f"http://127.0.0.1:{far.port}", "callers": [caller],
-           "providers": {p: {"key": provider_key, "protocol": proto} for p, proto in providers.items()},
-           "models": models, "break": brk}
-    path = os.path.join(workdir, f"relay-{scenario}-{brk or 'control'}.json")
-    with open(path, "w") as f:
-        json.dump(cfg, f)
-    proc = subprocess.Popen([sys.executable, "-I", os.path.join(HERE, "reference_relay.py"), path])
+    far = FarEnd()
+    try:
+        port = free_port()
+        caller, provider_key = secrets.token_hex(16), secrets.token_hex(16)
+        cfg = {"listen": port, "far": f"http://127.0.0.1:{far.port}", "callers": [caller],
+               "providers": {p: {"key": provider_key, "protocol": proto} for p, proto in providers.items()},
+               "models": models, "break": brk}
+        path = os.path.join(workdir, f"relay-{scenario}-{brk or 'control'}.json")
+        with open(path, "w") as f:
+            json.dump(cfg, f)
+        proc = subprocess.Popen([sys.executable, "-I", os.path.join(HERE, "reference_relay.py"), path])
+    except BaseException:
+        far.close()
+        raise
     try:
         wait_healthy(port, proc, 20)
     except BaseException:
@@ -672,26 +715,33 @@ def busbar_target(scenario, workdir, binary):
     d = os.path.join(workdir, f"busbar-{scenario}")
     os.makedirs(d, exist_ok=True)
     far = FarEnd()
-    data, admin = free_port(), free_port()
-    admin_token, provider_key = secrets.token_hex(24), secrets.token_hex(16)
-    key = subprocess.run([binary, "--generate-signing-key"], capture_output=True)
-    if key.returncode != 0:
+    try:
+        data, admin = free_ports(2)
+        admin_token, provider_key = secrets.token_hex(24), secrets.token_hex(16)
+        key = subprocess.run([binary, "--generate-signing-key"], capture_output=True)
+        if key.returncode != 0:
+            raise Red(f"busbar --generate-signing-key exited {key.returncode}: {show(key.stderr)}")
+        key_file = os.path.join(d, "signing.key")
+        with open(key_file, "wb") as f:
+            f.write(key.stdout)
+        with open(os.path.join(d, "providers.yaml"), "w") as f:
+            for p, proto in providers.items():
+                f.write(f"{p}:\n  protocol: {proto}\n  base_url: http://127.0.0.1:{far.port}\n  error_map: {{}}\n")
+        with open(os.path.join(d, "config.yaml"), "w") as f:
+            f.write(busbar_config(scenario, data, admin, key_file))
+        log = os.path.join(d, "busbar.log")
+        env = dict(os.environ, BUSBAR_CONFIG=os.path.join(d, "config.yaml"),
+                   BUSBAR_PROVIDERS=os.path.join(d, "providers.yaml"),
+                   BUSBAR_ADMIN_TOKEN=admin_token, JEV_CONFORMANCE_PROVIDER_KEY=provider_key)
+        lf = open(log, "wb")
+        try:
+            proc = subprocess.Popen([binary], env=env, stdout=lf, stderr=subprocess.STDOUT, cwd=d)
+        except BaseException:
+            lf.close()
+            raise
+    except BaseException:
         far.close()
-        raise Red(f"busbar --generate-signing-key exited {key.returncode}: {show(key.stderr)}")
-    key_file = os.path.join(d, "signing.key")
-    with open(key_file, "wb") as f:
-        f.write(key.stdout)
-    with open(os.path.join(d, "providers.yaml"), "w") as f:
-        for p, proto in providers.items():
-            f.write(f"{p}:\n  protocol: {proto}\n  base_url: http://127.0.0.1:{far.port}\n  error_map: {{}}\n")
-    with open(os.path.join(d, "config.yaml"), "w") as f:
-        f.write(busbar_config(scenario, data, admin, key_file))
-    log = os.path.join(d, "busbar.log")
-    env = dict(os.environ, BUSBAR_CONFIG=os.path.join(d, "config.yaml"),
-               BUSBAR_PROVIDERS=os.path.join(d, "providers.yaml"),
-               BUSBAR_ADMIN_TOKEN=admin_token, JEV_CONFORMANCE_PROVIDER_KEY=provider_key)
-    lf = open(log, "wb")
-    proc = subprocess.Popen([binary], env=env, stdout=lf, stderr=subprocess.STDOUT, cwd=d)
+        raise
 
     def stop():
         proc.terminate()
@@ -716,6 +766,7 @@ def busbar_target(scenario, workdir, binary):
 
     try:
         wait_healthy(data, proc, 60, log)
+        wait_listening(admin, proc, 30, log)
         bearer, client_id = mint({"name": f"jev-{scenario}"})
     except BaseException:
         stop()
@@ -736,8 +787,14 @@ def run_wire(make, busbar=False):
         except Red as e:
             results.append((f"{scenario}.boot", str(e)))
             continue
+        except UNREAD as e:
+            results.append((f"{scenario}.boot", f"the target could not be booted: {type(e).__name__}: {e}"))
+            continue
         try:
             results += checks(t)
+        except UNREAD as e:
+            # A boot's own reads (before any named check) failed: the boot is red, the others run.
+            results.append((f"{scenario}.checks", f"the boot's checks could not read the target: {type(e).__name__}: {e}"))
         finally:
             t.stop()
     return results
@@ -750,8 +807,15 @@ def report(results, path):
         print(f"  {'ok ' if e is None else 'RED'} {n}{'' if e is None else ': ' + e}")
 
 
+USAGE = "usage: judge.py control|negative <out> | subject <out> <busbar>"
+
+
 def main(argv):
     mode = argv[1] if len(argv) > 1 else ""
+    want = {"control": 3, "negative": 3, "subject": 4}.get(mode)
+    if want is None or len(argv) != want:
+        print(USAGE, file=sys.stderr)
+        return 2
     out = argv[2]
     os.makedirs(out, exist_ok=True)
     if mode == "control":
@@ -782,11 +846,18 @@ def main(argv):
         red = [n for n, e in res if e]
         print(f"subject: {len(res) - len(red)} of {len(res)} checks pass on busbar")
         return 0 if res and not red else 1
-    print("usage: judge.py control|negative <out> | subject <out> <busbar>", file=sys.stderr)
+    print(USAGE, file=sys.stderr)
     return 2
 
 
 
 
+def terminated(signum, _frame):
+    # A job cancelled with SIGTERM unwinds like an exit, so every target's finally stops it: no busbar,
+    # relay or far end outlives the judge.
+    raise SystemExit(128 + signum)
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, terminated)
     sys.exit(main(sys.argv))

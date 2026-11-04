@@ -189,7 +189,7 @@ class Relay(http.server.BaseHTTPRequestHandler):
             resp = conn.getresponse()
             status, answer = resp.status, resp.read()
             ctype = resp.getheader("content-type", "application/json")
-        except OSError as e:
+        except (OSError, http.client.HTTPException) as e:
             return self.answer(*refusal(502, f"the decision provider could not be reached: {e}"))
         finally:
             conn.close()

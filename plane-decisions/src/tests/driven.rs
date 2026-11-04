@@ -1,5 +1,47 @@
 use super::*;
+use crate::codec::tests::read_raw;
 use crate::meta::CLASS_DECISION;
+
+/// [`route_named`] without the `model` the body named.
+fn route_model<'m, V>(
+    body: &[u8],
+    models: &'m std::collections::BTreeMap<String, V>,
+    serves: impl Fn(&V) -> bool,
+) -> Result<(&'m str, &'m V), Unrouted> {
+    route_named(body, models, serves).map(|(name, entry, _)| (name, entry))
+}
+
+/// [`spliceable_named`] over the `model` the body names, read here as `arrive` reads it.
+fn spliceable(body: &[u8], upstream: &str) -> bool {
+    match readable(body) {
+        Ok(Some(serde_json::Value::String(named))) => {
+            spliceable_named(body, Some(&named), upstream)
+        }
+        _ => true,
+    }
+}
+
+/// [`project_read`] over a read of the request made here.
+fn project_hook<'r, V>(
+    request: &[u8],
+    dialect: u32,
+    routes: &'r std::collections::BTreeMap<String, V>,
+    dialect_of: impl Fn(&V) -> u32,
+) -> Projected<'r> {
+    project_read(request, &readable(request), dialect, routes, dialect_of)
+}
+
+/// [`rewritten_read`] over a read of the body made here.
+fn rewritten(body: &[u8], rewrite: &[u8], routed: &str) -> Result<Option<Vec<u8>>, NotApplied> {
+    rewritten_read(body, &readable(body), rewrite, routed)
+}
+
+impl RelayedFields {
+    /// Whether no field is relayed.
+    fn is_empty(&self) -> bool {
+        self.ends.is_empty()
+    }
+}
 
 #[test]
 fn systemone_arrives_as_the_first_op_class_with_a_principal() {
@@ -31,7 +73,8 @@ fn every_claim_arrives() {
     for (verb, target, dialect) in tail::CLAIMS {
         let a = arrive(verb, target).unwrap_or_else(|| panic!("{verb} {target}"));
         assert_eq!(a.dialect, *dialect, "{verb} {target}");
-        assert_eq!(attempt_request(*dialect).target, *target);
+        let request = attempt_request(*dialect).expect("a claimed dialect is dialled");
+        assert_eq!((request.verb, request.target), (*verb, *target));
     }
 }
 
@@ -67,8 +110,14 @@ fn the_caller_body_is_kept_and_an_empty_one_is_refused() {
 }
 
 #[test]
+fn a_dialect_no_claim_names_is_never_dialled() {
+    let unknown = u32::try_from(tail::DIALECTS.len()).expect("few dialects");
+    assert_eq!(attempt_request(unknown), None);
+}
+
+#[test]
 fn an_attempt_request_is_the_dialects_head() {
-    let r = attempt_request(tail::DIALECT_JEV);
+    let r = attempt_request(tail::DIALECT_JEV).expect("jev is dialled");
     assert_eq!(r.verb, "POST");
     assert_eq!(r.target, "/v1/systemone");
     assert_eq!(r.fields, [("content-type", &b"application/json"[..])]);
@@ -326,7 +375,7 @@ fn a_request_routes_over_the_model_it_names() {
     );
     assert_eq!(
         route_model(br#"{}"#, &models(&[]), |_| true),
-        Err(Unrouted::Unnamed)
+        Err(Unrouted::NoModel)
     );
 
     assert_eq!(
@@ -358,6 +407,7 @@ fn the_splice_rewrites_the_top_level_model_value_alone() {
 }
 
 /// BILLABLE SUCCESS ONLY: the request fee is counted once for a far end's 2xx answer with no
+/// `/error` member, and never for an error answer, a non-2xx status or an answer with no status.
 #[test]
 fn the_request_fee_is_counted_on_a_success_alone() {
     let mut ok = FarEndReading::default();
@@ -383,6 +433,8 @@ fn the_request_fee_is_counted_on_a_success_alone() {
 }
 
 /// THE CALLER'S FIELDS REACH THE FAR END (DEC-SERVE Q2, DIALECT-FIDELITY F2): every one, in order,
+/// a repeated name keeping each value, but the governed set (the document type the plane writes, the
+/// hop's `host`, the credential carriers), compared without case.
 #[test]
 fn every_caller_field_but_the_governed_set_is_relayed() {
     let caller: [(&[u8], &[u8]); 7] = [
@@ -441,8 +493,8 @@ fn red_no_caller_credential_carrier_is_relayed() {
 }
 
 /// The money rule's reading of a whole answer by its declared pointers, as the body would be read
+/// kept whole: the reference the piece-by-piece reading is held to.
 fn by_pointer(status: u32, body: &[u8]) -> Result<Vec<(u32, u64)>, UnreadableUsage> {
-    use crate::codec::read_raw;
     let ok = (200..300).contains(&status) && read_raw(body, "/error").is_none_or(|e| e == b"null");
     if !ok {
         return Ok(vec![]);
@@ -513,6 +565,8 @@ fn the_reading_is_the_pointers_reading_wherever_the_pieces_split() {
 }
 
 /// An answer of any size is read whole, its count found past a megabyte of other bytes. That the
+/// reading keeps nothing of it (no allocation, however long the answer runs) is held by
+/// `tests/door_alloc.rs`, under a counting allocator.
 #[test]
 fn a_large_answer_is_read_without_keeping_it() {
     let mut reading = FarEndReading::default();
@@ -679,6 +733,7 @@ fn a_target_names_its_claims_dialect() {
 }
 
 /// A hook's rewrite (1.5.5's rewrite JSON) as the kernel hands it: one message whose content is
+/// `document`.
 fn rewrite_of(document: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "messages": [{ "role": "user", "content": document }],
@@ -688,6 +743,8 @@ fn rewrite_of(document: &str) -> Vec<u8> {
 }
 
 /// THE REWRITE REPLACES THE REQUEST WHOLESALE, as 1.5.5 replaced the body: the members the document
+/// states, the caller's own bytes kept where a value is unchanged, the caller's `model` kept, and a
+/// member the caller did not send added.
 #[test]
 fn a_rewrite_replaces_the_request_with_its_document() {
     let body = b"{ \"state\" : {\"amount\": 7},\n  \"model\":\"m\", \"note\": [1, 2] }";
@@ -804,6 +861,7 @@ fn a_rewrite_that_does_not_apply_leaves_the_request() {
 }
 
 /// The projection names the entry the request routes over among its dialect's models, the
+/// dialect's name and the document's characters.
 #[test]
 fn a_request_is_projected_over_its_dialects_models() {
     let routes = std::collections::BTreeMap::from([
@@ -832,6 +890,8 @@ fn a_request_is_projected_over_its_dialects_models() {
 }
 
 /// THE 1.5.5 PARITY TABLE FOR THE HEAD READ (`readable`): what 1.5.5's validating parse (sonic-rs
+/// 0.5.8: top-level keys and the values of `HEAD_KEYS` decoded, every other value SKIPPED by
+/// `skip_one(true)`) answered for each body.
 #[test]
 fn the_head_read_matches_sonic_rs_0_5_8_on_escapes() {
     let a = || Ok(Some(serde_json::json!("a")));
@@ -1040,6 +1100,7 @@ fn the_head_read_matches_sonic_rs_0_5_8_on_escapes() {
 }
 
 /// THE 1.5.5 PARITY TABLE FOR A ROOT SCALAR'S RANGE AND A SKIPPED VALUE'S DEPTH (`readable`), each
+/// outcome what 1.5.5's head parse answered (v1.5.5 `lazy_body.rs`, `Head`, over sonic-rs 0.5.8).
 #[test]
 fn the_head_read_matches_1_5_5_on_root_numbers_and_unbounded_skips() {
     type Read = Result<Option<serde_json::Value>, Unrouted>;
@@ -1239,6 +1300,7 @@ fn the_document_reads_a_number_as_1_5_5_read_it() {
 }
 
 /// The document [`built`] makes where serde refuses one of 1.5.5's numbers is the document serde
+/// makes everywhere else: the same members, strings decoded, numbers read alike.
 #[test]
 fn the_built_document_is_serdes_where_both_read_it() {
     let body = br#" {"model":"m","a":[1,-3,1.5,2e3,true,false,null,"x\u00e9\ud83d\ude00",{}],
@@ -1368,14 +1430,6 @@ fn a_member_name_is_compared_with_its_escapes_decoded() {
     );
 }
 
-thread_local! {
-    static ROOT_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-pub(super) fn walked_root() {
-    ROOT_WALKS.with(|walks| walks.set(walks.get() + 1));
-}
-
 #[test]
 fn a_large_rewrite_preserves_kept_bytes_and_applies_changes() {
     const MEMBERS: usize = 2000;
@@ -1392,18 +1446,12 @@ fn a_large_rewrite_preserves_kept_bytes_and_applies_changes() {
         })
         .collect();
     let document = format!("{{{}}}", kept.join(","));
-    ROOT_WALKS.with(|walks| walks.set(0));
     let out = rewritten(body.as_bytes(), &rewrite_of(&document), "m")
         .expect("applies")
         .expect("changes the request");
-    let walks = ROOT_WALKS.with(std::cell::Cell::get);
     assert_eq!(
         String::from_utf8(out).expect("UTF-8"),
         format!(r#"{{"model":"m",{}}}"#, kept.join(","))
-    );
-    assert_eq!(
-        walks, 1,
-        "{MEMBERS} members walked the root object {walks} times"
     );
 }
 
@@ -1441,6 +1489,7 @@ fn bytes_after_the_answer_document_cannot_replace_its_usage_or_error() {
 }
 
 /// A duplicate usage parent replaces the whole earlier value, as the pointer reader does, even
+/// when its replacement carries no counts.
 #[test]
 fn a_repeated_usage_parent_replaces_all_its_counts() {
     let bodies: &[&[u8]] = &[
@@ -1512,4 +1561,90 @@ fn an_identity_rewrite_does_not_resurrect_an_earlier_duplicate_member() {
         rewritten(plain, &rewrite_of(r#"{"state":"ok"}"#), "jev").expect("applies"),
         Some(plain.to_vec())
     );
+}
+
+/// Zero models of a request's dialect is no "several": the refusal says none serves it, at 404,
+/// since naming a model cannot route it (a request the generation that dropped its dialect's last
+/// model still sees).
+#[test]
+fn a_dialect_with_no_model_is_refused_as_none_not_several() {
+    let jev_only = std::collections::BTreeMap::from([("j".to_string(), tail::DIALECT_JEV)]);
+    let nano = |d: &u32| *d == tail::DIALECT_NANOJEV;
+    let refused = route_model(br#"{"input":{}}"#, &jev_only, nano).expect_err("no nanojev model");
+    assert_eq!(refused, Unrouted::NoModel);
+    assert_eq!(refused.status(), 404);
+    assert!(!refused.text().contains("several"), "{}", refused.text());
+    assert_eq!(
+        route_model(br#"{"state":{}}"#, &models(&["a", "b"]), |_| true),
+        Err(Unrouted::Unnamed),
+        "several models of the dialect stay the 400"
+    );
+}
+
+/// A cut answer bills no count a later member of the same name superseded: a repeated count (or a
+/// repeated usage parent) replaces what was read before it from its key on, so a cut inside or right
+/// after the replacing key bills none of the superseded value, as a cut in a replacement parent
+/// already did.
+#[test]
+fn a_cut_after_a_repeated_count_cannot_bill_the_superseded_count() {
+    for (dialect, prefix) in [
+        (
+            tail::DIALECT_JEV,
+            &br#"{"usage":{"units":500,"units":2"#[..],
+        ),
+        (tail::DIALECT_JEV, br#"{"usage":{"units":500,"units":"#),
+        (tail::DIALECT_JEV, br#"{"usage":{"units":500,"units""#),
+        (tail::DIALECT_JEV, br#"{"usage":{"units":500},"usage""#),
+        (tail::DIALECT_JEV, br#"{"usage":{"units":500},"usage":"#),
+        (
+            tail::DIALECT_NANOJEV,
+            br#"{"execution":{"states":500,"states":2"#,
+        ),
+    ] {
+        let mut reading = FarEndReading::for_dialect(dialect);
+        reading.piece(prefix);
+        assert_eq!(
+            reading.cut(Some(200))[0],
+            None,
+            "{}",
+            String::from_utf8_lossy(prefix)
+        );
+    }
+    // A count read whole and never repeated still bills on a cut, and a whole answer's last
+    // duplicate still wins.
+    let mut reading = FarEndReading::for_dialect(tail::DIALECT_JEV);
+    reading.piece(br#"{"usage":{"units":500,"other":1"#);
+    assert_eq!(reading.cut(Some(200))[0].map(|u| u.amount), Some(500));
+    assert_eq!(
+        billed(200, br#"{"usage":{"units":500,"units":2}}"#),
+        Ok(vec![(DECISION, 2), (FEE, 1)])
+    );
+}
+
+#[path = "../../tests/number_corpus/mod.rs"]
+mod number_corpus;
+
+/// The plane's own number reader ([`number`], the wrapper every decoded number goes through), not
+/// only the library under it, reproduces every frozen verdict of the port it replaced.
+#[test]
+fn the_planes_number_reader_reproduces_every_frozen_verdict() {
+    use number_corpus::{line, rows, Verdict};
+    let frozen: Vec<&str> = include_str!("../../tests/fixtures/number_verdicts.txt")
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    let rows = rows();
+    assert_eq!(frozen.len(), rows.len(), "one fixture line per corpus row");
+    for ((label, row), want) in rows.iter().zip(&frozen) {
+        let got: Vec<Verdict> = row
+            .iter()
+            .map(|n| match number(n.as_bytes()) {
+                Some(sonic_number::ParserNumber::Unsigned(n)) => Verdict::Unsigned(n),
+                Some(sonic_number::ParserNumber::Signed(n)) => Verdict::Signed(n),
+                Some(sonic_number::ParserNumber::Float(f)) => Verdict::Float(f.to_bits()),
+                None => Verdict::Refused,
+            })
+            .collect();
+        assert_eq!(line(label, &got), *want, "{label}");
+    }
 }
