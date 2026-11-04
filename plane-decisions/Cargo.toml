@@ -1,0 +1,49 @@
+# busbar-plane-decisions: the decisions plane. Its door (`plane_door::door`) over the jev and
+# nanojev dialects; the cdylib twin `busbar-plane-decisions-plugin` exports the same door.
+[package]
+name = "busbar-plane-decisions"
+version = "1.6.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The decisions plane for busbar: the plugin contract's plane kind over the jev and nanojev dialects (byte-identity passthrough of the caller's body)."
+# THE ROOT CELLS' ADDRESS: `build.rs` states `cells=<this crate>/tests/root/mod.rs` under this
+# `links` name, and the composition root's `build.rs` reads it as `DEP_BUSBAR_DOOR_CELLS_<CRATE>_CELLS`
+# (the same for a path dependency and a pinned one), so the root compiles this plane's own root cells
+# without naming this crate or resolving its checkout. Links no native library.
+links = "busbar-door-cells-busbar-plane-decisions"
+
+[lints]
+workspace = true
+
+[lib]
+name = "busbar_plane_decisions"
+path = "src/lib.rs"
+
+# NO FEATURES, ON PURPOSE. A plane compiled two ways is two planes, and the kernel would have no way
+# to tell which one it registered. The contract crate holds itself to the same rule and asserts it.
+
+[dependencies]
+# THE CONTRACT, AND THE ONLY BUSBAR CRATE THIS MANIFEST NAMES. Both reserved model-serving config
+# shapes live there: `ModelCfg` (the `decisions.models.<name>` value, uniform with
+# `pools.models.<name>`) at `busbar_contract::config::ModelCfg` since DECISIONS #40/#38, and
+# `UpstreamCreds` (the reserved `upstream_credentials` value) at `busbar_contract::config::UpstreamCreds`.
+busbar-contract = { workspace = true }
+# The object notation the jev dialect speaks. Byte-identity passthrough of the body is the norm;
+# this crate parses ONLY the handful of declared pointers (never `state`/`answers`) to build facts.
+# `unbounded_depth`: a body the span scanner cannot walk is read as 1.5.5 read it, to its parse depth
+# of 128 (`driven::MAX_PARSE_DEPTH`, scanned first); serde's own limit stops one level short of it.
+# `float_roundtrip`: a document the plane builds (a rewrite's) holds each number at the nearest
+# double, as sonic-rs 0.5.8 built it in 1.5.5. Whether a number 1.5.5 decoded was in range at all is
+# not serde's to say: sonic-number capped an exponent at 1000 and truncated long mantissas, so the
+# plane reads it with that reader (`sonic-number`, below).
+serde_json = { workspace = true, features = ["unbounded_depth", "float_roundtrip"] }
+# The number reader 1.5.5's ingress decoded with, at the version busbar's lock carries (0.1.3; it
+# reads every number as 0.1.2 did, held to the verdicts of the port it replaced by
+# `tests/number_reader.rs`). Its one dependency is `cfg-if`.
+sonic-number = { workspace = true }
+serde = { workspace = true }
+# The one log line an unreadable usage raises (`busbar_contract::diag_warn!`): the door's call
+# capture carries it to the plugin's host log, compiled in or dropped in.
+tracing = { workspace = true }

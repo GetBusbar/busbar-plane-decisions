@@ -1,0 +1,911 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Busbar Inc and contributors
+
+//! THE DOOR, DRIVEN OVER ITS OWN ABI as the kernel's plane driver drives it: `open`, `refresh`,
+
+#![allow(dead_code)]
+
+use std::os::raw::c_void;
+
+use busbar_contract::abi::hook::MessageView;
+use busbar_contract::abi::mechanism::call::{
+    AbiStr, Blob, Field, InHead, OutHead, Outcome, Span, BLOB_OCTETS,
+};
+use busbar_contract::abi::mechanism::lifecycle::{
+    slot as life, CancelIn, CancelOut, GenIn, OpenIn, OpenOut, OpsHead, RefreshIn, ValidateIn,
+};
+use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
+use busbar_contract::abi::plane::{
+    slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, Ops, OutField, PlaneCancelIn, PlaneCancelOut,
+    PlaneOpenIn, PlaneOpenOut, PlaneRefreshOut, PlaneSnapshot, ProjectIn, ProjectOut,
+    ProviderFacts, RecordWrite, RefusalIn, RefusalOut, UnitCount, EMIT_DONE, EMIT_TO_FAR_END,
+    FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST, REFUSAL_ARRIVE,
+    REFUSAL_KERNEL, SPAN_ABSENT,
+};
+use busbar_plane_decisions::door;
+
+pub fn z<T>() -> T {
+    // SAFETY: every `in`/`out` here is plain C data; all-zero is a valid value of each.
+    unsafe { std::mem::zeroed() }
+}
+
+fn str_of(s: &[u8]) -> AbiStr {
+    // SAFETY: the test's own bytes, which outlive the call each `in` is built for.
+    unsafe { AbiStr::from_raw_parts(s.as_ptr(), s.len()) }
+}
+
+fn octets(b: &[u8]) -> Blob {
+    // SAFETY: the test's own bytes, which outlive the call each `in` is built for.
+    unsafe { Blob::from_raw_parts(b.as_ptr(), b.len(), BLOB_OCTETS, 0) }
+}
+
+fn read(s: AbiStr) -> String {
+    if s.is_absent() || s.is_empty() {
+        return String::new();
+    }
+    // SAFETY: the door's memory, valid until the instance's next call.
+    String::from_utf8_lossy(unsafe { s.bytes() }).into_owned()
+}
+
+fn head<T>(op: u32, ticket: Ticket) -> InHead {
+    InHead {
+        size: std::mem::size_of::<T>() as u32,
+        op,
+        ticket,
+        ..z()
+    }
+}
+
+fn out_head<T>() -> OutHead {
+    OutHead {
+        size: std::mem::size_of::<T>() as u32,
+        ..z()
+    }
+}
+
+fn ops() -> &'static Ops {
+    // SAFETY: the door is a `'static` table whose ops are the plane kind's.
+    unsafe { &*(*door()).ops().cast::<Ops>() }
+}
+
+fn lifecycle() -> &'static OpsHead {
+    &ops().head
+}
+
+struct Tables(HostTables);
+// SAFETY: the tables name no function and no memory.
+unsafe impl Sync for Tables {}
+
+static TABLES: Tables = Tables(HostTables {
+    size: std::mem::size_of::<HostTables>() as u32,
+    _reserved: 0,
+    ctx: HostCtx::NONE,
+    wake: None,
+    conns: std::ptr::null(),
+    io: std::ptr::null(),
+    services: std::ptr::null(),
+});
+
+/// `(verb, target)` pairs, as [`claims_of`] reads a snapshot's claims.
+pub fn claims(c: &[(&str, &str)]) -> Vec<(String, String)> {
+    c.iter()
+        .map(|(v, t)| ((*v).to_string(), (*t).to_string()))
+        .collect()
+}
+
+/// The claims a snapshot publishes, `(verb, target)`.
+fn claims_of(snapshot: *const PlaneSnapshot) -> Vec<(String, String)> {
+    if snapshot.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: the door's snapshot, valid until its generation retires.
+    let s = unsafe { &*snapshot };
+    if s.claims.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: as above, `claims_len` claims.
+    unsafe { std::slice::from_raw_parts(s.claims, s.claims_len) }
+        .iter()
+        .map(|c| (read(c.verb), read(c.target)))
+        .collect()
+}
+
+/// The ticket a unit's pieces are pushed on: one per unit.
+pub fn ticket_of(unit: u64) -> Ticket {
+    Ticket {
+        slot: u32::try_from(unit).expect("a small unit"),
+        generation: 1,
+    }
+}
+
+/// One opened instance of the door.
+pub struct Door {
+    instance: *mut c_void,
+    /// The first generation's claims.
+    pub claims: Vec<(String, String)>,
+}
+
+/// Open the door over `settings` (the `decisions:` section, as written), the host stating provider
+pub fn open(settings: &str) -> Door {
+    open_with(settings, &[("typesafe", "jev")])
+}
+
+/// An `open` over `settings` the door will not open: its outcome, whether it handed back an
+pub fn open_refused(settings: &str, providers: &[(&str, &str)]) -> (Outcome, bool, String) {
+    let facts: Vec<ProviderFacts> = providers
+        .iter()
+        .map(|(name, protocol)| ProviderFacts {
+            name: str_of(name.as_bytes()),
+            protocol: str_of(protocol.as_bytes()),
+            error_map: Blob::ABSENT,
+        })
+        .collect();
+    let mut err = [0_u8; 1024];
+    let mut i: PlaneOpenIn = z();
+    i.open = OpenIn {
+        head: head::<PlaneOpenIn>(life::OPEN, Ticket::NONE),
+        host: &TABLES.0,
+        settings: octets(settings.as_bytes()),
+        generation: 1,
+        err_buf: err.as_mut_ptr(),
+        err_cap: err.len(),
+        ..z()
+    };
+    (i.providers, i.providers_len) = (facts.as_ptr(), facts.len());
+    let mut o: PlaneOpenOut = z();
+    o.open = OpenOut {
+        head: out_head::<PlaneOpenOut>(),
+        ..z()
+    };
+    let f = lifecycle().open.expect("the door opens");
+    // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+    #[allow(unused_unsafe)]
+    let ret = unsafe {
+        f(
+            std::ptr::null_mut(),
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
+    let len = o.open.err_len;
+    assert!(len <= err.len(), "the reason fits the buffer the host lent");
+    let reason = if len > 0 {
+        String::from_utf8_lossy(&err[..len]).into_owned()
+    } else {
+        read(o.open.head.error)
+    };
+    (ret.outcome(), !o.open.instance.is_null(), reason)
+}
+
+/// Open the door over `settings`, the host stating each referenced provider's `(name, protocol)`.
+pub fn open_with(settings: &str, providers: &[(&str, &str)]) -> Door {
+    let facts: Vec<ProviderFacts> = providers
+        .iter()
+        .map(|(name, protocol)| ProviderFacts {
+            name: str_of(name.as_bytes()),
+            protocol: str_of(protocol.as_bytes()),
+            error_map: Blob::ABSENT,
+        })
+        .collect();
+    let mut err = [0_u8; 1024];
+    let mut i: PlaneOpenIn = z();
+    i.open = OpenIn {
+        head: head::<PlaneOpenIn>(life::OPEN, Ticket::NONE),
+        host: &TABLES.0,
+        settings: octets(settings.as_bytes()),
+        generation: 1,
+        err_buf: err.as_mut_ptr(),
+        err_cap: err.len(),
+        ..z()
+    };
+    (i.providers, i.providers_len) = (facts.as_ptr(), facts.len());
+    let mut o: PlaneOpenOut = z();
+    o.open = OpenOut {
+        head: out_head::<PlaneOpenOut>(),
+        ..z()
+    };
+    let f = lifecycle().open.expect("the door opens");
+    // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+    #[allow(unused_unsafe)]
+    let ret = unsafe {
+        f(
+            std::ptr::null_mut(),
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
+    assert_eq!(
+        ret.outcome(),
+        Outcome::Ready,
+        "the door opens over {settings}"
+    );
+    Door {
+        instance: o.open.instance,
+        claims: claims_of(o.snapshot),
+    }
+}
+
+/// `validate` of the dealt blob `{decisions: <settings>}`: the outcome and its words.
+pub fn validate(settings: &str) -> (Outcome, String) {
+    let dealt = format!("{{\"decisions\":{settings}}}");
+    let mut err = [0_u8; 1024];
+    let mut i: ValidateIn = z();
+    i.head = head::<ValidateIn>(life::VALIDATE, Ticket::NONE);
+    i.settings = octets(dealt.as_bytes());
+    (i.err_buf, i.err_cap) = (err.as_mut_ptr(), err.len());
+    let mut o: OutHead = out_head::<OutHead>();
+    let f = lifecycle().validate.expect("validate");
+    // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+    #[allow(unused_unsafe)]
+    let ret = unsafe {
+        f(
+            std::ptr::null_mut(),
+            std::ptr::from_ref(&i).cast(),
+            std::ptr::from_mut(&mut o).cast(),
+        )
+    };
+    (ret.outcome(), read(o.error))
+}
+
+/// What `arrive` answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Arrived {
+    pub outcome: Outcome,
+    /// The plane's own refusal code, `0` unless refused.
+    pub refusal: u32,
+    /// The status a refusal wears.
+    pub status: u32,
+    /// The refusal's words (`head.error`).
+    pub text: String,
+    /// The route class and the entry it names.
+    pub route: u8,
+    pub entry: String,
+    /// Where the entry's name lives: the address of the copy the instance keeps for the answer.
+    pub entry_at: usize,
+    /// The expected units written (the admission estimate), `(class, source, amount)`.
+    pub expected: Vec<(u32, u32, u64)>,
+    /// The principal need the door answered.
+    pub principal_need: u32,
+    /// The dialect the arrival answered (`ArriveOut.dialect`).
+    pub dialect: u32,
+}
+
+/// What one `project` answered.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Projected {
+    pub outcome: Option<Outcome>,
+    /// The view's pool and dialect.
+    pub pool: String,
+    pub dialect: String,
+    /// The view's turn count and characters.
+    pub message_count: u64,
+    pub total_chars: u64,
+    /// The prompt's turns, `(role, text)`.
+    pub turns: Vec<(String, String)>,
+    /// The projected body; `None` when absent.
+    pub body: Option<Vec<u8>>,
+    /// The rewritten body the kernel keeps; `None` when no rewrite was applied.
+    pub rewritten: Option<Vec<u8>>,
+    /// Whether the answer is the plane's own FAULT over an unparseable body (the kernel's
+    /// `project_fault_unparseable` judgement).
+    pub fault_unparseable: bool,
+}
+
+/// What one `on_piece` answered, re-called while it said `more`.
+#[derive(Debug, Clone, Default)]
+pub struct Answered {
+    pub outcome: Option<Outcome>,
+    /// The bytes emitted, over every re-call.
+    pub bytes: Vec<u8>,
+    /// The bytes were bound for the far end.
+    pub far: bool,
+    /// The answer said done.
+    pub done: bool,
+    /// The reply status.
+    pub status: u32,
+    /// The request line of an ATTEMPT, `"<verb> <target>"`.
+    pub request: String,
+    /// The head fields written, `(name, value)`.
+    pub fields: Vec<(String, String)>,
+    /// The units written, `(class, source, amount)`.
+    pub units: Vec<(u32, u32, u64)>,
+    /// Short-answer needs, when the answer was short.
+    pub short: bool,
+    /// The log records the calls' envelopes carried (the plane's `tracing` lines, captured by the
+    /// door's trampoline), as text.
+    pub logs: Vec<String>,
+    /// The text of every diagnostic the calls' envelopes carried, whatever its id (the log lines
+    /// above are the `DIAG_LOG` ones among them).
+    pub diags: Vec<String>,
+    /// The record writes, `"<key> <value>"` as text.
+    pub records: Vec<String>,
+}
+
+/// One piece as the kernel pushes it.
+#[derive(Debug, Clone, Copy)]
+pub struct Given<'a> {
+    pub from: u32,
+    pub flags: u32,
+    pub status: u32,
+    pub attempt: u32,
+    pub bytes: &'a [u8],
+    /// The dialect `arrive` answered, carried on every piece.
+    pub dialect: u32,
+}
+
+impl<'a> Given<'a> {
+    /// The ATTEMPT piece of attempt `n`.
+    pub const fn attempt(n: u32) -> Self {
+        Self {
+            from: FROM_KERNEL,
+            flags: 0,
+            status: 0,
+            attempt: n,
+            bytes: b"",
+            dialect: 0,
+        }
+    }
+
+    /// The caller's whole body.
+    pub const fn caller(bytes: &'a [u8]) -> Self {
+        Self {
+            from: FROM_CALLER,
+            flags: PIECE_LAST,
+            status: 0,
+            attempt: 0,
+            bytes,
+            dialect: 0,
+        }
+    }
+
+    /// The far end's whole answer, its status on it.
+    pub const fn whole(status: u32, bytes: &'a [u8]) -> Self {
+        Self {
+            from: FROM_FAR_END,
+            flags: PIECE_HAS_STATUS | PIECE_LAST,
+            status,
+            attempt: 0,
+            bytes,
+            dialect: 0,
+        }
+    }
+
+    /// One piece of the far end's answer: the first carries `status`, the last says so.
+    pub const fn far(first: Option<u32>, last: bool, bytes: &'a [u8]) -> Self {
+        let mut flags = 0;
+        let mut status = 0;
+        if let Some(s) = first {
+            flags |= PIECE_HAS_STATUS;
+            status = s;
+        }
+        if last {
+            flags |= PIECE_LAST;
+        }
+        Self {
+            from: FROM_FAR_END,
+            flags,
+            status,
+            attempt: 0,
+            bytes,
+            dialect: 0,
+        }
+    }
+}
+
+/// The host buffers one `on_piece` is lent, reused across calls so a measured call allocates only
+pub struct Bufs {
+    reply: Vec<u8>,
+    fields: Vec<OutField>,
+    arena: Vec<u8>,
+    records: Vec<RecordWrite>,
+    units: Vec<UnitCount>,
+}
+
+impl Bufs {
+    pub fn new(reply_cap: usize) -> Self {
+        Self {
+            reply: vec![0; reply_cap],
+            fields: vec![z(); 16],
+            arena: vec![0; 1 << 14],
+            records: vec![z(); 4],
+            units: vec![z(); 8],
+        }
+    }
+
+    /// Change the unit buffer's capacity, as a host does for a short answer's re-call.
+    pub fn set_units_cap(&mut self, units: usize) {
+        self.units.resize(units, z());
+    }
+}
+
+impl Door {
+    /// `refresh` onto `generation` over `settings`: the new generation's claims.
+    pub fn refresh(&self, settings: &str, generation: u64) -> Vec<(String, String)> {
+        let (outcome, words, claims) = self.try_refresh(settings, generation);
+        assert_eq!(outcome, Outcome::Ready, "the door refreshes: {words}");
+        claims
+    }
+
+    /// `refresh` onto `generation` over `settings`: its outcome, its refusal's words and the new
+    pub fn try_refresh(
+        &self,
+        settings: &str,
+        generation: u64,
+    ) -> (Outcome, String, Vec<(String, String)>) {
+        let mut i: RefreshIn = z();
+        i.head = head::<RefreshIn>(life::REFRESH, Ticket::NONE);
+        i.generation = generation;
+        i.settings = octets(settings.as_bytes());
+        let mut o: PlaneRefreshOut = z();
+        o.head = out_head::<PlaneRefreshOut>();
+        let f = lifecycle().refresh.expect("refresh");
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
+        if ret.outcome() != Outcome::Ready {
+            return (ret.outcome(), read(o.head.error), Vec::new());
+        }
+        (ret.outcome(), String::new(), claims_of(o.snapshot))
+    }
+
+    /// `arrive` of `unit` on `POST /v1/systemone` with `body`.
+    pub fn arrive(&self, unit: u64, body: &[u8]) -> Arrived {
+        self.arrive_on(unit, "POST", "/v1/systemone", body, &[])
+    }
+
+    /// `arrive` of `unit` on `verb target` with `body` and the caller's `fields`.
+    pub fn arrive_on(
+        &self,
+        unit: u64,
+        verb: &str,
+        target: &str,
+        body: &[u8],
+        fields: &[(&str, &str)],
+    ) -> Arrived {
+        let fields: Vec<Field> = fields
+            .iter()
+            .map(|(n, v)| Field {
+                name: str_of(n.as_bytes()),
+                value: str_of(v.as_bytes()),
+            })
+            .collect();
+        let mut i: ArriveIn = z();
+        i.head = head::<ArriveIn>(slot::ARRIVE, Ticket::NONE);
+        i.unit = unit;
+        i.target = str_of(target.as_bytes());
+        i.method = str_of(verb.as_bytes());
+        i.body = octets(body);
+        (i.fields, i.fields_len) = (fields.as_ptr(), fields.len());
+        let mut units = [z::<UnitCount>(); 4];
+        (i.units_buf, i.units_cap) = (units.as_mut_ptr(), units.len());
+        let mut o: ArriveOut = z();
+        o.head = out_head::<ArriveOut>();
+        let f = ops().arrive.expect("arrive");
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
+        Arrived {
+            outcome: ret.outcome(),
+            refusal: o.refusal,
+            status: o.refusal_status,
+            text: read(o.head.error),
+            route: o.route,
+            entry: read(o.pool),
+            entry_at: o.pool.ptr as usize,
+            expected: units[..(o.units_written as usize).min(units.len())]
+                .iter()
+                .map(|u| (u.class, u.source, u.amount))
+                .collect(),
+            principal_need: o.principal_need,
+            dialect: o.dialect,
+        }
+    }
+
+    /// `retire` of `generation`, as the host retires a generation it no longer serves (or one it
+    pub fn retire(&self, generation: u64) -> Outcome {
+        let i = GenIn {
+            head: head::<GenIn>(life::RETIRE, Ticket::NONE),
+            generation,
+        };
+        let mut o: OutHead = out_head::<OutHead>();
+        let f = lifecycle().retire.expect("retire");
+        // SAFETY: this live fixture owns the instance; RETIRE takes exactly GenIn/OutHead,
+        // and both stack frames remain valid for the synchronous crossing.
+        unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        }
+        .outcome()
+    }
+
+    /// `project` of `unit`'s request on `target` with `body`, and a request-stage hook's
+    pub fn project(
+        &self,
+        unit: u64,
+        target: &str,
+        body: &[u8],
+        rewrite: Option<&[u8]>,
+    ) -> Projected {
+        let mut arena = vec![0_u8; 1 << 16];
+        let mut turns = [z::<MessageView>(); 64];
+        let mut i: ProjectIn = z();
+        i.head = head::<ProjectIn>(slot::PROJECT, Ticket::NONE);
+        i.unit = unit;
+        i.target = str_of(target.as_bytes());
+        i.body = octets(body);
+        if let Some(rewrite) = rewrite {
+            i.rewrite = octets(rewrite);
+        }
+        (i.arena_buf, i.arena_cap) = (arena.as_mut_ptr(), arena.len());
+        (i.messages_buf, i.messages_cap) = (turns.as_mut_ptr(), turns.len());
+        let mut o: ProjectOut = z();
+        o.head = out_head::<ProjectOut>();
+        let f = ops().project.expect("project");
+        // SAFETY: PROJECT takes ProjectIn/ProjectOut. The caller's body/rewrite and this
+        // method's exclusive arena/turn buffers outlive the call and the copied reply below.
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
+        let mut got = Projected {
+            outcome: Some(ret.outcome()),
+            fault_unparseable: busbar_contract::abi::plane::project_fault_unparseable(
+                ret.outcome(),
+                &o,
+            ),
+            ..Projected::default()
+        };
+        if ret.outcome() != Outcome::Ready {
+            return got;
+        }
+        let span = |s: Span| {
+            (s.offset != SPAN_ABSENT).then(|| {
+                let from = s.offset as usize;
+                arena[from..from + s.len as usize].to_vec()
+            })
+        };
+        got.pool = read(o.view.pool);
+        got.dialect = read(o.view.ingress_dialect);
+        got.message_count = o.view.message_count;
+        got.total_chars = o.view.total_chars;
+        got.turns = turns[..o.prompt.messages_len]
+            .iter()
+            .map(|m| (read(m.role), read(m.text)))
+            .collect();
+        got.body = span(o.body);
+        got.rewritten = span(o.rewritten);
+        got
+    }
+
+    /// One piece of `unit` on its ticket, re-called while the door says `more`.
+    pub fn piece(&self, unit: u64, given: Given<'_>, bufs: &mut Bufs) -> Answered {
+        let ticket = ticket_of(unit);
+        let mut got = Answered::default();
+        let mut first = true;
+        let mut finished = false;
+        for _ in 0..1024 {
+            let mut i: OnPieceIn = z();
+            i.head = head::<OnPieceIn>(slot::ON_PIECE, ticket);
+            i.unit = unit;
+            i.from = given.from;
+            i.dialect = given.dialect;
+            if first {
+                i.flags = given.flags;
+                i.bytes = octets(given.bytes);
+                i.status_code = given.status;
+                i.attempt_no = given.attempt;
+            } else {
+                i.bytes = octets(b"");
+            }
+            (i.reply_buf, i.reply_cap) = (bufs.reply.as_mut_ptr(), bufs.reply.len());
+            (i.fields_buf, i.fields_cap) = (bufs.fields.as_mut_ptr(), bufs.fields.len());
+            (i.arena_buf, i.arena_cap) = (bufs.arena.as_mut_ptr(), bufs.arena.len());
+            (i.records_buf, i.records_cap) = (bufs.records.as_mut_ptr(), bufs.records.len());
+            (i.units_buf, i.units_cap) = (bufs.units.as_mut_ptr(), bufs.units.len());
+            let mut o: OnPieceOut = z();
+            o.head = out_head::<OnPieceOut>();
+            let f = ops().on_piece.expect("on_piece");
+            // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+            #[allow(unused_unsafe)]
+            let ret = unsafe {
+                f(
+                    self.instance,
+                    std::ptr::from_ref(&i).cast(),
+                    std::ptr::from_mut(&mut o).cast(),
+                )
+            };
+            first = false;
+            got.outcome = Some(ret.outcome());
+            let envelope = &o.head.envelope;
+            if !envelope.diags.is_null() {
+                // SAFETY: the reply's envelope names `diags_len` entries the door's trampoline
+                // sealed, live until the next call on this thread.
+                let diags =
+                    unsafe { std::slice::from_raw_parts(envelope.diags, envelope.diags_len) };
+                got.logs.extend(
+                    diags
+                        .iter()
+                        .filter(|d| d.id_idx == busbar_contract::abi::mechanism::call::DIAG_LOG)
+                        .map(|d| read(d.text)),
+                );
+                got.diags.extend(diags.iter().map(|d| read(d.text)));
+            }
+            got.short |= o.units_needed != 0 || o.fields_needed != 0 || o.arena_needed != 0;
+            if o.reply_status != 0 {
+                got.status = o.reply_status;
+            }
+            let arena = &bufs.arena;
+            let at = |s: Span| {
+                let from = s.offset as usize;
+                String::from_utf8_lossy(&arena[from..from + s.len as usize]).into_owned()
+            };
+            if ret.outcome() == Outcome::Ready {
+                got.fields.extend(
+                    bufs.fields[..o.fields_written as usize]
+                        .iter()
+                        .map(|f| (at(f.name), at(f.value))),
+                );
+                got.units.extend(
+                    bufs.units[..o.units_written as usize]
+                        .iter()
+                        .map(|u| (u.class, u.source, u.amount)),
+                );
+                got.records.extend(
+                    bufs.records[..o.records_written as usize]
+                        .iter()
+                        .map(|r| format!("{} {}", at(r.key), at(r.value))),
+                );
+                if o.verb.len != 0 {
+                    got.request = format!("{} {}", at(o.verb), at(o.target));
+                }
+            }
+            got.far |= o.flags & EMIT_TO_FAR_END != 0;
+            got.done |= o.flags & EMIT_DONE != 0;
+            got.bytes
+                .extend_from_slice(&bufs.reply[..usize::try_from(o.emitted).unwrap()]);
+            if ret.outcome() != Outcome::Ready || o.more == 0 {
+                finished = true;
+                break;
+            }
+        }
+        assert!(
+            finished,
+            "the door still says more after 1024 re-calls: {got:?}"
+        );
+        got
+    }
+
+    /// One crossing of `unit`'s piece that keeps nothing of the answer (so it allocates nothing
+    pub fn piece_bytes(&self, unit: u64, given: Given<'_>, bufs: &mut Bufs) -> usize {
+        let mut i: OnPieceIn = z();
+        i.head = head::<OnPieceIn>(slot::ON_PIECE, ticket_of(unit));
+        i.unit = unit;
+        i.from = given.from;
+        i.dialect = given.dialect;
+        i.flags = given.flags;
+        i.bytes = octets(given.bytes);
+        i.status_code = given.status;
+        i.attempt_no = given.attempt;
+        (i.reply_buf, i.reply_cap) = (bufs.reply.as_mut_ptr(), bufs.reply.len());
+        (i.fields_buf, i.fields_cap) = (bufs.fields.as_mut_ptr(), bufs.fields.len());
+        (i.arena_buf, i.arena_cap) = (bufs.arena.as_mut_ptr(), bufs.arena.len());
+        (i.records_buf, i.records_cap) = (bufs.records.as_mut_ptr(), bufs.records.len());
+        (i.units_buf, i.units_cap) = (bufs.units.as_mut_ptr(), bufs.units.len());
+        let mut o: OnPieceOut = z();
+        o.head = out_head::<OnPieceOut>();
+        let f = ops().on_piece.expect("on_piece");
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
+        assert!(ret.outcome() == Outcome::Ready && o.more == 0);
+        usize::try_from(o.emitted).unwrap()
+    }
+
+    /// One piece of `unit` re-called while the door says `more`, keeping nothing of the answer
+    pub fn piece_owed(&self, unit: u64, given: Given<'_>, bufs: &mut Bufs) -> usize {
+        self.piece_owed_with_flags(unit, given, bufs, 0)
+    }
+
+    /// Drain a caller debt without allocating a copy, proving every emitted piece goes upstream.
+    pub fn piece_owed_to_far(&self, unit: u64, given: Given<'_>, bufs: &mut Bufs) -> usize {
+        self.piece_owed_with_flags(unit, given, bufs, EMIT_TO_FAR_END)
+    }
+
+    fn piece_owed_with_flags(
+        &self,
+        unit: u64,
+        given: Given<'_>,
+        bufs: &mut Bufs,
+        required_flags: u32,
+    ) -> usize {
+        let mut emitted = 0;
+        let mut first = true;
+        loop {
+            let mut i: OnPieceIn = z();
+            i.head = head::<OnPieceIn>(slot::ON_PIECE, ticket_of(unit));
+            i.unit = unit;
+            i.from = given.from;
+            i.dialect = given.dialect;
+            if first {
+                i.flags = given.flags;
+                i.bytes = octets(given.bytes);
+                i.status_code = given.status;
+                i.attempt_no = given.attempt;
+            } else {
+                i.bytes = octets(b"");
+            }
+            (i.reply_buf, i.reply_cap) = (bufs.reply.as_mut_ptr(), bufs.reply.len());
+            (i.fields_buf, i.fields_cap) = (bufs.fields.as_mut_ptr(), bufs.fields.len());
+            (i.arena_buf, i.arena_cap) = (bufs.arena.as_mut_ptr(), bufs.arena.len());
+            (i.records_buf, i.records_cap) = (bufs.records.as_mut_ptr(), bufs.records.len());
+            (i.units_buf, i.units_cap) = (bufs.units.as_mut_ptr(), bufs.units.len());
+            let mut o: OnPieceOut = z();
+            o.head = out_head::<OnPieceOut>();
+            let f = ops().on_piece.expect("on_piece");
+            // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+            #[allow(unused_unsafe)]
+            let ret = unsafe {
+                f(
+                    self.instance,
+                    std::ptr::from_ref(&i).cast(),
+                    std::ptr::from_mut(&mut o).cast(),
+                )
+            };
+            assert!(ret.outcome() == Outcome::Ready);
+            assert_eq!(o.flags & required_flags, required_flags);
+            emitted += usize::try_from(o.emitted).unwrap();
+            first = false;
+            if o.more == 0 {
+                return emitted;
+            }
+        }
+    }
+
+    /// `refusal` of `unit` (`0`: none arrived) at `status` with the kernel's `text`; `arrived`
+    pub fn refusal(&self, unit: u64, status: u32, text: &str, arrived: bool) -> (Outcome, Vec<u8>) {
+        let (outcome, body, _) = self.refusal_stated(unit, status, text, arrived);
+        (outcome, body)
+    }
+
+    /// [`Door::refusal`], and also everything else the refusal states: each rendered head field as
+    /// `"<name>: <value>"` and the text of every diagnostic it carried.
+    pub fn refusal_stated(
+        &self,
+        unit: u64,
+        status: u32,
+        text: &str,
+        arrived: bool,
+    ) -> (Outcome, Vec<u8>, Vec<String>) {
+        let (mut reply, mut arena) = (vec![0_u8; 4096], vec![0_u8; 1024]);
+        let mut fields = [z::<OutField>(); 4];
+        let mut i: RefusalIn = z();
+        i.head = head::<RefusalIn>(slot::REFUSAL, Ticket::NONE);
+        i.cause = if arrived {
+            REFUSAL_ARRIVE
+        } else {
+            REFUSAL_KERNEL
+        };
+        i.status = status;
+        i.text = str_of(text.as_bytes());
+        i.unit = unit;
+        (i.reply_buf, i.reply_cap) = (reply.as_mut_ptr(), reply.len());
+        (i.fields_buf, i.fields_cap) = (fields.as_mut_ptr(), fields.len());
+        (i.arena_buf, i.arena_cap) = (arena.as_mut_ptr(), arena.len());
+        let mut o: RefusalOut = z();
+        o.head = out_head::<RefusalOut>();
+        let f = ops().refusal.expect("refusal");
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
+        let n = usize::try_from(o.reply_written).unwrap().min(reply.len());
+        let at = |s: Span| {
+            let from = s.offset as usize;
+            String::from_utf8_lossy(&arena[from..from + s.len as usize]).into_owned()
+        };
+        let mut stated: Vec<String> = Vec::new();
+        if ret.outcome() == Outcome::Ready {
+            let written = (o.fields_written as usize).min(fields.len());
+            stated.extend(
+                fields[..written]
+                    .iter()
+                    .map(|f| format!("{}: {}", at(f.name), at(f.value))),
+            );
+        }
+        let envelope = &o.head.envelope;
+        if !envelope.diags.is_null() {
+            // SAFETY: the reply's envelope names `diags_len` entries the door's trampoline sealed,
+            // live until the next call on this thread.
+            let diags = unsafe { std::slice::from_raw_parts(envelope.diags, envelope.diags_len) };
+            stated.extend(diags.iter().map(|d| read(d.text)));
+        }
+        (ret.outcome(), reply[..n].to_vec(), stated)
+    }
+
+    /// `cancel` of `unit` as the host cancels a unit it minted (`PlaneCancelIn::unit`), on no unit
+    pub fn cancel_unit(&self, unit: u64) -> (Outcome, u32) {
+        self.cancel_as(Ticket::NONE, unit)
+    }
+
+    /// `cancel` of the op on `ticket`: the outcome and the disposition.
+    pub fn cancel(&self, ticket: Ticket) -> (Outcome, u32) {
+        self.cancel_as(ticket, 0)
+    }
+
+    /// `cancel` on `ticket` naming `unit` (`0`: none).
+    fn cancel_as(&self, ticket: Ticket, unit: u64) -> (Outcome, u32) {
+        let mut records = [z::<RecordWrite>(); 4];
+        let mut arena = [0_u8; 256];
+        let mut i: PlaneCancelIn = z();
+        i.cancel = CancelIn {
+            head: head::<PlaneCancelIn>(life::CANCEL, ticket),
+            ticket,
+        };
+        (i.records_buf, i.records_cap) = (records.as_mut_ptr(), records.len());
+        (i.arena_buf, i.arena_cap) = (arena.as_mut_ptr(), arena.len());
+        i.unit = unit;
+        let mut o: PlaneCancelOut = z();
+        o.cancel = CancelOut {
+            head: out_head::<PlaneCancelOut>(),
+            ..z()
+        };
+        let f = lifecycle().cancel.expect("cancel");
+        // SAFETY: the slot is the door's own, called with an in and an out of the types it declares.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            f(
+                self.instance,
+                std::ptr::from_ref(&i).cast(),
+                std::ptr::from_mut(&mut o).cast(),
+            )
+        };
+        (ret.outcome(), o.cancel.disposition)
+    }
+}
+
+impl Drop for Door {
+    fn drop(&mut self) {
+        let input = head::<InHead>(life::CLOSE, Ticket::NONE);
+        let mut output = out_head::<OutHead>();
+        let close = lifecycle().close.expect("the door closes");
+        // SAFETY: this fixture uniquely owns the opened instance, every call is synchronous,
+        // and the SDK drops its state and snapshots when CLOSE answers READY.
+        let result = unsafe {
+            close(
+                self.instance,
+                std::ptr::from_ref(&input).cast(),
+                std::ptr::from_mut(&mut output).cast(),
+            )
+        };
+        assert_eq!(result.outcome(), Outcome::Ready, "the door closes");
+    }
+}
