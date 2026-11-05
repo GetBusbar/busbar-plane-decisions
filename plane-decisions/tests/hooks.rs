@@ -13,7 +13,7 @@ use door_harness::{open, open_with, Bufs, Given};
 const SYSTEMONE: &str = "/v1/systemone";
 const TWO: &str = r#"{"models":{"a":{"provider":"typesafe"},"b":{"provider":"typesafe"}}}"#;
 
-/// A hook's rewrite (1.5.5's rewrite JSON, as the kernel hands it): one turn whose content is the
+/// A hook's rewrite envelope, as the kernel hands it: one turn whose content is the
 /// request document `document`.
 fn rewrite_of(document: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
@@ -105,7 +105,7 @@ fn an_identity_rewrite_is_answered_as_the_request() {
     }
 }
 
-/// RED (coordinator ruling, 1.5.5 parity): a member the hook's document omits is dropped from the
+/// Redaction by omission: a member the hook's document omits is dropped from the
 /// request, so a hook redacts by omission.
 #[test]
 fn a_rewrite_redacts_by_omission() {
@@ -200,7 +200,7 @@ fn a_refused_rewrite_cannot_inject_control_characters_into_its_log() {
     assert!(!log.chars().any(char::is_control), "{log:?}");
 }
 
-/// A rewrite that does not apply leaves the request as it was (1.5.5): the view is the caller's
+/// A rewrite that does not apply leaves the request as it was: the view is the caller's
 /// request, and nothing is answered as rewritten.
 #[test]
 fn a_rewrite_that_does_not_apply_leaves_the_request() {
@@ -229,7 +229,7 @@ fn a_target_the_plane_does_not_claim_is_not_projected() {
 }
 
 #[test]
-fn a_redaction_applies_at_1_5_5s_parse_depth() {
+fn a_redaction_applies_at_the_bounded_parse_depth() {
     let door = open(TWO);
 
     let deep = format!("{}{}", "[".repeat(127), "]".repeat(127));
@@ -247,8 +247,7 @@ fn a_redaction_applies_at_1_5_5s_parse_depth() {
     assert!(!String::from_utf8_lossy(&kept).contains("123-45-6789"));
 }
 
-/// A request whose document does not parse (a member 1.5.5's head never decoded, carrying a lone
-/// surrogate escape or a bad `\u` escape) passes `arrive`, as 1.5.5's head scan passed it.
+/// Malformed strings are refused at arrival; a direct projection must also fail closed.
 #[test]
 fn a_rewrite_over_a_body_whose_document_does_not_parse_is_a_fault() {
     let door = open(TWO);
@@ -256,7 +255,7 @@ fn a_rewrite_over_a_body_whose_document_does_not_parse_is_a_fault() {
         &br#"{"model":"a","pii":"123-45-6789","x":"\ud800"}"#[..],
         br#"{"model":"a","pii":"123-45-6789","x":"\uZZZZ"}"#,
     ] {
-        assert_eq!(door.arrive(1, body).outcome, Outcome::Ready);
+        assert_eq!(door.arrive(1, body).outcome, Outcome::Refused);
         let view = door.project(1, SYSTEMONE, body, Some(&rewrite_of(r#"{"state":{}}"#)));
         assert_eq!(view.outcome, Some(Outcome::Fault), "{view:?}");
         assert_eq!(view.rewritten, None, "the hook's document is never applied");
@@ -270,7 +269,7 @@ fn a_project_with_no_rewrite_over_a_body_whose_document_does_not_parse_is_a_faul
         &br#"{"model":"a","x":"\ud800"}"#[..],
         br#"{"model":"a","x":"\uZZZZ"}"#,
     ] {
-        assert_eq!(door.arrive(1, body).outcome, Outcome::Ready);
+        assert_eq!(door.arrive(1, body).outcome, Outcome::Refused);
         let view = door.project(1, SYSTEMONE, body, None);
         assert_eq!(view.outcome, Some(Outcome::Fault), "{view:?}");
     }
@@ -307,4 +306,14 @@ fn a_unit_is_projected_over_the_generation_it_arrived_in() {
     );
 
     assert_eq!(door.project(9, SYSTEMONE, body, None).pool, "other");
+}
+
+#[test]
+fn opaque_numeric_content_is_projected_to_hooks_as_the_actual_body() {
+    let door = open(TWO);
+    let body =
+        br#"{"model":"a","system":1e309,"state":{"amount":18446744073709551617},"pii":"secret"}"#;
+    let projected = door.project(1, SYSTEMONE, body, None);
+    assert_eq!(projected.outcome, Some(Outcome::Ready));
+    assert_eq!(projected.body.as_deref(), Some(body.as_slice()));
 }

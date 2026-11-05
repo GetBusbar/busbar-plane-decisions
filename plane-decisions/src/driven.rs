@@ -185,102 +185,17 @@ pub const NO_MODEL: &str = "no decisions model is configured for this operation"
 /// built, as one that does not parse.
 pub const MAX_PARSE_DEPTH: usize = 128;
 
-/// The body as 1.5.5 read it, for a body the span scanner cannot walk: the whole document, or
-/// [`Unrouted::Unparsable`] for one 1.5.5 refused (malformed, or past [`MAX_PARSE_DEPTH`]).
+/// Materialize a bounded, valid request for a hook rewrite. Numbers retain their exact JSON
+/// representation through serde's arbitrary-precision number storage.
 pub fn parsed(body: &[u8]) -> Result<serde_json::Value, Unrouted> {
     if !valid(body) {
         return Err(Unrouted::Unparsable);
     }
-    let text = core::str::from_utf8(body).map_err(|_| Unrouted::Unparsable)?;
-
-    let mut de = serde_json::Deserializer::from_str(text);
+    let mut de = serde_json::Deserializer::from_slice(body);
     de.disable_recursion_limit();
-    let read: Result<serde_json::Value, _> = serde::Deserialize::deserialize(&mut de);
-    match read {
-        Ok(value) if de.end().is_ok() => Ok(value),
-
-        _ => built(body).ok_or(Unrouted::Unparsable),
-    }
-}
-
-/// An open container of [`built`]: an array's items so far, or an object's members so far and
-/// the key of the member being read.
-enum OpenValue {
-    Array(Vec<serde_json::Value>),
-    Object(serde_json::Map<String, serde_json::Value>, String),
-}
-
-/// [`parsed`]'s document for a body [`valid`] holds to be one, built without recursion from the
-/// walk [`Skip`] makes, each number as 1.5.5's reader read it ([`number`]), each
-/// string decoded; a repeated key keeps its last value, as serde's map does.
-fn built(body: &[u8]) -> Option<serde_json::Value> {
-    use serde_json::Value;
-    let mut at = Skip::lenient(body);
-    let mut open: Vec<OpenValue> = Vec::new();
-    loop {
-        let mut value = match at.next_non_space()? {
-            b'{' => match at.next_non_space()? {
-                b'}' => Value::Object(serde_json::Map::new()),
-                b'"' => {
-                    let key = at.key()?;
-                    open.push(OpenValue::Object(serde_json::Map::new(), key));
-                    continue;
-                }
-                _ => return None,
-            },
-            b'[' => {
-                at.eat_spaces();
-                if at.peek()? == b']' {
-                    at.at += 1;
-                    Value::Array(Vec::new())
-                } else {
-                    open.push(OpenValue::Array(Vec::new()));
-                    continue;
-                }
-            }
-            b'"' => Value::String(at.string_value()?),
-            first @ (b'-' | b'0'..=b'9') => at.number_value(first)?,
-            b't' => at.skip_literal(b"rue").ok().map(|()| Value::Bool(true))?,
-            b'f' => at.skip_literal(b"alse").ok().map(|()| Value::Bool(false))?,
-            b'n' => at.skip_literal(b"ull").ok().map(|()| Value::Null)?,
-            _ => return None,
-        };
-
-        loop {
-            let next = match open.last_mut() {
-                None => return Some(value),
-                Some(OpenValue::Array(items)) => {
-                    items.push(value);
-                    at.next_non_space()?
-                }
-                Some(OpenValue::Object(members, key)) => {
-                    members.insert(core::mem::take(key), value);
-                    at.next_non_space()?
-                }
-            };
-            let in_array = matches!(open.last()?, OpenValue::Array(_));
-            match (next, in_array) {
-                (b',', true) => break,
-                (b',', false) => {
-                    if at.next_non_space()? != b'"' {
-                        return None;
-                    }
-                    let next_key = at.key()?;
-                    if let Some(OpenValue::Object(_, key)) = open.last_mut() {
-                        *key = next_key;
-                    }
-                    break;
-                }
-                (b']', true) | (b'}', false) => {
-                    value = match open.pop()? {
-                        OpenValue::Array(items) => Value::Array(items),
-                        OpenValue::Object(members, _) => Value::Object(members),
-                    };
-                }
-                _ => return None,
-            }
-        }
-    }
+    let value = serde::Deserialize::deserialize(&mut de).map_err(|_| Unrouted::Unparsable)?;
+    de.end().map_err(|_| Unrouted::Unparsable)?;
+    Ok(value)
 }
 
 /// The unknown-model refusal's words before the echoed name.
@@ -316,33 +231,14 @@ pub fn echoed(name: &str) -> String {
 /// The request member a request names its model in, and routes by ([`codec::PTR_MODEL`]).
 const MODEL: &str = "model";
 
-/// The top-level keys decoded while a body is validated: `model`, `stream`, `stream_options`,
-/// `system` and the array-stream shim key.
-const HEAD_KEYS: &[&str] = &[
-    "__busbar_gemini_json_array",
-    MODEL,
-    "stream",
-    "stream_options",
-    "system",
-];
-
-/// The deepest value of [`HEAD_KEYS`] decoded (sonic-rs 0.5.8 `MAX_ALLOWED_DEPTH`): its deserializer starts with `u8::MAX` (255) levels,
-/// each object or array it builds takes one and the 255th refuses `RecursionLimitExceeded`; the root
-/// object takes the first, so a head value may nest 253 deep.
-const HEAD_VALUE_DEPTH: usize = 253;
-
-/// The body as ingress reads it: at most [`MAX_PARSE_DEPTH`] deep by the depth scan, UTF-8
-/// throughout, then one validating parse that builds no document (trailing bytes, a bad number, a
-/// bad escape or a truncated document refuse), decoding the top-level keys, the values of
-/// [`HEAD_KEYS`] and a root scalar (so a root number that overflows to infinity refuses) and only
-/// skipping every other value, as sonic-rs 0.5.8 skips it ([`Skip`]): a `\u` escape inside a skipped value is not checked for its
-/// hex digits, a skipped number is not checked for its range and a skipped value has no depth bound.
+/// Validate the bounded UTF-8 JSON document and read only its top-level `model`. Decision
+/// content has uniform syntax rules, regardless of field names; numeric values remain opaque.
 pub fn readable(body: &[u8]) -> Result<Option<serde_json::Value>, Unrouted> {
     if busbar_contract::spans::exceeds_max_depth(body, MAX_PARSE_DEPTH) {
         return Err(Unrouted::Unparsable);
     }
     core::str::from_utf8(body).map_err(|_| Unrouted::Unparsable)?;
-    let mut skip = Skip::lenient(body);
+    let mut skip = Skip::new(body);
     let model = skip.top_level().map_err(|()| Unrouted::Unparsable)?;
     if skip.next_non_space().is_some() {
         return Err(Unrouted::Unparsable);
@@ -350,66 +246,36 @@ pub fn readable(body: &[u8]) -> Result<Option<serde_json::Value>, Unrouted> {
     Ok(model)
 }
 
-/// Whether `span` is one value as 1.5.5 DECODED it (a top-level key, a value of [`HEAD_KEYS`], a
-/// root scalar), read strictly ([`Skip::strict`]): every escape whole, every surrogate paired and
-/// every number one 1.5.5's reader took ([`number`]).
+/// Whether `span` is one complete JSON value, with valid strings and numeric syntax.
 fn decodes(span: &[u8]) -> bool {
-    let mut strict = Skip::strict(span);
+    let mut strict = Skip::new(span);
     strict.skip_one().is_ok() && strict.next_non_space().is_none()
 }
 
-/// [`decodes`], and the value built. A number serde reads as out of range where 1.5.5's reader did
-/// not (the exponent cap of [`number`]) is built as `null`: only the `model` is kept,
-/// and a `model` that is no string is none ([`Unrouted::NotAName`]) either way.
+/// Decode only a routing key or model. Non-string models need no numeric interpretation:
+/// they are represented as null and refused as `NotAName` by the routing check.
 fn decoded(span: &[u8]) -> Result<serde_json::Value, ()> {
-    if !decodes(span) {
-        return Err(());
+    if span.first() == Some(&b'"') {
+        serde_json::from_slice::<String>(span)
+            .map(serde_json::Value::String)
+            .map_err(|_| ())
+    } else {
+        Ok(serde_json::Value::Null)
     }
-    let mut de = serde_json::Deserializer::from_slice(span);
-    de.disable_recursion_limit();
-    Ok(serde::Deserialize::deserialize(&mut de).unwrap_or(serde_json::Value::Null))
 }
 
-/// sonic-rs 0.5.8's CHECKED SKIP (`Parser::skip_one(true)`, what `serde::de::IgnoredAny` ran in
-/// 1.5.5's head parse), over a body: structure, numbers, literals, control characters and the
-/// simple escapes are validated, and a `\u` escape is skipped WITHOUT looking at its hex
-/// (`skip_escaped_chars`: after a backslash it consumes the next byte, and for `u` four more, which
-/// may be anything but the buffer's end).
+/// An iterative JSON syntax walk. It validates every string, while keeping numbers as lexemes.
 struct Skip<'b> {
     bytes: &'b [u8],
     at: usize,
-    strict: bool,
 }
 
-/// The value 1.5.5's reader read `bytes` as (one JSON number, held to the JSON grammar): an
-/// unsigned or a negative integer, or a finite float; `None` where it refused the number
-/// (`FloatMustBeFinite`, the parse 400).
-fn number(bytes: &[u8]) -> Option<sonic_number::ParserNumber> {
-    let negative = bytes.first() == Some(&b'-');
-    let mut at = usize::from(negative);
-    sonic_number::parse_number(bytes, &mut at, negative).ok()
-}
-
-/// The bytes a backslash may be followed by (sonic-rs 0.5.8 `ESCAPED_TAB`), `u` apart.
+/// Simple JSON escapes, apart from `u`.
 const SIMPLE_ESCAPES: &[u8] = b"\"\\/bfnrt";
 
 impl<'b> Skip<'b> {
-    /// sonic's checked skip over `bytes`.
-    const fn lenient(bytes: &'b [u8]) -> Self {
-        Skip {
-            bytes,
-            at: 0,
-            strict: false,
-        }
-    }
-
-    /// The walk of a value 1.5.5 decoded, over `bytes`.
-    const fn strict(bytes: &'b [u8]) -> Self {
-        Skip {
-            bytes,
-            at: 0,
-            strict: true,
-        }
+    const fn new(bytes: &'b [u8]) -> Self {
+        Self { bytes, at: 0 }
     }
 
     fn peek(&self) -> Option<u8> {
@@ -434,8 +300,7 @@ impl<'b> Skip<'b> {
         self.bump()
     }
 
-    /// The root value: an object's keys and head values decoded, an array's elements skipped, a
-    /// root scalar (string, number or literal) decoded.
+    /// Validate any root value; only an object's model is interpreted for routing.
     fn top_level(&mut self) -> Result<Option<serde_json::Value>, ()> {
         self.eat_spaces();
         match self.peek() {
@@ -476,17 +341,9 @@ impl<'b> Skip<'b> {
             }
             self.eat_spaces();
             let start = self.at;
-            let deepest = self.skip_one()?;
-            if HEAD_KEYS.contains(&key.as_str()) {
-                if deepest > HEAD_VALUE_DEPTH {
-                    return Err(());
-                }
-                let span = &self.bytes[start..self.at];
-                if key == MODEL {
-                    model = Some(decoded(span)?);
-                } else if !decodes(span) {
-                    return Err(());
-                }
+            self.skip_one()?;
+            if key == MODEL {
+                model = Some(decoded(&self.bytes[start..self.at])?);
             }
             match self.next_non_space() {
                 Some(b'}') => return Ok(model),
@@ -496,14 +353,14 @@ impl<'b> Skip<'b> {
         }
     }
 
-    /// One value skipped (`skip_one(true)`, with sonic's `skip_object` and `skip_array`), without
+    /// One value validated without
     /// recursion: the containers still open are kept innermost last (`true` an object).
     fn skip_one(&mut self) -> Result<usize, ()> {
         let mut open: Vec<bool> = Vec::new();
         let mut deepest = 0;
         loop {
             match self.next_non_space().ok_or(())? {
-                first @ (b'-' | b'0'..=b'9') => self.skip_number(first)?,
+                first @ (b'-' | b'0'..=b'9') => self.skip_number_token(first)?,
                 b'"' => self.skip_string()?,
                 b't' => self.skip_literal(b"rue")?,
                 b'f' => self.skip_literal(b"alse")?,
@@ -553,31 +410,6 @@ impl<'b> Skip<'b> {
         }
     }
 
-    /// [`built`]'s string, its opening quote consumed: decoded.
-    fn string_value(&mut self) -> Option<String> {
-        let start = self.at - 1;
-        self.skip_string_token().ok()?;
-        serde_json::from_slice(&self.bytes[start..self.at]).ok()
-    }
-
-    /// [`built`]'s key and its colon, the key's opening quote consumed.
-    fn key(&mut self) -> Option<String> {
-        let key = self.string_value()?;
-        (self.next_non_space()? == b':').then_some(key)
-    }
-
-    /// [`built`]'s number, its first byte consumed: as 1.5.5's reader read it.
-    fn number_value(&mut self, first: u8) -> Option<serde_json::Value> {
-        use sonic_number::ParserNumber;
-        let start = self.at - 1;
-        self.skip_number_token(first).ok()?;
-        Some(match number(&self.bytes[start..self.at])? {
-            ParserNumber::Unsigned(n) => serde_json::Value::from(n),
-            ParserNumber::Signed(n) => serde_json::Value::from(n),
-            ParserNumber::Float(f) => serde_json::Value::Number(serde_json::Number::from_f64(f)?),
-        })
-    }
-
     /// A skipped object's key and its colon, the key's opening quote consumed.
     fn skip_key(&mut self) -> Result<(), ()> {
         self.skip_string()?;
@@ -613,17 +445,6 @@ impl<'b> Skip<'b> {
         }
         self.skip_digit()?;
         self.skip_digits();
-        Ok(())
-    }
-
-    /// `do_skip_number`: an optional `-`, a digit (no leading zero before another), at most one
-    /// fraction (a digit required) and an exponent (a digit required).
-    fn skip_number(&mut self, first: u8) -> Result<(), ()> {
-        let start = self.at - 1;
-        self.skip_number_token(first)?;
-        if self.strict && number(&self.bytes[start..self.at]).is_none() {
-            return Err(());
-        }
         Ok(())
     }
 
@@ -675,7 +496,7 @@ impl<'b> Skip<'b> {
     fn skip_string(&mut self) -> Result<(), ()> {
         let start = self.at - 1;
         self.skip_string_token()?;
-        if self.strict && !string_decodes(&self.bytes[start..self.at]) {
+        if !string_decodes(&self.bytes[start..self.at]) {
             return Err(());
         }
         Ok(())
@@ -693,20 +514,16 @@ impl<'b> Skip<'b> {
         }
     }
 
-    /// `skip_escaped_chars`, the backslash consumed. `u` needs six bytes left (itself, four more and
-    /// the byte after) and eats five, unchecked; any other byte is eaten and must be a simple
-    /// escape.
+    /// Consume a complete escape without letting invalid hex swallow structural bytes.
     fn skip_escape(&mut self) -> Result<(), ()> {
-        match self.peek().ok_or(())? {
-            b'u' if self.bytes.len() - self.at < 6 => Err(()),
+        match self.bump().ok_or(())? {
             b'u' => {
-                self.at += 5;
+                for _ in 0..4 {
+                    self.bump().filter(u8::is_ascii_hexdigit).ok_or(())?;
+                }
                 Ok(())
             }
-            c => {
-                self.at += 1;
-                SIMPLE_ESCAPES.contains(&c).then_some(()).ok_or(())
-            }
+            c => SIMPLE_ESCAPES.contains(&c).then_some(()).ok_or(()),
         }
     }
 }
@@ -774,16 +591,11 @@ pub fn spliced(body: &[u8], upstream: &str) -> Option<Vec<u8>> {
         busbar_contract::spans::Resolved::Missing => return None,
         busbar_contract::spans::Resolved::Malformed
         | busbar_contract::spans::Resolved::NeedMore => {
-            let mut document = parsed(body).ok()?;
-            let named = document.get(MODEL)?.as_str()?;
-            if named == upstream {
-                return None;
-            }
-            document.as_object_mut()?.insert(
-                MODEL.to_string(),
-                serde_json::Value::String(upstream.to_string()),
-            );
-            return Some(document.to_string().into_bytes());
+            // Ingress already validated the bounded document. Locate its model without
+            // converting numbers or reserializing any other value.
+            busbar_contract::spans::members(body, 0)?
+                .last(MODEL)?
+                .value()
         }
     };
     let named: String = serde_json::from_slice(body.get(span.start..span.end)?).ok()?;
@@ -798,22 +610,19 @@ pub fn spliced(body: &[u8], upstream: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Whether [`spliced`] can set `upstream` in `body` where it must: a body naming a model other
-/// than `upstream` is rewritten on its hop, which materializes the whole document; one whose
-/// document would not parse (a string its head never decoded but the document parse refuses) is
-/// answered 500 ([`INTERNAL_ERROR`]) by `arrive`, never relayed with the caller's model unspliced.
+/// Validate a document when its route needs a model rename, without numeric conversion.
 #[must_use]
 pub fn spliceable_named(body: &[u8], named: Option<&str>, upstream: &str) -> bool {
     match named {
         // `named` came from a read [`readable`] accepted, so the body is UTF-8 and within the parse
-        // depth already: only its strict walk is left to judge.
+        // depth already; validate its syntax without interpreting numeric content.
         Some(named) if named != upstream => decodes(body),
         _ => true,
     }
 }
 
-/// Whether the body's whole document parses, as the DOM parse reads it (strings decoded, so a
-/// bad escape or a lone surrogate refuses; numbers read by [`number`]), by a walk that builds no tree ([`Skip::strict`]).
+/// Whether the whole body is bounded UTF-8 JSON. Numeric syntax is validated without
+/// conversion; strings must have valid escapes and paired surrogates.
 #[must_use]
 pub fn valid(body: &[u8]) -> bool {
     if busbar_contract::spans::exceeds_max_depth(body, MAX_PARSE_DEPTH)
@@ -824,7 +633,7 @@ pub fn valid(body: &[u8]) -> bool {
     decodes(body)
 }
 
-/// Whether `span`, one string with its quotes, decodes as 1.5.5 decoded a string: every escape
+/// Whether `span`, one string with its quotes, decodes: every escape
 /// whole and every surrogate paired.
 fn string_decodes(span: &[u8]) -> bool {
     let mut de = serde_json::Deserializer::from_slice(span);

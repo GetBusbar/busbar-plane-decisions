@@ -823,7 +823,7 @@ fn a_deep_body_with_one_model_honours_its_model_and_is_spliced() {
 }
 
 #[test]
-fn a_body_past_the_parse_depth_is_refused_as_1_5_5_refused_it() {
+fn a_body_past_the_parse_depth_is_refused() {
     let two = open(TWO);
     let body = format!(r#"{{"model":"a","deep":{}}}"#, nested(129));
     let refused = two.arrive(1, body.as_bytes());
@@ -848,7 +848,7 @@ fn a_body_past_the_parse_depth_is_refused_as_1_5_5_refused_it() {
 }
 
 #[test]
-fn a_body_1_5_5_could_not_parse_is_refused_before_routing() {
+fn malformed_json_is_refused_before_routing() {
     let two = open(TWO);
     for (unit, body) in [
         (1, r#"{"model":"a"} garbage"#.to_string()),
@@ -884,14 +884,14 @@ fn a_body_1_5_5_could_not_parse_is_refused_before_routing() {
     );
     assert_ne!(
         not_a_name.text, "We could not parse the JSON body of your request.",
-        "a document 1.5.5 read, with a model that is not a name"
+        "a valid document with a model that is not a name"
     );
 }
 
-/// The exact edge of 1.5.5's parse depth (128, v1.5.5 json.rs `MAX_JSON_DEPTH`): a body 128 deep is
+/// The bounded parse depth (128): a body 128 deep is
 /// read, 129 and 130 are refused.
 #[test]
-fn the_parse_depth_edge_is_1_5_5s() {
+fn the_parse_depth_edge_is_bounded() {
     let two = open(TWO);
 
     let at = |n: usize| format!(r#"{{"model":"a","deep":{}}}"#, nested(n));
@@ -908,7 +908,7 @@ fn the_parse_depth_edge_is_1_5_5s() {
 }
 
 #[test]
-fn an_empty_model_is_refused_as_1_5_5_refused_it() {
+fn an_empty_model_is_refused() {
     for settings in [ONE, TWO] {
         let door = open(settings);
         let refused = door.arrive(1, br#"{"model":"","state":{}}"#);
@@ -925,7 +925,7 @@ fn an_empty_model_is_refused_as_1_5_5_refused_it() {
 }
 
 #[test]
-fn a_body_that_is_not_utf8_is_refused_as_1_5_5_refused_it() {
+fn a_body_that_is_not_utf8_is_refused() {
     let two = open(TWO);
     let in_string: &[u8] = b"{\"model\":\"a\",\"x\":\"\xff\"}";
     let trailing: &[u8] = b"{\"model\":\"a\"}\xc3";
@@ -944,7 +944,7 @@ fn a_body_that_is_not_utf8_is_refused_as_1_5_5_refused_it() {
 }
 
 #[test]
-fn a_model_that_is_not_a_string_is_refused_as_1_5_5_refused_it() {
+fn a_model_that_is_not_a_string_is_refused() {
     let two = open(TWO);
     for (unit, body) in [(1, &br#"{"model":7}"#[..]), (2, br#"{"model":{"a":1}}"#)] {
         let refused = two.arrive(unit, body);
@@ -984,133 +984,54 @@ fn a_lone_surrogate_in_a_top_level_key_or_the_model_is_refused() {
 }
 
 #[test]
-fn a_member_1_5_5_never_decoded_does_not_refuse_the_body() {
-    let two = open(TWO);
-    let deep = format!(
-        r#"{{"model":"b","deep":{}"\ud800"{}}}"#,
-        "[".repeat(70),
-        "]".repeat(70)
-    );
-    let routed = two.arrive(1, deep.as_bytes());
-    assert_eq!(
-        (routed.outcome, routed.entry.as_str()),
-        (Outcome::Ready, "b"),
-        "{routed:?}"
-    );
-    let shallow = two.arrive(2, br#"{"model":"a","x":"\ud800"}"#);
-    assert_eq!(shallow.entry, "a", "{shallow:?}");
-}
-
-#[test]
-fn a_request_that_cannot_take_its_upstream_model_is_refused_as_1_5_5_refused_it() {
-    let upstream = r#"{"models":{"jev":{"provider":"typesafe","upstream_model":"jev-1.13.0"}}}"#;
-    let door = open(upstream);
-    let refused = door.arrive(1, br#"{"model":"jev","x":"\ud800"}"#);
-    assert_eq!(
-        (
-            refused.outcome,
-            refused.status,
-            refused.text.as_str(),
-            refused.entry.as_str()
-        ),
-        (
-            Outcome::Refused,
-            500,
-            "We received an unexpected internal error. Please try again.",
-            "jev"
-        ),
-        "{refused:?}"
-    );
-
-    let unnamed = door.arrive(2, br#"{"x":"\ud800"}"#);
-    assert_eq!(unnamed.outcome, Outcome::Ready, "{unnamed:?}");
-}
-
-#[test]
-fn an_invalid_hex_escape_in_a_skipped_value_is_served_as_1_5_5_served_it() {
-    let two = open(TWO);
-    let served = two.arrive(1, br#"{"model":"a","x":"\uZZZZ"}"#);
-    assert_eq!(
-        (served.outcome, served.entry.as_str()),
-        (Outcome::Ready, "a"),
-        "{served:?}"
-    );
-    let swallowed = two.arrive(2, br#"{"model":"a","x":"\u"   "}"#);
-    assert_eq!(swallowed.outcome, Outcome::Ready, "{swallowed:?}");
-    for (unit, body) in [
-        (3, &br#"{"model":"a","system":"\uZZZZ"}"#[..]),
-        (4, br#"{"model":"a","\uZZZZ":1}"#),
-        (5, br#"{"model":"\uZZZZ"}"#),
+fn invalid_unicode_is_refused_before_routing_with_or_without_an_alias() {
+    for settings in [
+        TWO,
+        r#"{"models":{"a":{"provider":"typesafe","upstream_model":"upstream"}}}"#,
     ] {
-        let refused = two.arrive(unit, body);
-        assert_eq!(
-            (refused.outcome, refused.status, refused.text.as_str()),
-            (
-                Outcome::Refused,
-                400,
-                "We could not parse the JSON body of your request."
-            ),
-            "{refused:?}"
-        );
+        let door = open(settings);
+        for (unit, body) in [
+            (1, br#"{"model":"a","x":"\uZZZZ"}"#.as_slice()),
+            (2, br#"{"model":"a","x":"\ud800"}"#),
+            (3, br#"{"model":"a","system":"\uZZZZ"}"#),
+            (4, br#"{"model":"a","x":"\u"   "}"#),
+            (5, br#"{"x":"\ud800"}"#),
+        ] {
+            let refused = door.arrive(unit, body);
+            assert_eq!(
+                (refused.outcome, refused.status),
+                (Outcome::Refused, 400),
+                "{refused:?}"
+            );
+        }
     }
-    let upstream = r#"{"models":{"jev":{"provider":"typesafe","upstream_model":"jev-1.13.0"}}}"#;
-    let refused = open(upstream).arrive(1, br#"{"model":"jev","x":"\uZZZZ"}"#);
-    assert_eq!(
-        (refused.outcome, refused.status, refused.text.as_str()),
-        (
-            Outcome::Refused,
-            500,
-            "We received an unexpected internal error. Please try again."
-        ),
-        "{refused:?}"
-    );
 }
 
 #[test]
-fn a_root_number_out_of_range_is_refused_and_a_skipped_value_has_no_depth_bound() {
+fn opaque_numbers_route_and_alias_without_changing_other_bytes() {
+    let settings = r#"{"models":{"a":{"provider":"typesafe","upstream_model":"upstream"}}}"#;
+    let body = br#" { "model" : "a", "system":1e309, "stream":-1e400, "state":{"n":18446744073709551617,"z":-0,"v":27.0,"s":"\u0061"} } "#;
+    let expected = String::from_utf8(body.to_vec())
+        .unwrap()
+        .replacen(r#""a""#, r#""upstream""#, 1);
+    assert_eq!(sent(settings, body), expected);
+    assert_eq!(sent(TWO, body), String::from_utf8(body.to_vec()).unwrap());
+}
+
+#[test]
+fn opaque_root_numbers_keep_the_single_model_default() {
     let one = open(ONE);
-    for (unit, body) in [
-        (1, &b"1e400"[..]),
-        (2, b"-1e309"),
-        (3, b"1.7976931348623159e308"),
-    ] {
-        let refused = one.arrive(unit, body);
+    for (i, body) in ["1e400", "-1e309", "18446744073709551617"]
+        .into_iter()
+        .enumerate()
+    {
         assert_eq!(
-            (refused.outcome, refused.status, refused.text.as_str()),
-            (
-                Outcome::Refused,
-                400,
-                "We could not parse the JSON body of your request."
-            ),
-            "{refused:?}"
+            one.arrive(i as u64 + 1, body.as_bytes()).outcome,
+            Outcome::Ready
         );
     }
-    for (unit, body) in [
-        (4, &b"1e308"[..]),
-        (5, b"18446744073709551616"),
-        (6, b"[1e400]"),
-    ] {
-        let served = one.arrive(unit, body);
-        assert_eq!(
-            (served.outcome, served.entry.as_str()),
-            (Outcome::Ready, "jev"),
-            "{served:?}"
-        );
-    }
-    let two = open(TWO);
-    let deep = format!(r#"{{"model":"a","x":"\uAAA\","y":{}}}"#, nested(200));
-    let served = two.arrive(1, deep.as_bytes());
-    assert_eq!(
-        (served.outcome, served.entry.as_str()),
-        (Outcome::Ready, "a"),
-        "{served:?}"
-    );
 }
 
-/// An `open` the door will not open answers REFUSED (as `validate` and `refresh` answer the same
-/// settings) with no instance, its reason in the buffer the host lent (`err_len`): a section the
-/// grammar refuses, in the grammar's words, and a model whose provider the host stated no protocol
-/// for, named with that provider.
 #[test]
 fn an_open_the_door_refuses_is_refused_with_its_reason() {
     assert_eq!(
@@ -1343,9 +1264,8 @@ fn an_unreadable_usage_warns_once_per_instance_not_per_answer() {
     assert_eq!(warnings, vec![1, 0, 0]);
 }
 
-/// RED: a body that does not parse, projected with no rewrite hook bound, is the plane's own FAULT
-/// over an unparseable body (marked), so the kernel's gates judge a Null body as 1.5.5 did rather
-/// than failing the request as a broken plane.
+/// Direct projection of malformed input returns a marked fault; the shared core must fail
+/// closed for content gates instead of substituting an empty request.
 #[test]
 fn project_over_an_unparseable_body_marks_its_fault_unparseable() {
     let door = open(r#"{"models":{"jev":{"provider":"typesafe"}}}"#);

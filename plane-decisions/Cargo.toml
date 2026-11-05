@@ -32,21 +32,15 @@ path = "src/lib.rs"
 busbar-contract = { workspace = true }
 # The object notation the jev dialect speaks. Byte-identity passthrough of the body is the norm;
 # this crate parses ONLY the handful of declared pointers (never `state`/`answers`) to build facts.
-# `unbounded_depth`: a body the span scanner cannot walk is read as 1.5.5 read it, to its parse depth
-# of 128 (`driven::MAX_PARSE_DEPTH`, scanned first); serde's own limit stops one level short of it.
-# `float_roundtrip`: a document the plane builds (a rewrite's) holds each number at the nearest
-# double, as sonic-rs 0.5.8 built it in 1.5.5. Whether a number 1.5.5 decoded was in range at all is
-# not serde's to say: sonic-number capped an exponent at 1000 and truncated long mantissas, so the
-# plane reads it with that reader (`sonic-number`, below).
-serde_json = { workspace = true, features = ["unbounded_depth", "float_roundtrip"] }
-# The number reader 1.5.5's ingress decoded with, at the version busbar's lock carries (0.1.3; it
-# reads every number as 0.1.2 did, held to the verdicts of the port it replaced by
-# `tests/number_reader.rs`). Its one dependency is `cfg-if`.
-sonic-number = { workspace = true }
+# Syntax/depth are checked before materializing a hook rewrite. Keep opaque numbers exact;
+# routing and model-only splicing never convert numeric content.
+serde_json = { workspace = true, features = ["unbounded_depth", "arbitrary_precision"] }
 serde = { workspace = true }
 # The one log line an unreadable usage raises (`busbar_contract::diag_warn!`): the door's call
 # capture carries it to the plugin's host log, compiled in or dropped in.
 tracing = { workspace = true }
 
 [dev-dependencies]
+# Historical port corpus only; this reader is not part of decisions runtime semantics.
+sonic-number = { workspace = true }
 jsonschema = { workspace = true }

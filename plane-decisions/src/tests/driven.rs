@@ -734,7 +734,7 @@ fn a_target_names_its_claims_dialect() {
     assert_eq!(dialect_at("/v1/models"), None);
 }
 
-/// A hook's rewrite (1.5.5's rewrite JSON) as the kernel hands it: one message whose content is
+/// A hook's rewrite envelope as the kernel hands it: one message whose content is
 /// `document`.
 fn rewrite_of(document: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
@@ -744,7 +744,7 @@ fn rewrite_of(document: &str) -> Vec<u8> {
     .expect("JSON")
 }
 
-/// THE REWRITE REPLACES THE REQUEST WHOLESALE, as 1.5.5 replaced the body: the members the document
+/// THE REWRITE REPLACES THE REQUEST WHOLESALE: the members the document
 /// states, the caller's own bytes kept where a value is unchanged, the caller's `model` kept, and a
 /// member the caller did not send added.
 #[test]
@@ -845,7 +845,7 @@ fn an_identity_rewrite_answers_the_request_bytes() {
 }
 
 /// A rewrite that names no document, or meets a body that is no object, leaves the request as it was
-/// (1.5.5); the kernel refuses it, which fails closed.
+/// The kernel refuses it, which fails closed.
 #[test]
 fn a_rewrite_that_does_not_apply_leaves_the_request() {
     let body = br#"{"state":{"amount":7}}"#;
@@ -891,464 +891,109 @@ fn a_request_is_projected_over_its_dialects_models() {
     );
 }
 
-/// THE 1.5.5 PARITY TABLE FOR THE HEAD READ (`readable`): what 1.5.5's validating parse (sonic-rs
-/// 0.5.8: top-level keys and the values of `HEAD_KEYS` decoded, every other value SKIPPED by
-/// `skip_one(true)`) answered for each body.
+/// Content names never select a different JSON parser or numeric range.
 #[test]
-fn the_head_read_matches_sonic_rs_0_5_8_on_escapes() {
-    let a = || Ok(Some(serde_json::json!("a")));
-    type Read = Result<Option<serde_json::Value>, Unrouted>;
-    let table: &[(&str, &[u8], Read)] = &[
-        (
-            "invalid hex, skipped",
-            br#"{"model":"a","x":"\uZZZZ"}"#,
-            a(),
-        ),
-        ("short hex, skipped", br#"{"model":"a","x":"\u12G4"}"#, a()),
-        ("lone high, skipped", br#"{"model":"a","x":"\ud800"}"#, a()),
-        ("lone low, skipped", br#"{"model":"a","x":"\udc00"}"#, a()),
-        (
-            "reversed pair, skipped",
-            br#"{"model":"a","x":"\udc00\ud800"}"#,
-            a(),
-        ),
-        (
-            "valid pair, skipped",
-            br#"{"model":"a","x":"\ud83d\ude00"}"#,
-            a(),
-        ),
-        (
-            "nested in an array",
-            br#"{"model":"a","x":["\uXYZW",1]}"#,
-            a(),
-        ),
-        (
-            "a skipped object's key",
-            br#"{"model":"a","x":{"\ud800":"\uZZZZ"}}"#,
-            a(),
-        ),
-        (
-            "a skipped key before the model",
-            br#"{"x":"\uZZZZ","model":"a"}"#,
-            a(),
-        ),
-        ("root array element", br#"["\uZZZZ"]"#, Ok(None)),
-        ("quote swallowed", br#"{"model":"a","x":"\u12\"}"}"#, a()),
-        (
-            "quote swallowed, then more",
-            br#"{"model":"a","x":"\u"   "}"#,
-            a(),
-        ),
-        ("escaped quote", br#"{"model":"a","x":"q\"uote"}"#, a()),
-        (
-            "escaped backslash then quote",
-            br#"{"model":"a","x":"q\\"}"#,
-            a(),
-        ),
-        (
-            "every simple escape",
-            br#"{"model":"a","x":"\"\\\/\b\f\n\r\t"}"#,
-            a(),
-        ),
-        (
-            "bad simple escape",
-            br#"{"model":"a","x":"\q"}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "bad escape x",
-            br#"{"model":"a","x":"\x41"}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "raw newline",
-            b"{\"model\":\"a\",\"x\":\"a\nb\"}",
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "raw tab",
-            b"{\"model\":\"a\",\"x\":\"a\tb\"}",
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "backslash at the end",
-            br#"{"model":"a","x":"\"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "u at the end",
-            br#"{"model":"a","x":"\u"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "u1234 at the end",
-            br#"["\u1234"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "five bytes from the u",
-            br#"["\u12"]"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "six bytes from the u, quote eaten",
-            br#"["\u123"]"#,
-            Err(Unrouted::Unparsable),
-        ),
-        ("valid, six bytes from the u", br#"["\u1234"]"#, Ok(None)),
-        (
-            "invalid hex in a key",
-            br#"{"\uZZZZ":1}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "lone surrogate in a key",
-            br#"{"model":"a","\ud800":1}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "invalid hex in the model",
-            br#"{"model":"\uZZZZ"}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "lone surrogate in the model",
-            br#"{"model":"a\ud800"}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "invalid hex in system",
-            br#"{"model":"a","system":"\uZZZZ"}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "lone surrogate in system",
-            br#"{"model":"a","system":"\ud800"}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "lone surrogate in stream",
-            br#"{"model":"a","stream":"\ud800"}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "in stream_options",
-            br#"{"model":"a","stream_options":{"k":"\uZZZZ"}}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "in the shim key",
-            br#"{"model":"a","__busbar_gemini_json_array":["\ud800"]}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "in a non-string model",
-            br#"{"model":{"\ud800":1}}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        ("root string", br#""\uZZZZ""#, Err(Unrouted::Unparsable)),
-        ("escaped key", br#"{"mod\u0065l":"a"}"#, a()),
-        (
-            "trailing bytes",
-            br#"{"model":"a"} x"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "trailing comma",
-            br#"{"model":"a","x":[1,]}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "leading zero",
-            br#"{"model":"a","x":01}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "bare minus",
-            br#"{"model":"a","x":-}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "fraction needs a digit",
-            br#"{"model":"a","x":1.}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "exponent needs a digit",
-            br#"{"model":"a","x":1e}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        ("numbers", br#"{"model":"a","x":[-0,1.5e+3,2E-2,0.0]}"#, a()),
-        (
-            "bad literal",
-            br#"{"model":"a","x":tru}"#,
-            Err(Unrouted::Unparsable),
-        ),
-        (
-            "truncated",
-            br#"{"model":"a","x":[1,2"#,
-            Err(Unrouted::Unparsable),
-        ),
-        ("empty", b"", Err(Unrouted::Unparsable)),
-    ];
-    for (name, body, want) in table {
-        assert_eq!(
-            &readable(body),
-            want,
-            "{name}: {}",
-            String::from_utf8_lossy(body)
-        );
-    }
-}
-
-/// THE 1.5.5 PARITY TABLE FOR A ROOT SCALAR'S RANGE AND A SKIPPED VALUE'S DEPTH (`readable`), each
-/// outcome what 1.5.5's head parse answered (v1.5.5 `lazy_body.rs`, `Head`, over sonic-rs 0.5.8).
-#[test]
-fn the_head_read_matches_1_5_5_on_root_numbers_and_unbounded_skips() {
-    type Read = Result<Option<serde_json::Value>, Unrouted>;
-    let a = || Ok(Some(serde_json::json!("a")));
-    let served = || Ok(None);
-    let refused = || Err(Unrouted::Unparsable);
-    let nested = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
-
-    let trick = r#"{"model":"a","x":"\uAAA\","#;
-    let one_then_zeros = |n: usize| format!("1{}", "0".repeat(n));
-    let table: Vec<(&str, String, Read)> = vec![
-        ("1e400", "1e400".into(), refused()),
-        ("-1e400", "-1e400".into(), refused()),
-        ("1e308", "1e308".into(), served()),
-        ("1e309", "1e309".into(), refused()),
-        ("-1e309", "-1e309".into(), refused()),
-        (
-            "the largest double",
-            "1.7976931348623157e308".into(),
-            served(),
-        ),
-        (
-            "rounds to the largest double",
-            "1.7976931348623158e308".into(),
-            served(),
-        ),
-        ("rounds past it", "1.7976931348623159e308".into(), refused()),
-        ("u64::MAX", "18446744073709551615".into(), served()),
-        ("past u64", "18446744073709551616".into(), served()),
-        ("i64::MIN", "-9223372036854775808".into(), served()),
-        ("past i64", "-9223372036854775809".into(), served()),
-        ("309 digits", one_then_zeros(308), served()),
-        ("310 digits", one_then_zeros(309), refused()),
-        ("401 digits", one_then_zeros(400), refused()),
-        (
-            "-401 digits",
-            format!("-{}", one_then_zeros(400)),
-            refused(),
-        ),
-        ("underflow", "1e-400".into(), served()),
-        ("zero, a large exponent", "0e99999".into(), served()),
-        (
-            "zero fraction, a large exponent",
-            "0.0e99999".into(),
-            served(),
-        ),
-        (
-            "exponent past i32",
-            "1e99999999999999999999".into(),
-            refused(),
-        ),
-        ("spaced", " 7 ".into(), served()),
-        ("literal", "true".into(), served()),
-        ("in a root array, skipped", "[1e400]".into(), served()),
-        (
-            "in a skipped member",
-            r#"{"model":"a","x":1e400}"#.into(),
-            a(),
-        ),
-        (
-            "401 digits in a skipped member",
-            format!(r#"{{"model":"a","x":[{}]}}"#, one_then_zeros(400)),
-            a(),
-        ),
-        (
-            "in stream, decoded",
-            r#"{"model":"a","stream":1e400}"#.into(),
-            refused(),
-        ),
-        (
-            "in stream_options, decoded",
-            r#"{"model":"a","stream_options":{"k":-1e400}}"#.into(),
-            refused(),
-        ),
-        // sonic-number 0.1.2's own reading (`parse_exponent` stops at 1000 and drops the rest of
-        // the exponent; 19 significant digits are kept): where it parts from the true value, 1.5.5's
-        // answer stands.
-        (
-            "a capped exponent on a long fraction, served",
-            format!("0.{}1e12300", "0".repeat(2000)),
-            served(),
-        ),
-        (
-            "the same, negative",
-            format!("-0.{}1e12300", "0".repeat(2000)),
-            served(),
-        ),
-        (
-            "a capped exponent on a long integer, refused",
-            format!("1{}e-14800", "0".repeat(15000)),
-            refused(),
-        ),
-        (
-            "the smallest capped case, 1e308, served",
-            format!("0.{}1e10000", "0".repeat(691)),
-            served(),
-        ),
-        (
-            "one zero fewer, 1e309, refused",
-            format!("0.{}1e10000", "0".repeat(690)),
-            refused(),
-        ),
-        (
-            "a capped exponent in stream, served",
-            format!(r#"{{"model":"a","stream":0.{}1e12300}}"#, "0".repeat(2000)),
-            a(),
-        ),
-        (
-            "a capped exponent in stream, refused",
-            format!(r#"{{"model":"a","stream":1{}e-14800}}"#, "0".repeat(15000)),
-            refused(),
-        ),
-        (
-            "a capped exponent in a skipped member, never read",
-            format!(r#"{{"model":"a","x":1{}e-14800}}"#, "0".repeat(15000)),
-            a(),
-        ),
-        // Depth: the scan's own edge, without the escape.
-        (
-            "127 under the root",
-            format!(r#"{{"model":"a","y":{}}}"#, nested(127)),
-            a(),
-        ),
-        (
-            "128 under the root",
-            format!(r#"{{"model":"a","y":{}}}"#, nested(128)),
-            refused(),
-        ),
-        // Behind the escape: a skipped value has no bound.
-        (
-            "200 behind the escape",
-            format!(r#"{trick}"y":{}}}"#, nested(200)),
-            a(),
-        ),
-        (
-            "1000 behind the escape",
-            format!(r#"{trick}"y":{}}}"#, nested(1000)),
-            a(),
-        ),
-        (
-            "1000 behind the escape, unclosed",
-            format!(r#"{trick}"y":{}}}"#, &nested(1000)[1..]),
-            refused(),
-        ),
-        (
-            "1000 in a root array",
-            format!(r#"["\uAAA\",{}]"#, nested(1000)),
-            served(),
-        ),
-        // A head value behind the escape: 253 levels, not 254.
-        (
-            "system, 253",
-            format!(r#"{trick}"system":{}}}"#, nested(253)),
-            a(),
-        ),
-        (
-            "system, 254",
-            format!(r#"{trick}"system":{}}}"#, nested(254)),
-            refused(),
-        ),
-        (
-            "system object, 253",
-            format!(r#"{trick}"system":{{"a":{}}}}}"#, nested(252)),
-            a(),
-        ),
-        (
-            "system object, 254",
-            format!(r#"{trick}"system":{{"a":{}}}}}"#, nested(253)),
-            refused(),
-        ),
-    ];
-    for (name, body, want) in &table {
-        assert_eq!(
-            &readable(body.as_bytes()),
-            want,
-            "{name}: {}",
-            body.get(..80).unwrap_or(body)
-        );
+fn opaque_numbers_are_valid_under_every_content_key() {
+    for number in [
+        "1e309",
+        "-1e400",
+        "18446744073709551617",
+        "27.0",
+        "-0",
+        "1e99999999999999999999",
+    ] {
+        assert_eq!(readable(number.as_bytes()), Ok(None));
+        for key in [
+            "x",
+            "system",
+            "stream",
+            "stream_options",
+            "__busbar_gemini_json_array",
+        ] {
+            let body = format!(r#"{{"model":"m","{key}":[{number}]}}"#);
+            assert_eq!(readable(body.as_bytes()), Ok(Some(serde_json::json!("m"))));
+            assert!(valid(body.as_bytes()));
+            assert!(spliceable_named(body.as_bytes(), Some("m"), "upstream"));
+            let expected = body.replacen(r#""model":"m""#, r#""model":"upstream""#, 1);
+            assert_eq!(
+                spliced(body.as_bytes(), "upstream"),
+                Some(expected.into_bytes())
+            );
+        }
     }
 }
 
 #[test]
-fn the_document_reads_a_number_as_1_5_5_read_it() {
-    let served = format!(r#"{{"model":"a","x":[0.{}1e12300]}}"#, "0".repeat(2000));
-    assert!(valid(served.as_bytes()));
-    let refused = format!(r#"{{"model":"a","x":[1{}e-14800]}}"#, "0".repeat(15000));
-    assert!(
-        readable(refused.as_bytes()).is_ok(),
-        "a skipped member is never read"
-    );
-    assert!(!valid(refused.as_bytes()));
-    assert!(parsed(refused.as_bytes()).is_err());
-    assert!(valid(
-        br#"{"model":"a","x":[1e308,-0,18446744073709551616]}"#
-    ));
-    assert!(!valid(br#"{"model":"a","x":[1e309]}"#));
+fn invalid_strings_are_refused_in_every_position() {
+    for value in [
+        r#""\uZZZZ""#,
+        r#""\u12G4""#,
+        r#""\ud800""#,
+        r#""\udc00""#,
+        r#""\udc00\ud800""#,
+        r#""\u"   ""#,
+    ] {
+        for body in [
+            value.to_string(),
+            format!("[{value}]"),
+            format!(r#"{{"model":"m","x":{value}}}"#),
+            format!(r#"{{"model":"m","system":{value}}}"#),
+            format!(r#"{{"model":"m","x":{{{value}:1}}}}"#),
+        ] {
+            assert_eq!(
+                readable(body.as_bytes()),
+                Err(Unrouted::Unparsable),
+                "{body}"
+            );
+            assert!(!valid(body.as_bytes()), "{body}");
+            assert!(parsed(body.as_bytes()).is_err(), "{body}");
+        }
+    }
+    for body in [
+        br#"{"model":"m","x":"\u00e9\ud83d\ude00"}"#.as_slice(),
+        br#"["\"\\\/\b\f\n\r\t"]"#,
+    ] {
+        assert!(readable(body).is_ok());
+        assert!(valid(body));
+    }
 }
 
-/// The document [`built`] makes where serde refuses one of 1.5.5's numbers is the document serde
-/// makes everywhere else: the same members, strings decoded, numbers read alike.
 #[test]
-fn the_built_document_is_serdes_where_both_read_it() {
-    let body = br#" {"model":"m","a":[1,-3,1.5,2e3,true,false,null,"x\u00e9\ud83d\ude00",{}],
-        "b":{"c":[[],{"d":"e"}],"c":7},"n":18446744073709551616,"s":"q\"uote"} "#;
-    let serde: serde_json::Value = serde_json::from_slice(body).expect("serde reads it");
-    assert_eq!(built(body), Some(serde));
+fn numeric_grammar_and_depth_still_bound_opaque_documents() {
+    for number in [
+        "01", "-01", "1.", "1e", "1e+", "+1", "NaN", "Infinity", "--1",
+    ] {
+        let body = format!(r#"{{"model":"m","x":{number}}}"#);
+        assert_eq!(readable(body.as_bytes()), Err(Unrouted::Unparsable));
+    }
+    for depth in [127, 128, 200, 1000] {
+        let body = format!(
+            r#"{{"model":"m","x":{}{}}}"#,
+            "[".repeat(depth),
+            "]".repeat(depth)
+        );
+        assert_eq!(readable(body.as_bytes()).is_ok(), depth < MAX_PARSE_DEPTH);
+    }
+    let hidden = format!(
+        r#"{{"model":"m","x":"\uAAA\","y":{}{}}}"#,
+        "[".repeat(200),
+        "]".repeat(200)
+    );
+    assert_eq!(readable(hidden.as_bytes()), Err(Unrouted::Unparsable));
 }
 
 #[test]
-fn a_rewrite_applies_over_a_number_only_1_5_5s_reader_takes() {
-    let body = format!(
-        r#"{{"model":"m","x":0.{}1e12300,"pii":"123-45-6789","state":{{}}}}"#,
-        "0".repeat(2000)
-    );
-    let document = parsed(body.as_bytes()).expect("1.5.5 built this document");
-    assert_eq!(
-        document["x"],
-        serde_json::json!(0.0),
-        "1e-771, as 1.5.5 read it"
-    );
-    let rewritten = rewritten(body.as_bytes(), &rewrite_of(r#"{"state":{}}"#), "m")
+fn rewrites_preserve_untouched_large_numbers_exactly() {
+    let number = format!("0.{}1e12300", "0".repeat(2000));
+    let body = format!(r#"{{"model":"m","x":{number},"pii":"secret","state":{{}}}}"#);
+    let document = parsed(body.as_bytes()).expect("valid exact document");
+    assert_eq!(document["x"].to_string(), number);
+    let replacement = format!(r#"{{"x":{number},"state":{{}}}}"#);
+    let actual = rewritten(body.as_bytes(), &rewrite_of(&replacement), "m")
         .expect("applied")
-        .expect("the request changes");
-    let rewritten: serde_json::Value = serde_json::from_slice(&rewritten).expect("JSON");
-    assert_eq!(rewritten, serde_json::json!({"model": "m", "state": {}}));
-}
-
-/// The skipped-escape cases 1.5.5 SERVED are the ones its DOM parse (a rewrite hook's pass) refused:
-#[test]
-fn a_body_the_head_read_accepts_may_not_parse_as_a_document() {
-    for body in [
-        &br#"{"model":"a","x":"\uZZZZ"}"#[..],
-        br#"{"model":"a","x":"\ud800"}"#,
-        br#"{"model":"a","x":"\u12\"}"}"#,
-        br#"["\uZZZZ"]"#,
-    ] {
-        assert!(readable(body).is_ok(), "{}", String::from_utf8_lossy(body));
-        assert!(parsed(body).is_err(), "{}", String::from_utf8_lossy(body));
-        assert!(!valid(body), "{}", String::from_utf8_lossy(body));
-    }
-    for body in [
-        &br#"{"model":"a","x":"\u00e9\ud83d\ude00"}"#[..],
-        br#"[1,{"a":null}]"#,
-    ] {
-        assert!(parsed(body).is_ok() && valid(body));
-    }
+        .expect("redacted");
+    let expected = format!(r#"{{"model":"m","x":{number},"state":{{}}}}"#);
+    assert_eq!(actual, expected.as_bytes());
 }
 
 #[test]
@@ -1374,7 +1019,7 @@ fn a_rewrite_over_a_body_that_does_not_parse_is_a_fault_before_the_rewrite_is_re
 #[test]
 fn spliceable_validates_without_a_second_head_read() {
     let bad = br#"{"model":"jev","x":"\uZZZZ"}"#;
-    assert!(readable(bad).is_ok());
+    assert!(readable(bad).is_err());
     assert!(!spliceable(bad, "jev-1"));
     assert!(
         spliceable_named(bad, Some("jev"), "jev"),
@@ -1621,34 +1266,6 @@ fn a_cut_after_a_repeated_count_cannot_bill_the_superseded_count() {
         billed(200, br#"{"usage":{"units":500,"units":2}}"#),
         Ok(vec![(DECISION, 2), (FEE, 1)])
     );
-}
-
-#[path = "../../tests/number_corpus/mod.rs"]
-mod number_corpus;
-
-/// The plane's own number reader ([`number`], the wrapper every decoded number goes through), not
-/// only the library under it, reproduces every frozen verdict of the port it replaced.
-#[test]
-fn the_planes_number_reader_reproduces_every_frozen_verdict() {
-    use number_corpus::{line, rows, Verdict};
-    let frozen: Vec<&str> = include_str!("../../tests/fixtures/number_verdicts.txt")
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect();
-    let rows = rows();
-    assert_eq!(frozen.len(), rows.len(), "one fixture line per corpus row");
-    for ((label, row), want) in rows.iter().zip(&frozen) {
-        let got: Vec<Verdict> = row
-            .iter()
-            .map(|n| match number(n.as_bytes()) {
-                Some(sonic_number::ParserNumber::Unsigned(n)) => Verdict::Unsigned(n),
-                Some(sonic_number::ParserNumber::Signed(n)) => Verdict::Signed(n),
-                Some(sonic_number::ParserNumber::Float(f)) => Verdict::Float(f.to_bits()),
-                None => Verdict::Refused,
-            })
-            .collect();
-        assert_eq!(line(label, &got), *want, "{label}");
-    }
 }
 
 #[test]
