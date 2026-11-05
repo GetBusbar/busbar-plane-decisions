@@ -1,6 +1,7 @@
 //! This plane's answers to the kernel plane driver, in this plane's own vocabulary.
 
 use busbar_contract::ids::{MeterClassId, OpClassId};
+use busbar_contract::Count;
 
 use crate::codec::{
     self, error_body, CONTENT_TYPE_JSON, FIELD_CONTENT_TYPE, PTR_EXECUTION_STATES,
@@ -1215,6 +1216,8 @@ pub enum Source {
     /// The far end's answer states it (`UNITS_REPORTED`); the request fee is reported so too, as
     /// the contract reports a fee unit incurred (0 or 1 on its class).
     Reported,
+    /// The far end reports a fractional count; `amount` carries exact micro-units.
+    ReportedMicros,
     /// The plane's own floor for a success whose answer states no count (`UNITS_FLOOR`): one
     /// decision.
     Floor,
@@ -1227,13 +1230,13 @@ pub struct Units {
     pub class: u32,
     /// Where the count comes from.
     pub source: Source,
-    /// The cumulative count.
+    /// The cumulative count: whole units except for [`Source::ReportedMicros`].
     pub amount: u64,
 }
 
-/// A usage member the far end's success answer carries but that is not a whole count (or a
-/// required count it does not carry): located, never dropped, never a silent 0. The
-/// door bills the plane's floor for it ([`FarEndReading::floored`]) and says so in one log line.
+/// A usage member the far end's success answer carries but that is not an exact representable
+/// count (or a required count it does not carry): located, never a silent 0.
+/// Present unreadable counts are refused; readable siblings still bill.
 /// Names the member's pointer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnreadableUsage(pub &'static str);
@@ -1248,9 +1251,9 @@ enum Member {
     /// The answer has no such member.
     #[default]
     Absent,
-    /// A whole count.
-    Whole(u64),
-    /// Present, and not a whole count.
+    /// An exact non-negative count within the declared store range.
+    Exact(Count),
+    /// Present, and not a representable count.
     Unreadable,
 }
 
@@ -1303,8 +1306,8 @@ const KEY_CAP: usize = 16;
 /// What a member name's escape that names no ASCII character decodes to in the name read: a byte
 /// no UTF-8 text holds, so no name compared matches it.
 const NOT_ASCII: u8 = 0xFF;
-/// The longest scalar a whole count is spelled in (`u64::MAX` is 20 digits), with room.
-const SCALAR_CAP: usize = 24;
+/// Bounded decimal spelling, including fractions and exponent notation.
+const SCALAR_CAP: usize = 32;
 
 /// The far end's answer, read as it is relayed.
 ///
@@ -1415,7 +1418,7 @@ impl FarEndReading {
                 self.members[i] = if self.scalar_len > SCALAR_CAP - 1 {
                     Member::Unreadable
                 } else {
-                    whole(raw).map_or(Member::Unreadable, Member::Whole)
+                    count(raw).map_or(Member::Unreadable, Member::Exact)
                 };
             }
             _ => {}
@@ -1580,6 +1583,15 @@ impl FarEndReading {
         status.is_some_and(|s| (200..300).contains(&s)) && self.settled().0 != Some(true)
     }
 
+    /// Whether a completed provider measurement was explicitly refused.
+    #[must_use]
+    pub fn refused_count(&self) -> bool {
+        self.settled()
+            .1
+            .iter()
+            .any(|member| matches!(member, Member::Unreadable))
+    }
+
     /// What the answer bills, read at the last piece: a non-success bills nothing; a success bills one `decision` (the plane's floor,
     /// [`Source::Floor`]), or the whole count its
     /// `/usage/units` reports (the hosted provider's count), its `/usage/input_tokens`
@@ -1599,17 +1611,16 @@ impl FarEndReading {
             whole[i] = match members[i] {
                 Member::Absent if i == 0 && usage.required => return Err(UnreadableUsage(pointer)),
                 Member::Absent => None,
-                Member::Whole(n) => Some(n),
+                Member::Exact(n) => Some(n),
                 Member::Unreadable => return Err(UnreadableUsage(pointer)),
             };
         }
         Ok(Self::billed(whole))
     }
 
-    /// What a success whose usage could not be read whole bills ([`Self::counts`] answered
-    /// [`UnreadableUsage`]; spend is always attributed, and a unit that succeeded is never
-    /// failed): the plane's floor for an unreadable decision count (one
-    /// decision, [`Source::Floor`]), every token count it does state whole, and the request fee.
+    /// Readable sibling counts after [`Self::counts`] reports [`UnreadableUsage`].
+    /// A present unreadable decision count is refused, never replaced by a floor.
+    /// Only an absent count retains the plane's one-decision floor.
     #[must_use]
     pub fn floored(&self, status: Option<u32>) -> Counts {
         if !self.success(status) {
@@ -1619,11 +1630,15 @@ impl FarEndReading {
         let mut whole = [None; 3];
         for (i, _) in self.usage().counted.iter().enumerate() {
             whole[i] = match members[i] {
-                Member::Whole(n) => Some(n),
+                Member::Exact(n) => Some(n),
                 Member::Absent | Member::Unreadable => None,
             };
         }
-        Self::billed(whole)
+        let mut billed = Self::billed(whole);
+        if matches!(members[0], Member::Unreadable) {
+            billed[0] = None;
+        }
+        billed
     }
 
     /// What an answer the far end did not finish bills (its last piece flagged `PIECE_CUT`: its
@@ -1637,11 +1652,7 @@ impl FarEndReading {
         }
 
         let reported = |class: u32, member: Member| match member {
-            Member::Whole(amount) => Some(Units {
-                class,
-                source: Source::Reported,
-                amount,
-            }),
+            Member::Exact(amount) => Some(reported(class, amount)),
             Member::Absent | Member::Unreadable => None,
         };
         [
@@ -1653,13 +1664,7 @@ impl FarEndReading {
     }
 
     /// The counts of a success whose whole counts are `whole` (decision, input and output tokens).
-    fn billed(whole: [Option<u64>; 3]) -> Counts {
-        let reported = |class: u32, amount: u64| Units {
-            class,
-            source: Source::Reported,
-            amount,
-        };
-
+    fn billed(whole: [Option<Count>; 3]) -> Counts {
         let decisions = whole[0].map_or(
             Units {
                 class: tail::CLASS_DECISION_INDEX,
@@ -1672,23 +1677,32 @@ impl FarEndReading {
             Some(decisions),
             whole[1].map(|n| reported(tail::CLASS_INPUT_TOKENS_INDEX, n)),
             whole[2].map(|n| reported(tail::CLASS_OUTPUT_TOKENS_INDEX, n)),
-            Some(reported(tail::CLASS_FEE_INDEX, 1)),
+            Some(reported(tail::CLASS_FEE_INDEX, Count::ONE)),
         ]
     }
 }
 
-/// A usage member's raw bytes read as a whole count a signed 64-bit count holds: ASCII digits
-/// alone, at most `i64::MAX`.
+/// Read a reported decimal exactly, refusing negative, inexact, or out-of-store-range counts.
 #[must_use]
-pub fn whole(raw: &[u8]) -> Option<u64> {
-    if raw.is_empty() || !raw.iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-    core::str::from_utf8(raw)
-        .ok()?
-        .parse::<u64>()
+pub fn count(raw: &[u8]) -> Option<Count> {
+    Count::parse_bytes(raw)
         .ok()
-        .filter(|n| i64::try_from(*n).is_ok())
+        .filter(|n| !n.is_negative() && n.fits_a_64_bit_column())
+}
+
+/// Preserve the whole-unit ABI for integral quantities; fractional ones declare micro-units.
+fn reported(class: u32, count: Count) -> Units {
+    let micros = u64::try_from(count.micros()).expect("validated non-negative store count");
+    let (source, amount) = if micros % 1_000_000 == 0 {
+        (Source::Reported, micros / 1_000_000)
+    } else {
+        (Source::ReportedMicros, micros)
+    };
+    Units {
+        class,
+        source,
+        amount,
+    }
 }
 
 /// THE CALLER FIELDS THE FAR END NEVER RECEIVES, besides the credential carriers: the ones the

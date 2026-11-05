@@ -189,10 +189,10 @@ fn a_success_bills_one_decision_or_the_count_it_reports() {
         Ok(vec![(DECISION, 3), (FEE, 1)]),
         "a null error is no error"
     );
-    let max = format!(r#"{{"usage":{{"units":{}}}}}"#, i64::MAX);
+    let max = format!(r#"{{"usage":{{"units":{}}}}}"#, i64::MAX / 1_000_000);
     assert_eq!(
         billed(200, max.as_bytes()),
-        Ok(vec![(DECISION, i64::MAX as u64), (FEE, 1)])
+        Ok(vec![(DECISION, (i64::MAX / 1_000_000) as u64), (FEE, 1)])
     );
     // A stated zero is a reported count: not the one-decision floor, and not nothing.
     assert_eq!(
@@ -220,12 +220,12 @@ fn a_non_success_bills_nothing() {
 }
 
 #[test]
-fn a_usage_member_that_is_not_a_whole_count_fails_loudly() {
+fn an_unrepresentable_usage_member_fails_loudly() {
     for units in [
         "-1".to_string(),
-        "1.5".to_string(),
-        "7.0".to_string(),
-        "1e3".to_string(),
+        "0.0000001".to_string(),
+        "9223372036854.775808".to_string(),
+        "9223372036855".to_string(),
         "\"7\"".to_string(),
         "null".to_string(),
         "{}".to_string(),
@@ -505,7 +505,9 @@ fn by_pointer(status: u32, body: &[u8]) -> Result<Vec<(u32, u64)>, UnreadableUsa
     }
     let count = |p: &'static str| match read_raw(body, p) {
         None => Ok(None),
-        Some(raw) => whole(raw).map(Some).ok_or(UnreadableUsage(p)),
+        Some(raw) => count(raw)
+            .map(|n| Some(reported(0, n).amount))
+            .ok_or(UnreadableUsage(p)),
     };
     let mut out = vec![(DECISION, count(crate::codec::PTR_USAGE_UNITS)?.unwrap_or(1))];
     if let Some(n) = count(crate::codec::PTR_USAGE_INPUT_TOKENS)? {
@@ -622,7 +624,7 @@ fn a_nanojev_answer_bills_its_execution_states() {
     }
     assert_eq!(
         nanojev_billed(200, br#"{"execution":{"states":2.5}}"#),
-        Err(UnreadableUsage(crate::codec::PTR_EXECUTION_STATES))
+        Ok(vec![(DECISION, 2_500_000), (FEE, 1)])
     );
     assert_eq!(
         nanojev_billed(500, br#"{"result":{}}"#),
@@ -1647,4 +1649,104 @@ fn the_planes_number_reader_reproduces_every_frozen_verdict() {
             .collect();
         assert_eq!(line(label, &got), *want, "{label}");
     }
+}
+
+#[test]
+fn exact_decimal_counts_survive_every_fragment_boundary() {
+    for (raw, amount, source) in [
+        ("27.5", 27_500_000, Source::ReportedMicros),
+        ("27.1", 27_100_000, Source::ReportedMicros),
+        ("27.0", 27, Source::Reported),
+        ("1e3", 1000, Source::Reported),
+        ("0.000001", 1, Source::ReportedMicros),
+        ("0.000000", 0, Source::Reported),
+        (
+            "9223372036854.775807",
+            i64::MAX as u64,
+            Source::ReportedMicros,
+        ),
+    ] {
+        for (dialect, parent, field) in [(0, "usage", "units"), (1, "execution", "states")] {
+            let body = format!(r#"{{"{parent}":{{"{field}":{raw}}}}}"#);
+            for at in 0..=body.len() {
+                let mut reading = FarEndReading::for_dialect(dialect);
+                reading.piece(&body.as_bytes()[..at]);
+                reading.piece(&body.as_bytes()[at..]);
+                assert_eq!(
+                    reading.counts(Some(200)).unwrap()[0],
+                    Some(Units {
+                        class: DECISION,
+                        source,
+                        amount,
+                    }),
+                    "{body} split at {at}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn refused_decision_counts_never_become_a_floor() {
+    for raw in [
+        "0.0000001",
+        "9223372036854.775808",
+        "9223372036855",
+        "-1",
+        "null",
+    ] {
+        let body =
+            format!(r#"{{"usage":{{"units":{raw},"input_tokens":27.1,"output_tokens":0}}}}"#);
+        let mut reading = FarEndReading::default();
+        reading.piece(body.as_bytes());
+        assert!(reading.counts(Some(200)).is_err(), "{raw}");
+        let kept = reading.floored(Some(200));
+        assert_eq!(kept[0], None, "{raw}");
+        assert_eq!(
+            kept[1],
+            Some(Units {
+                class: INPUT,
+                source: Source::ReportedMicros,
+                amount: 27_100_000
+            })
+        );
+        assert_eq!(
+            kept[2],
+            Some(Units {
+                class: OUTPUT,
+                source: Source::Reported,
+                amount: 0
+            })
+        );
+        assert_eq!(kept[3].map(|u| u.amount), Some(1));
+    }
+}
+
+#[test]
+fn a_cut_bills_only_completed_exact_decimal_counts() {
+    let mut reading = FarEndReading::default();
+    reading.piece(br#"{"usage":{"units":27.5,"input_tokens":27.1"#);
+    assert_eq!(
+        reading.cut(Some(200)),
+        [
+            Some(Units {
+                class: DECISION,
+                source: Source::ReportedMicros,
+                amount: 27_500_000,
+            }),
+            None,
+            None,
+            None
+        ]
+    );
+    reading.piece(br#", "output_tokens":0.0000001}}"#);
+    assert_eq!(
+        reading.cut(Some(200))[1],
+        Some(Units {
+            class: INPUT,
+            source: Source::ReportedMicros,
+            amount: 27_100_000,
+        })
+    );
+    assert_eq!(reading.cut(Some(200))[2], None);
 }

@@ -21,7 +21,7 @@ use busbar_contract::abi::plane::{
     ServeOut, UnitCount, ANSWER_LAYOUT, CLAIM_EXACT, EMIT_DONE, EMIT_TO_FAR_END, FROM_CALLER,
     FROM_FAR_END, FROM_KERNEL, INGRESS_REQUEST_RESPONSE, PIECE_CUT, PIECE_FIELDS, PIECE_HAS_STATUS,
     PIECE_LAST, PRINCIPAL_REQUIRED, ROUTE_DIRECT, SHAPE_WHOLE, SPAN_ABSENT, UNITS_ESTIMATED,
-    UNITS_FLOOR, UNITS_REPORTED,
+    UNITS_FLOOR, UNITS_REPORTED, UNITS_REPORTED_MICROS, VERDICT_COUNT_REFUSED,
 };
 use busbar_contract::abi::plane::{PlaneCancelIn, PlaneCancelOut};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
@@ -190,9 +190,13 @@ busbar_contract::statement_extensions!(
     )]
 );
 
+/// JSON Schema for the settings accepted by this plane's lifecycle readers.
+const SETTINGS_SCHEMA: &[u8] = include_bytes!("settings.schema.json");
+
 /// The Statement: the plane's key and version, its sections, its need, its tail and its
 /// extensions.
 pub const STATEMENT: Statement = Statement {
+    settings_schema: busbar_contract::abi::mechanism::call::Blob::json(SETTINGS_SCHEMA),
     extensions: EXTENSIONS,
     ..statement(PLANE_KEY, VERSION, MAX_INFLIGHT)
         .with_sections(SECTIONS)
@@ -767,12 +771,19 @@ fn far_end(
                 class: count.class,
                 source: match count.source {
                     Source::Reported => UNITS_REPORTED,
+                    Source::ReportedMicros => UNITS_REPORTED_MICROS,
                     Source::Floor => UNITS_FLOOR,
                 },
                 amount: count.amount,
             });
         }
     }
+    let refused = last
+        && input.flags() & PIECE_CUT == 0
+        && unit.reading.success(unit.status)
+        && unit.reading.refused_count();
+    let refusal_reason =
+        refused.then(|| arena.span(unreadable.unwrap_or("usage count refused").as_bytes()));
     if settle(out, &fields, &units, &arena) {
         unit.recall = true;
         return (Outcome::Failed, false);
@@ -783,20 +794,23 @@ fn far_end(
             busbar_contract::diag_warn!(
                 busbar_contract::diagnostic::USAGE_TAP_DECODE_FAILED,
                 member = pointer,
-                "the far end's answer has no whole count at `{pointer}`: usage is \
-                 unreadable; an unreadable decision count bills the plane's floor of \
-                 one, never 0, and an unreadable token count is not billed"
+                "the far end's answer has no representable count at `{pointer}`: usage is unreadable; a present \
+                 unreadable count is REFUSED, never replaced by a floor; the driver receives the refusal"
             );
         } else {
             busbar_contract::diag_debug!(
                 busbar_contract::diagnostic::USAGE_TAP_DECODE_FAILED,
                 member = pointer,
-                "the far end's answer again has no whole count at `{pointer}`; billed \
+                "the far end's answer again has no representable count at `{pointer}`; billed \
                  as before"
             );
         }
     }
     unit.recall = false;
+    if let Some(reason) = refusal_reason {
+        out.set(|o| &o.verdict, VERDICT_COUNT_REFUSED);
+        out.set(|o| &o.fault_reason, reason);
+    }
     if first {
         out.set(|o| &o.reply_status, input.status_code());
     }

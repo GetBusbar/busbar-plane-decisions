@@ -247,15 +247,19 @@ fn a_non_success_bills_nothing() {
 }
 
 #[test]
-fn a_success_with_an_unreadable_count_bills_the_floor_and_says_so() {
+fn a_success_with_an_unreadable_count_refuses_it_and_says_so() {
     let fee = class(busbar_contract::plane::PER_REQUEST);
     for answer in [
-        &br#"{"usage":{"units":7.5}}"#[..],
+        &br#"{"usage":{"units":0.0000001}}"#[..],
         br#"{"usage":{"units":"7"}}"#,
         br#"{"usage":{"units":-3}}"#,
     ] {
         let a = answered(200, answer);
         let shown = String::from_utf8_lossy(answer);
+        assert_eq!(
+            a.verdict,
+            busbar_contract::abi::plane::VERDICT_COUNT_REFUSED
+        );
         assert_eq!(
             (a.outcome, a.short),
             (Some(Outcome::Ready), false),
@@ -263,14 +267,7 @@ fn a_success_with_an_unreadable_count_bills_the_floor_and_says_so() {
         );
         assert_eq!(
             a.units,
-            vec![
-                (
-                    class("decision"),
-                    busbar_contract::abi::plane::UNITS_FLOOR,
-                    1
-                ),
-                (fee, busbar_contract::abi::plane::UNITS_REPORTED, 1),
-            ],
+            vec![(fee, busbar_contract::abi::plane::UNITS_REPORTED, 1),],
             "{shown}"
         );
         assert_eq!(a.bytes, answer, "relayed unchanged");
@@ -1324,10 +1321,7 @@ fn an_unreadable_usage_warns_once_per_instance_not_per_answer() {
         assert_eq!((a.outcome, a.done), (Some(Outcome::Ready), true), "{a:?}");
         assert_eq!(
             counts(&a),
-            vec![
-                (class("decision"), 1),
-                (class(busbar_contract::plane::PER_REQUEST), 1)
-            ],
+            vec![(class(busbar_contract::plane::PER_REQUEST), 1)],
             "unit {unit}"
         );
         warnings.push(
@@ -1381,4 +1375,41 @@ fn the_attempt_carries_content_type_then_the_callers_relayed_fields() {
     .map(|(n, v)| ((*n).to_string(), (*v).to_string()))
     .collect();
     assert_eq!(attempt.fields, expected);
+}
+
+#[test]
+fn exact_fractional_usage_reaches_the_live_unit_count_abi() {
+    use busbar_contract::abi::plane::{UNITS_REPORTED, UNITS_REPORTED_MICROS};
+    for (raw, source, amount) in [
+        ("27.5", UNITS_REPORTED_MICROS, 27_500_000),
+        ("27.1", UNITS_REPORTED_MICROS, 27_100_000),
+        ("27.0", UNITS_REPORTED, 27),
+        ("1e3", UNITS_REPORTED, 1000),
+        ("0", UNITS_REPORTED, 0),
+        (
+            "9223372036854.775807",
+            UNITS_REPORTED_MICROS,
+            i64::MAX as u64,
+        ),
+    ] {
+        let body = format!(
+            r#"{{"usage":{{"units":{raw},"input_tokens":27.1,"output_tokens":0.000001}}}}"#
+        );
+        let answer = answered(200, body.as_bytes());
+        assert_eq!(answer.bytes, body.as_bytes());
+        assert_eq!(
+            answer.units,
+            vec![
+                (class("decision"), source, amount),
+                (class("input_tokens"), UNITS_REPORTED_MICROS, 27_100_000),
+                (class("output_tokens"), UNITS_REPORTED_MICROS, 1),
+                (
+                    class(busbar_contract::plane::PER_REQUEST),
+                    UNITS_REPORTED,
+                    1
+                ),
+            ],
+            "{raw}"
+        );
+    }
 }

@@ -1,4 +1,8 @@
 use super::*;
+
+#[path = "../../../testing/settings/integer_token.rs"]
+mod settings_profile;
+
 use crate::ops;
 
 /// `section`'s routes, the host stating provider `typesafe`'s protocol `jev`.
@@ -236,4 +240,131 @@ fn an_unreadable_member_is_warned_of_once_per_dialect() {
     assert!(!door.first_unreadable(tail::DIALECT_JEV, units));
     assert!(door.first_unreadable(tail::DIALECT_NANOJEV, crate::codec::PTR_EXECUTION_STATES));
     assert!(door.first_unreadable(tail::DIALECT_JEV, crate::codec::PTR_USAGE_INPUT_TOKENS));
+}
+
+/// Published settings must match the lifecycle's own grammar, including nested refusals.
+#[test]
+fn settings_schema_matches_lifecycle_grammar() {
+    assert_eq!(STATEMENT.settings_schema.ptr, SETTINGS_SCHEMA.as_ptr());
+    assert_eq!(STATEMENT.settings_schema.len, SETTINGS_SCHEMA.len());
+    assert_eq!(
+        STATEMENT.settings_schema.fmt,
+        busbar_contract::abi::mechanism::call::BLOB_JSON
+    );
+    let schema: serde_json::Value = serde_json::from_slice(SETTINGS_SCHEMA).unwrap();
+    let validator = settings_profile::validator(&schema).unwrap();
+    for (source, accepted) in [
+        (r#"{}"#, true),
+        (r#"null"#, true),
+        (r#"{"decisions":null}"#, true),
+        (
+            r#"{"models":{"m":{"provider":"p","protocol":"nanojev"}},"hooks":["audit"],"upstream_credentials":"own"}"#,
+            true,
+        ),
+        (
+            r#"{"decisions":{"models":{"m":{"provider":"p"}}},"providers":{}}"#,
+            true,
+        ),
+        (r#"{"models":{"m":{}}}"#, false),
+        (
+            r#"{"models":{"m":{"provider":"p","protocol":"bogus"}}}"#,
+            false,
+        ),
+        (r#"{"models":{"m":{"provider":"p","typo":1}}}"#, false),
+        (r#"{"hooks":"audit"}"#, false),
+        (r#"{"upstream_credentials":"inherit"}"#, false),
+        (r#"{"typo":1}"#, false),
+    ] {
+        let value: serde_json::Value = serde_json::from_str(source).unwrap();
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert_eq!(
+            read_settings(&bytes)
+                .and_then(|s| spoken_overrides(&s))
+                .is_ok(),
+            accepted,
+            "lifecycle: {source}"
+        );
+        assert_eq!(validator.is_valid(&value), accepted, "schema: {source}");
+    }
+}
+
+#[test]
+fn settings_schema_integer_tokens_match_native_parser() {
+    let schema: serde_json::Value = serde_json::from_slice(SETTINGS_SCHEMA).unwrap();
+    let profile = settings_profile::validator(&schema).unwrap();
+    let standard = jsonschema::validator_for(&schema).unwrap();
+    assert_eq!(schema["x-busbar-settings-profile"], "integer-token-v1");
+    for (pointer, template, integer, kind) in [
+        (
+            r#"/$defs/model/properties/max_requests"#,
+            r#"{"models":{"m":{"provider":"p","max_requests":TOKEN}}}"#,
+            "-1",
+            "signed",
+        ),
+        (
+            r#"/$defs/model/properties/max_concurrent/anyOf/0"#,
+            r#"{"models":{"m":{"provider":"p","max_concurrent":TOKEN}}}"#,
+            "1",
+            "unsigned",
+        ),
+        (
+            r#"/$defs/model/properties/default_max_tokens/anyOf/0"#,
+            r#"{"models":{"m":{"provider":"p","default_max_tokens":TOKEN}}}"#,
+            "1",
+            "unsigned",
+        ),
+        (
+            r#"/$defs/model/properties/attempt_timeout_ms/anyOf/0"#,
+            r#"{"models":{"m":{"provider":"p","attempt_timeout_ms":TOKEN}}}"#,
+            "1",
+            "unsigned",
+        ),
+    ] {
+        assert_eq!(
+            schema.pointer(pointer).unwrap()["x-busbar-integer-token"],
+            kind
+        );
+        for (token, accepted) in [
+            (integer.to_string(), true),
+            (format!("{integer}.0"), false),
+            (format!("{integer}e0"), false),
+            (format!("{integer}E+0"), false),
+        ] {
+            let text = template.replace("TOKEN", &token);
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert!(
+                standard.is_valid(&value),
+                "standard mathematical integer: {text}"
+            );
+            assert_eq!(profile.is_valid(&value), accepted, "profile: {text}");
+            assert_eq!(
+                read_settings(text.as_bytes())
+                    .and_then(|s| spoken_overrides(&s))
+                    .is_ok(),
+                accepted,
+                "native: {text}"
+            );
+        }
+        // Do not infer signed negative-zero behavior from a regular expression:
+        // the profile must agree with the actual lifecycle parser.
+        for token in [
+            "null",
+            "0",
+            "-0",
+            "-0.0",
+            "0e0",
+            "-1",
+            "18446744073709551616",
+        ] {
+            let text = template.replace("TOKEN", token);
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(
+                profile.is_valid(&value),
+                read_settings(text.as_bytes())
+                    .and_then(|s| spoken_overrides(&s))
+                    .is_ok(),
+                "native sign/range: {text}"
+            );
+        }
+    }
 }

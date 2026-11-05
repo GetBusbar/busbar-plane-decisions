@@ -303,6 +303,8 @@ pub struct Projected {
 #[derive(Debug, Clone, Default)]
 pub struct Answered {
     pub outcome: Option<Outcome>,
+    /// The plane's explicit terminal verdict.
+    pub verdict: u32,
     /// The bytes emitted, over every re-call.
     pub bytes: Vec<u8>,
     /// The bytes were bound for the far end.
@@ -658,6 +660,9 @@ impl Door {
             };
             first = false;
             got.outcome = Some(ret.outcome());
+            if o.verdict != 0 {
+                got.verdict = o.verdict;
+            }
             let envelope = &o.head.envelope;
             if !envelope.diags.is_null() {
                 // SAFETY: the reply's envelope names `diags_len` entries the door's trampoline

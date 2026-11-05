@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "decisions plane lifecycle settings",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/section"
+    },
+    {
+      "type": "null"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "decisions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/section"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "providers": {
+          "description": "Consumed provider facts; the host validates provider configuration."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "decisions"
+      ]
+    }
+  ],
+  "$defs": {
+    "section": {
+      "type": "object",
+      "properties": {
+        "models": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/model"
+          },
+          "default": {}
+        },
+        "hooks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "upstream_credentials": {
+          "enum": [
+            "own",
+            "passthrough",
+            null
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "model": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "max_requests": {
+          "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807,
+          "default": -1,
+          "x-busbar-integer-token": "signed"
+        },
+        "max_concurrent": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615,
+              "x-busbar-integer-token": "unsigned"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "default_max_tokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295,
+              "x-busbar-integer-token": "unsigned"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "upstream_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attempt_timeout_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615,
+              "x-busbar-integer-token": "unsigned"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reasoning": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prompt_caching": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocol": {
+          "anyOf": [
+            {
+              "enum": [
+                "jev",
+                "nanojev"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "provider"
+      ]
+    }
+  },
+  "x-busbar-settings-profile": "integer-token-v1"
+}
