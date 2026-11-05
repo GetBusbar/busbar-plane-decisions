@@ -1289,11 +1289,13 @@ fn an_unreadable_usage_warns_once_after_a_short_answer_fits() {
     );
     assert_eq!(recalled.bytes, answer);
     assert_eq!(
+        recalled.verdict,
+        busbar_contract::abi::plane::VERDICT_COUNT_REFUSED,
+        "{recalled:?}"
+    );
+    assert_eq!(
         counts(&recalled),
-        vec![
-            (class("decision"), 1),
-            (class(busbar_contract::plane::PER_REQUEST), 1)
-        ]
+        vec![(class(busbar_contract::plane::PER_REQUEST), 1)]
     );
     assert_eq!(
         recalled
@@ -1307,7 +1309,8 @@ fn an_unreadable_usage_warns_once_after_a_short_answer_fits() {
 }
 
 /// 5029 is benign-recurring (warn-once, latched): the same unreadable member on a second answer of
-/// the same instance bills the same floor and says so at debug, not with a second warning.
+/// the same instance bills only the request fee, refuses the unreadable count, and logs at debug
+/// instead of issuing a second warning.
 #[test]
 fn an_unreadable_usage_warns_once_per_instance_not_per_answer() {
     let door = open(ONE);
