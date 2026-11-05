@@ -305,6 +305,8 @@ pub struct Answered {
     pub outcome: Option<Outcome>,
     /// The plane's explicit terminal verdict.
     pub verdict: u32,
+    /// Usage-reader fault reported only after output buffers settle.
+    pub tap_fault: u8,
     /// The bytes emitted, over every re-call.
     pub bytes: Vec<u8>,
     /// The bytes were bound for the far end.
@@ -662,6 +664,9 @@ impl Door {
             got.outcome = Some(ret.outcome());
             if o.verdict != 0 {
                 got.verdict = o.verdict;
+            }
+            if o.tap_fault != 0 {
+                got.tap_fault = o.tap_fault;
             }
             let envelope = &o.head.envelope;
             if !envelope.diags.is_null() {

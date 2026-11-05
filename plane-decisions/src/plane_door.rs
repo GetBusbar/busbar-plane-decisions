@@ -790,6 +790,10 @@ fn far_end(
     }
 
     if let Some(pointer) = unreadable {
+        out.set(
+            |o| &o.tap_fault,
+            busbar_contract::abi::plane::TAP_FAULT_DECODE,
+        );
         if plane.first_unreadable(input.dialect(), pointer) {
             busbar_contract::diag_warn!(
                 busbar_contract::diagnostic::USAGE_TAP_DECODE_FAILED,

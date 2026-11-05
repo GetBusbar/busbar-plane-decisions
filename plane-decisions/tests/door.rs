@@ -1276,6 +1276,7 @@ fn an_unreadable_usage_warns_once_after_a_short_answer_fits() {
     bufs.set_units_cap(0);
     let short = door.piece(1, Given::whole(200, answer), &mut bufs);
     assert_eq!(short.outcome, Some(Outcome::Failed), "{short:?}");
+    assert_eq!(short.tap_fault, 0, "{short:?}");
     assert!(
         short.short && short.bytes.is_empty() && short.logs.is_empty(),
         "{short:?}"
@@ -1288,6 +1289,11 @@ fn an_unreadable_usage_warns_once_after_a_short_answer_fits() {
         "{recalled:?}"
     );
     assert_eq!(recalled.bytes, answer);
+    assert_eq!(
+        recalled.tap_fault,
+        busbar_contract::abi::plane::TAP_FAULT_DECODE,
+        "{recalled:?}"
+    );
     assert_eq!(
         recalled.verdict,
         busbar_contract::abi::plane::VERDICT_COUNT_REFUSED,
