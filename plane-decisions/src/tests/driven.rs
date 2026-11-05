@@ -984,16 +984,29 @@ fn numeric_grammar_and_depth_still_bound_opaque_documents() {
 
 #[test]
 fn rewrites_preserve_untouched_large_numbers_exactly() {
-    let number = format!("0.{}1e12300", "0".repeat(2000));
-    let body = format!(r#"{{"model":"m","x":{number},"pii":"secret","state":{{}}}}"#);
-    let document = parsed(body.as_bytes()).expect("valid exact document");
-    assert_eq!(document["x"].to_string(), number);
-    let replacement = format!(r#"{{"x":{number},"state":{{}}}}"#);
-    let actual = rewritten(body.as_bytes(), &rewrite_of(&replacement), "m")
-        .expect("applied")
-        .expect("redacted");
-    let expected = format!(r#"{{"model":"m","x":{number},"state":{{}}}}"#);
-    assert_eq!(actual, expected.as_bytes());
+    let mantissa = format!("0.{}1", "0".repeat(2000));
+    for (exponent, stored_exponent) in [
+        ("e12300", "e+12300"),
+        ("E12300", "e+12300"),
+        ("e+12300", "e+12300"),
+        ("e-12300", "e-12300"),
+    ] {
+        let number = format!("{mantissa}{exponent}");
+        let body = format!(r#"{{"model":"m","x":{number},"pii":"secret","state":{{}}}}"#);
+        let document = parsed(body.as_bytes()).expect("valid exact document");
+        // The DOM preserves every digit but normalizes exponent syntax. The rewrite must
+        // preserve the caller's original bytes, including that syntax, for untouched values.
+        assert_eq!(
+            document["x"].to_string(),
+            format!("{mantissa}{stored_exponent}")
+        );
+        let replacement = format!(r#"{{"x":{number},"state":{{}}}}"#);
+        let actual = rewritten(body.as_bytes(), &rewrite_of(&replacement), "m")
+            .expect("applied")
+            .expect("redacted");
+        let expected = format!(r#"{{"model":"m","x":{number},"state":{{}}}}"#);
+        assert_eq!(actual, expected.as_bytes());
+    }
 }
 
 #[test]

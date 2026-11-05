@@ -185,8 +185,9 @@ pub const NO_MODEL: &str = "no decisions model is configured for this operation"
 /// built, as one that does not parse.
 pub const MAX_PARSE_DEPTH: usize = 128;
 
-/// Materialize a bounded, valid request for a hook rewrite. Numbers retain their exact JSON
-/// representation through serde's arbitrary-precision number storage.
+/// Materialize a bounded, valid request for a hook rewrite. Arbitrary-precision number storage
+/// preserves numeric precision; untouched values retain their original spelling when spliced
+/// from the caller's bytes by [`spliced_members`].
 pub fn parsed(body: &[u8]) -> Result<serde_json::Value, Unrouted> {
     if !valid(body) {
         return Err(Unrouted::Unparsable);
