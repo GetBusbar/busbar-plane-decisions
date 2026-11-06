@@ -3,10 +3,10 @@
 """THE jev REFERENCE RELAY: the control and the negative control of the jev conformance suite.
 
 A jev relay written from the decisions plane's rules alone (plane-decisions/src/driven.rs, the
-README's "jev" section), in the standard library and nothing of busbar's: what the jev suite's
-wire checks hold busbar to, a correct relay does. It is the control (`--break` absent: every wire
-check must pass against it) and, with one deliberate deviation at a time, the negative control
-(`--break <name>`: the wire check that deviation breaks must grade red).
+README's "What it is for" section), in the standard library and nothing of busbar's: what the jev
+suite's wire checks hold busbar to, a correct relay does. It is the control (config `break` empty:
+every wire check must pass against it) and, with one deliberate deviation at a time, the negative
+control (config `break` naming one of BREAKS: the wire check that deviation breaks must grade red).
 
 The rules it serves:
   * `POST /v1/systemone` speaks `jev`, `POST /api/evaluate` speaks `nanojev`; any other path is the
@@ -54,7 +54,8 @@ BREAKS = {
 
 DIALECT_OF_PATH = {"/v1/systemone": "jev", "/api/evaluate": "nanojev"}
 # The contract's governed credential carriers (NEVER_KEPT) and the fields the plane writes itself.
-NEVER_KEPT = {"authorization", "proxy-authorization", "cookie", "x-api-key", "api-key",
+NEVER_KEPT = {"authorization", "proxy-authorization", "proxy-authenticate", "cookie", "set-cookie",
+              "x-api-key", "api-key",
               "x-goog-api-key", "x-amz-security-token"}
 NOT_RELAYED = {"content-type", "host"}
 HOP_BY_HOP = {"connection", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade",

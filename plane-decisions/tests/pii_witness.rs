@@ -49,7 +49,13 @@ fn the_door_states_nothing_of_the_decision_content() {
     );
     let mut said: Vec<String> = Vec::new();
     let mut logged = 0;
-    let fixtures = [(200, &success), (422, &echoed), (200, &unreadable)];
+    // The unreadable answer twice: the first raises the warn-once line, the second the latched one.
+    let fixtures = [
+        (200, &success),
+        (422, &echoed),
+        (200, &unreadable),
+        (200, &unreadable),
+    ];
     for (unit, (status, answer)) in fixtures.into_iter().enumerate() {
         let unit = unit as u64 + 1;
         let arrived = door.arrive_on(
@@ -62,6 +68,7 @@ fn the_door_states_nothing_of_the_decision_content() {
         assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
         said.push(arrived.entry.clone());
         said.push(arrived.text.clone());
+        said.extend(arrived.stated.iter().cloned());
         let mut bufs = Bufs::new(1 << 16);
         let attempt = door.piece(unit, Given::attempt(1), &mut bufs);
         said.extend(stated(&attempt));
@@ -78,9 +85,21 @@ fn the_door_states_nothing_of_the_decision_content() {
         said.extend(stated(&answered));
     }
     assert!(logged > 0, "no fixture drove the door's log line");
+    assert!(
+        said.iter()
+            .any(|s| s.contains("again has no representable count")),
+        "no fixture drove the door's latched (repeat) unreadable-usage line"
+    );
+
+    // A refused arrival (a body that is no JSON document) states nothing of it either.
+    let malformed = format!(r#"{{"model":"jev","state":{{"session":"{STATE_MARKER}"}}"#);
+    let refused = door.arrive_on(6, "POST", "/v1/systemone", malformed.as_bytes(), &[]);
+    assert_ne!(refused.outcome, Outcome::Ready, "{refused:?}");
+    said.push(refused.text.clone());
+    said.extend(refused.stated.iter().cloned());
 
     let arrived = door.arrive_on(
-        4,
+        5,
         "POST",
         "/v1/systemone",
         request.as_bytes(),
@@ -89,7 +108,8 @@ fn the_door_states_nothing_of_the_decision_content() {
     assert_eq!(arrived.outcome, Outcome::Ready, "{arrived:?}");
     said.push(arrived.entry.clone());
     said.push(arrived.text.clone());
-    let (outcome, rendered, stated_by_refusal) = door.refusal_stated(4, 403, "denied", true);
+    said.extend(arrived.stated.iter().cloned());
+    let (outcome, rendered, stated_by_refusal) = door.refusal_stated(5, 403, "denied", true);
     assert_eq!(outcome, Outcome::Ready);
     said.push(String::from_utf8_lossy(&rendered).into_owned());
     said.extend(stated_by_refusal);

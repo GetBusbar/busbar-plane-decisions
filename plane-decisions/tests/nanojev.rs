@@ -113,6 +113,14 @@ fn a_nanojev_unit_is_sent_to_evaluate_and_bills_its_states() {
         "{:?}",
         none.logs
     );
+    // The line states what happened to this answer: billed at the floor, not refused.
+    assert!(
+        none.logs.iter().any(|l| l.contains("usage is unreadable")
+            && l.contains("floor of one decision")
+            && !l.contains("REFUSED")),
+        "{:?}",
+        none.logs
+    );
 }
 
 #[test]
@@ -148,7 +156,8 @@ fn a_reload_of_an_unstated_provider_is_refused_by_name() {
     );
 }
 
-/// A model's own `protocol` that names no dialect the plane speaks is refused at validate (#51:
+/// A model's own `protocol` that names no dialect the plane speaks is refused at validate, naming
+/// the dialects it does speak.
 #[test]
 fn an_unspoken_protocol_is_refused_at_validate() {
     let (outcome, words) = validate(r#"{"models":{"m":{"provider":"p","protocol":"bogus"}}}"#);

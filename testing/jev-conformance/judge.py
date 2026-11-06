@@ -64,7 +64,7 @@ NANOJEV_REQUEST = b'{ "input" : {"case":"conformance"} }'
 NANOJEV_SUCCESS = b'{"result":{"decision":"approve"}, "execution" : {"states":3}}'
 NANOJEV_NO_COUNT = b'{"result":{"decision":"approve"}}'
 REPORTED_UNITS = 42
-# The plane's floor for a success that states no decision count (driven.rs UNITS_FLOOR): one.
+# The plane's floor for a success that states no decision count (driven.rs `Source::Floor`): one.
 FLOOR_UNITS = 1
 AUDIT_OP_CLASS = "systemone"
 ONE_REQUEST_GROUP = "jev-conformance-one-request"
@@ -92,6 +92,8 @@ def check(ok, finding):
 # What a check that could not read its target raises, beside a Red: a dropped or reset connection,
 # a timeout, a malformed answer, a body of an unexpected shape. Graded red per check, never a crash.
 UNREAD = (OSError, ValueError, AttributeError, TypeError, KeyError, http.client.HTTPException)
+# How run_checks words a check that could not read its target (not a judged finding).
+UNREAD_FINDING = "the check could not read the target"
 
 
 def run_checks(pairs):
@@ -105,7 +107,7 @@ def run_checks(pairs):
         except Red as e:
             out.append((name, str(e)))
         except UNREAD as e:
-            out.append((name, f"the check could not read the target: {type(e).__name__}: {e}"))
+            out.append((name, f"{UNREAD_FINDING}: {type(e).__name__}: {e}"))
     return out
 
 
@@ -323,7 +325,7 @@ def judge_audit_window(rng, want):
 
 
 def wire_one(t):
-    """The one-model boot's wire checks, as (name, Ok|finding) pairs."""
+    """The one-model boot's wire checks, as (name, None | finding) pairs."""
     checks = []
 
     def run(name, fn):
@@ -833,6 +835,8 @@ def main(argv):
                 missed.append(f"{brk}: the check {target_check} never ran")
             elif got[target_check] is None:
                 missed.append(f"{brk}: {target_check} passed on a relay broken for it")
+            elif got[target_check].startswith(UNREAD_FINDING):
+                missed.append(f"{brk}: {target_check} never judged the break ({got[target_check][:120]})")
             else:
                 print(f"  ok  {brk}: {target_check} is red ({got[target_check][:120]})")
         for m in missed:

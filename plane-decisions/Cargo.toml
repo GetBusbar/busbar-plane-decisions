@@ -31,16 +31,14 @@ path = "src/lib.rs"
 # `UpstreamCreds` (the reserved `upstream_credentials` value) at `busbar_contract::config::UpstreamCreds`.
 busbar-contract = { workspace = true }
 # The object notation the jev dialect speaks. Byte-identity passthrough of the body is the norm;
-# this crate parses ONLY the handful of declared pointers (never `state`/`answers`) to build facts.
-# Syntax/depth are checked before materializing a hook rewrite. Keep opaque numbers exact;
+# this crate reads ONLY the handful of declared pointers (never `state`/`answers`) to build facts.
+# Only a hook rewrite materializes the document, after its syntax and depth are checked. Keep opaque numbers exact;
 # routing and model-only splicing never convert numeric content.
 serde_json = { workspace = true, features = ["unbounded_depth", "arbitrary_precision"] }
 serde = { workspace = true }
-# The one log line an unreadable usage raises (`busbar_contract::diag_warn!`): the door's call
-# capture carries it to the plugin's host log, compiled in or dropped in.
+# The plane's log lines (the unreadable-usage 5029 diagnostic and the refused hook rewrite): the
+# door's call capture carries them to the plugin's host log, compiled in or dropped in.
 tracing = { workspace = true }
 
 [dev-dependencies]
-# Historical port corpus only; this reader is not part of decisions runtime semantics.
-sonic-number = { workspace = true }
 jsonschema = { workspace = true }

@@ -16,7 +16,8 @@
 //! `jev` here is the busbar-facing model name a caller targets; `provider` names a `providers:`
 //! entry (the transport-agnostic connection — base_url, error_map, credential ref); `upstream_model`
 //! replaces the caller's top-level `model` value when the caller names one; omitted, the caller's
-//! value is sent as written, and a request naming no model passes unchanged.
+//! value is sent as written. A request naming no model routes to the dialect's one model and passes
+//! unchanged; with several models of its dialect configured it is refused (`400`).
 //!
 //! ## Reserved sibling keys
 //!
@@ -39,8 +40,8 @@ use busbar_contract::config::{ModelCfg, UpstreamCreds};
 #[serde(deny_unknown_fields)]
 pub struct DecisionsSection {
     /// The busbar-facing model names this deployment exposes on the decisions plane, each bound to a
-    /// provider connection. REQUIRED-shaped in practice (an empty map means no `jev:` target is
-    /// reachable, which is a valid but inert configuration rather than a refusal).
+    /// provider connection. May be absent or empty: a valid but inert configuration that serves no
+    /// route, rather than a refusal.
     #[serde(default)]
     pub models: BTreeMap<String, ModelCfg>,
     /// The reserved hook-name list every section carries: the section-level attach. Each entry
@@ -65,7 +66,8 @@ pub struct DecisionsSection {
 /// provider's.
 pub const PROTOCOL: &str = "jev";
 
-/// The second wire dialect, `nanojev`, whose request spine differs from `jev`'s; `/api/evaluate`
+/// The second wire dialect, `nanojev`, whose request spine differs from `jev`'s; its decision call
+/// is `POST /api/evaluate`.
 pub const PROTOCOL_NANOJEV: &str = "nanojev";
 
 /// Every dialect this plane speaks, in its dialect-index order.

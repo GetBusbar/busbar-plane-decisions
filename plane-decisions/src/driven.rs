@@ -21,6 +21,7 @@ pub mod tail {
     pub const SECTIONS_CONSUMED: &[&str] = &["providers"];
 
     /// The dialects this plane speaks, in index order: `jev` ([`DIALECT_JEV`]) and `nanojev`
+    /// ([`DIALECT_NANOJEV`]).
     pub const DIALECTS: &[&str] = config::PROTOCOLS;
 
     /// The index of `jev` in [`DIALECTS`].
@@ -53,8 +54,8 @@ pub mod tail {
     /// The record resource kind a registration is audited under: the scope kind.
     pub const AUDIT_KIND: &str = SCOPE_KINDS[0];
 
-    /// The op classes this plane serves, in index order: each dialect's decision call (see the
-    /// module doc).
+    /// The op classes this plane serves, in index order: each dialect's decision call (see
+    /// [`crate::ops`]).
     pub const OP_CLASSES: &[OpClassId] = &[ops::OP_SYSTEMONE, ops::OP_EVALUATE];
 
     /// The billable classes, in index order, each with its family: the decision count, the fee
@@ -111,6 +112,7 @@ pub mod tail {
 }
 
 /// The claims a generation's snapshot publishes, given the dialect of each model it configures:
+/// only the routes of a dialect some model uses.
 #[must_use]
 pub fn served_claims(dialects: &[u32]) -> Vec<(&'static str, &'static str, u32)> {
     tail::CLAIMS
@@ -134,7 +136,8 @@ pub fn dialect_of(protocol: &str) -> Option<u32> {
 pub enum Unrouted {
     /// The request names no model and the generation configures several of its dialect.
     Unnamed,
-    /// The generation configures no model of the request's dialect: naming one cannot route it.
+    /// The request names no model and the generation configures none of its dialect (a named one
+    /// it does not configure is [`Unrouted::Unknown`]).
     NoModel,
     /// The request's `model` is not a string.
     NotAName,
@@ -412,9 +415,8 @@ impl<'b> Skip<'b> {
 
     /// One value validated without
     /// recursion: the containers still open are kept innermost last (`true` an object).
-    fn skip_one(&mut self) -> Result<usize, ()> {
+    fn skip_one(&mut self) -> Result<(), ()> {
         let mut open: Vec<bool> = Vec::new();
-        let mut deepest = 0;
         loop {
             match self.next_non_space().ok_or(())? {
                 first @ (b'-' | b'0'..=b'9') => self.skip_number_token(first)?,
@@ -422,20 +424,16 @@ impl<'b> Skip<'b> {
                 b't' => self.skip_literal(b"rue")?,
                 b'f' => self.skip_literal(b"alse")?,
                 b'n' => self.skip_literal(b"ull")?,
-                b'{' => {
-                    deepest = deepest.max(open.len() + 1);
-                    match self.next_non_space() {
-                        Some(b'}') => {}
-                        Some(b'"') => {
-                            open.push(true);
-                            self.skip_key()?;
-                            continue;
-                        }
-                        _ => return Err(()),
+                b'{' => match self.next_non_space() {
+                    Some(b'}') => {}
+                    Some(b'"') => {
+                        open.push(true);
+                        self.skip_key()?;
+                        continue;
                     }
-                }
+                    _ => return Err(()),
+                },
                 b'[' => {
-                    deepest = deepest.max(open.len() + 1);
                     self.eat_spaces();
                     match self.peek().ok_or(())? {
                         b']' => self.at += 1,
@@ -450,7 +448,7 @@ impl<'b> Skip<'b> {
 
             loop {
                 let Some(&object) = open.last() else {
-                    return Ok(deepest);
+                    return Ok(());
                 };
                 match (self.next_non_space(), object) {
                     (Some(b','), false) => break,
@@ -697,7 +695,8 @@ fn string_decodes(span: &[u8]) -> bool {
     <Valid as serde::Deserialize>::deserialize(&mut de).is_ok() && de.end().is_ok()
 }
 
-/// [`string_decodes`]'s visit: the value read, nothing kept.
+/// [`string_decodes`]'s visit: the one string read, nothing kept. Any other value is refused
+/// (only a string span is ever handed to it).
 struct Valid;
 
 impl<'de> serde::Deserialize<'de> for Valid {
@@ -712,42 +711,10 @@ impl<'de> serde::de::Visitor<'de> for ValidVisitor {
     type Value = Valid;
 
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("a JSON document")
-    }
-
-    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Valid, E> {
-        Ok(Valid)
-    }
-
-    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Valid, E> {
-        Ok(Valid)
-    }
-
-    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Valid, E> {
-        Ok(Valid)
-    }
-
-    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Valid, E> {
-        Ok(Valid)
+        f.write_str("a JSON string")
     }
 
     fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Valid, E> {
-        Ok(Valid)
-    }
-
-    fn visit_unit<E: serde::de::Error>(self) -> Result<Valid, E> {
-        Ok(Valid)
-    }
-
-    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Valid, A::Error> {
-        while seq.next_element::<Valid>()?.is_some() {}
-        Ok(Valid)
-    }
-
-    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Valid, A::Error> {
-        while map.next_key::<Valid>()?.is_some() {
-            map.next_value::<Valid>()?;
-        }
         Ok(Valid)
     }
 }
@@ -901,9 +868,14 @@ pub fn rewritten_read(
         let same = named.as_str() == Some(routed) || caller_model.as_ref() == Some(&named);
         if !same {
             return Err(NotApplied::Model(ModelRewritten {
-                named: named
-                    .as_str()
-                    .map_or_else(|| named.to_string(), str::to_string),
+                // A `model` that is no string is named by its kind only: the refusal is logged,
+                // and the value may carry decision content.
+                named: match &named {
+                    serde_json::Value::String(name) => name.clone(),
+                    serde_json::Value::Object(_) => "<an object>".to_string(),
+                    serde_json::Value::Array(_) => "<an array>".to_string(),
+                    other => other.to_string(),
+                },
             }));
         }
     }
@@ -913,15 +885,70 @@ pub fn rewritten_read(
 
     let unchanged = current.len() == document.len() + usize::from(current.contains_key(MODEL))
         && document.iter().all(|(k, v)| current.get(k) == Some(v));
-    // The caller's own bytes go on only where no root member name repeats: `current` is the last
-    // value of each name, so an earlier duplicate it never saw would otherwise reach the far end.
-    if unchanged
-        && busbar_contract::spans::members(body, 0)
-            .is_some_and(|r| r.members.len() == current.len())
-    {
+    // The caller's own bytes go on only where no member name repeats, at any depth: `current` is
+    // the last value of each name, so an earlier duplicate it never saw would otherwise reach the
+    // far end.
+    if unchanged && unique_names(body) {
         return Ok(Some(body.to_vec()));
     }
     Ok(Some(replaced(body, &current, &document)))
+}
+
+/// Whether no object in the JSON value `bytes` repeats a member name (compared decoded, so an
+/// escaped spelling is the same name). Unreadable bytes count as repeating.
+fn unique_names(bytes: &[u8]) -> bool {
+    use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
+    use std::collections::BTreeSet;
+
+    struct Unique;
+    impl<'de> DeserializeSeed<'de> for Unique {
+        type Value = ();
+        fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+            d.deserialize_any(self)
+        }
+    }
+    impl<'de> Visitor<'de> for Unique {
+        type Value = ();
+        fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str("a JSON value")
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_str<E>(self, _: &str) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_unit<E>(self) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+            while seq.next_element_seed(Unique)?.is_some() {}
+            Ok(())
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            let mut seen = BTreeSet::new();
+            while let Some(name) = map.next_key::<String>()? {
+                if !seen.insert(name) {
+                    return Err(serde::de::Error::custom("a member name repeats"));
+                }
+                map.next_value_seed(Unique)?;
+            }
+            Ok(())
+        }
+    }
+    let mut de = serde_json::Deserializer::from_slice(bytes);
+    // Only ever called on a body `parsed` accepted, whose depth is already bounded.
+    de.disable_recursion_limit();
+    Unique.deserialize(&mut de).and_then(|()| de.end()).is_ok()
 }
 
 /// [`rewritten_read`]'s request: the caller's members `document` keeps (the `model` always), in the
@@ -954,8 +981,11 @@ fn spliced_members(
     let mut kept: Vec<(usize, Vec<u8>)> = Vec::with_capacity(current.len());
     for (key, value) in current {
         let span = span_of(key)?;
-        let bytes = if key == MODEL || document.get(key) == Some(value) {
-            body.get(span.start..span.end)?.to_vec()
+        let own = body.get(span.start..span.end)?;
+        // The caller's bytes for an unchanged value only where no name inside it repeats (the
+        // hook read the last of each); otherwise the value as the hook saw it.
+        let bytes = if key == MODEL || (document.get(key) == Some(value) && unique_names(own)) {
+            own.to_vec()
         } else if let Some(wanted) = document.get(key) {
             wanted.to_string().into_bytes()
         } else {
@@ -1004,9 +1034,7 @@ fn member_bytes(key: &str, value: &[u8]) -> Vec<u8> {
 /// A claimed request, classified.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Arrived {
-    /// The operation, by name.
-    pub op: OpClassId,
-    /// Its index in [`tail::OP_CLASSES`].
+    /// Its operation's index in [`tail::OP_CLASSES`].
     pub op_class: u32,
     /// Its index in [`tail::DIALECTS`].
     pub dialect: u32,
@@ -1024,7 +1052,6 @@ pub fn arrive(verb: &str, target: &str) -> Option<Arrived> {
         .find(|(v, t, _)| *t == target && v.eq_ignore_ascii_case(verb))?
         .2;
     Some(Arrived {
-        op: row.op,
         op_class: u32::try_from(op_class).ok()?,
         dialect,
     })
@@ -1035,7 +1062,7 @@ pub fn arrive(verb: &str, target: &str) -> Option<Arrived> {
 pub enum CallerAnswer {
     /// Nothing to emit. The kernel keeps the body and re-pushes it on every attempt.
     Keep,
-    /// The body ended empty: a `systemone` request carries the caller's state, so there is nothing
+    /// The body ended empty: a decision request carries the caller's state, so there is nothing
     /// to forward. The kernel refuses the unit.
     Empty,
 }
@@ -1126,7 +1153,8 @@ enum Member {
     Unreadable,
 }
 
-/// What a member of the answer is to the reading: `/error`, `/usage`, one of the three usage
+/// What a member of the answer is to the reading: `/error`, the dialect's usage parent (`/usage`
+/// for `jev`, `/execution` for `nanojev`), one of the three usage
 /// counts (by its index in its dialect's [`Usage::counted`]), or none of them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Slot {
@@ -1175,7 +1203,8 @@ const KEY_CAP: usize = 16;
 /// What a member name's escape that names no ASCII character decodes to in the name read: a byte
 /// no UTF-8 text holds, so no name compared matches it.
 const NOT_ASCII: u8 = 0xFF;
-/// Bounded decimal spelling, including fractions and exponent notation.
+/// Bounded decimal spelling, including fractions and exponent notation: a count spelled in fewer
+/// bytes is read; one that fills the buffer (32 bytes or more, kept truncated) is unreadable.
 const SCALAR_CAP: usize = 32;
 
 /// The far end's answer, read as it is relayed.
@@ -1237,12 +1266,11 @@ impl FarEndReading {
         USAGE.get(self.dialect as usize).unwrap_or(&USAGE[0])
     }
 
-    /// Take one far-end piece and return the bytes to relay to the caller: the piece itself.
-    pub fn piece<'p>(&mut self, bytes: &'p [u8]) -> &'p [u8] {
+    /// Read one far-end piece (relayed to the caller as it is, by the door).
+    pub fn piece(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.byte(b);
         }
-        bytes
     }
 
     /// The member at the current depth a value starting now belongs to.

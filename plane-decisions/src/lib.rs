@@ -18,6 +18,5 @@ pub use plane_door::door;
 /// The crate's tests that reach past [`door`]: in-crate because the crate's only public item is the
 /// door.
 #[cfg(test)]
-mod tests {
-    mod durable_strings;
-}
+#[path = "tests/durable_strings.rs"]
+mod durable_strings;

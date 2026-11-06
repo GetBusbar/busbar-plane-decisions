@@ -274,6 +274,8 @@ pub struct Arrived {
     pub principal_need: u32,
     /// The dialect the arrival answered (`ArriveOut.dialect`).
     pub dialect: u32,
+    /// Every diagnostic and log line the reply's envelope carried, as text.
+    pub stated: Vec<String>,
 }
 
 /// What one `project` answered.
@@ -510,7 +512,17 @@ impl Door {
                 std::ptr::from_mut(&mut o).cast(),
             )
         };
+        let envelope = &o.head.envelope;
+        let stated = if envelope.diags.is_null() {
+            Vec::new()
+        } else {
+            // SAFETY: the reply's envelope names `diags_len` entries the door's trampoline sealed,
+            // live until the next call on this thread.
+            let diags = unsafe { std::slice::from_raw_parts(envelope.diags, envelope.diags_len) };
+            diags.iter().map(|d| read(d.text)).collect()
+        };
         Arrived {
+            stated,
             outcome: ret.outcome(),
             refusal: o.refusal,
             status: o.refusal_status,
@@ -836,6 +848,18 @@ impl Door {
         text: &str,
         arrived: bool,
     ) -> (Outcome, Vec<u8>, Vec<String>) {
+        self.refusal_waiting(unit, status, text, arrived, 0)
+    }
+
+    /// [`Door::refusal_stated`] with the kernel's wait (`retry_after_s`) handed beside the refusal.
+    pub fn refusal_waiting(
+        &self,
+        unit: u64,
+        status: u32,
+        text: &str,
+        arrived: bool,
+        retry_after_s: u32,
+    ) -> (Outcome, Vec<u8>, Vec<String>) {
         let (mut reply, mut arena) = (vec![0_u8; 4096], vec![0_u8; 1024]);
         let mut fields = [z::<OutField>(); 4];
         let mut i: RefusalIn = z();
@@ -848,6 +872,7 @@ impl Door {
         i.status = status;
         i.text = str_of(text.as_bytes());
         i.unit = unit;
+        i.retry_after_s = retry_after_s;
         (i.reply_buf, i.reply_cap) = (reply.as_mut_ptr(), reply.len());
         (i.fields_buf, i.fields_cap) = (fields.as_mut_ptr(), fields.len());
         (i.arena_buf, i.arena_cap) = (arena.as_mut_ptr(), arena.len());

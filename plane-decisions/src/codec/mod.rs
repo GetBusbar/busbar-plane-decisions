@@ -32,8 +32,8 @@ pub(crate) const CONTENT_TYPE_JSON: &[u8] = b"application/json";
 pub(crate) fn error_body(code: &str, message: &str) -> Vec<u8> {
     format!(
         "{{\"error\":{{\"code\":{},\"message\":{}}}}}",
-        serde_json::to_string(code).unwrap_or_else(|_| "\"internal\"".to_string()),
-        serde_json::to_string(message).unwrap_or_else(|_| "\"error\"".to_string()),
+        serde_json::Value::from(code),
+        serde_json::Value::from(message),
     )
     .into_bytes()
 }

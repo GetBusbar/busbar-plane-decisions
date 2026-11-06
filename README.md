@@ -14,16 +14,18 @@ First-party signed kind:plane plugin cdylib: the decisions plane, packaged as a 
 `busbar-plane-decisions` is busbar's decisions plane: a decision request routed by its `model` to a
 decision provider, governed and metered as busbar meters a request. It speaks two dialects, each a
 direct HTTP+JSON relay of the caller's body (only the top-level `model` is rewritten, to the
-route's `upstream_model`):
+route's `upstream_model`; a bound request-stage hook's rewrite replaces the document):
 
 - `jev`: `POST /v1/systemone`;
 - `nanojev`: `POST /api/evaluate`.
 
 A dialect's route is served only while some configured model uses it. It bills in the classes
 `decision`, `input_tokens` and `output_tokens`: `jev` reads `usage.units` (one decision when absent)
-and the usage's tokens; `nanojev` reads `execution.states`. A successful answer without a decision
-count is relayed unchanged and bills one decision at the plane's floor. A missing `nanojev` count
-also raises a usage warning; an absent `jev` count does not.
+and the usage's tokens; `nanojev` reads `execution.states`. A count is an exact non-negative
+decimal: a whole one bills whole units, a fractional one (`2.5`) bills exact micro-units. A
+successful answer without a decision count is relayed unchanged and bills one decision at the
+plane's floor. A missing `nanojev` count, or a success whose body is not a JSON object, also raises
+a usage warning; an absent `jev` count does not.
 
 ## Config
 
@@ -42,11 +44,15 @@ section. Unknown keys are refused.
 
 ## Diagnostics
 
-`declares.json` states the plane's need (`http`) and no diagnostic code of its own: an answer whose
-usage is not a whole count raises the core-owned 5029 (`usage-tap-decode-failed`). An unreadable
-decision count bills one decision; an unreadable token count is not billed, and other whole counts
-are retained. 5029 is benign-recurring: each plane instance warns once per dialect and member, and logs
-later occurrences at debug.
+`declares.json` states the plane's need (`http`) and no diagnostic code of its own: a success whose
+usage count cannot be read raises the core-owned 5029 (`usage-tap-decode-failed`). A count that is
+present but unreadable (not an exact non-negative decimal within the store's range, e.g. a
+string, `null`, a negative number, one finer than a micro-unit, or one spelled in more than 31
+bytes) is refused, never
+replaced by the floor: the plane marks the answer `count refused`, so busbar refuses the unit rather
+than bill it. A missing count (see above) is not refused; it bills the floor. 5029 is
+benign-recurring: each plane instance warns once per dialect and member, and logs later occurrences
+at debug.
 
 ## Build
 

@@ -36,12 +36,10 @@ impl RelayedFields {
 #[test]
 fn systemone_arrives_as_the_first_op_class_with_a_principal() {
     let a = arrive("POST", ops::PATH_SYSTEMONE).expect("systemone is claimed");
-    assert_eq!(a.op, ops::OP_SYSTEMONE);
     assert_eq!(a.op_class, 0);
     assert_eq!(tail::OP_CLASSES[a.op_class as usize], ops::OP_SYSTEMONE);
     assert_eq!(tail::DIALECTS[a.dialect as usize], "jev");
     let e = arrive("POST", ops::PATH_EVALUATE).expect("evaluate is claimed");
-    assert_eq!(e.op, ops::OP_EVALUATE);
     assert_eq!(tail::OP_CLASSES[e.op_class as usize], ops::OP_EVALUATE);
     assert_eq!(tail::DIALECTS[e.dialect as usize], "nanojev");
 }
@@ -131,12 +129,12 @@ const INPUT: u32 = tail::CLASS_INPUT_TOKENS_INDEX;
 const OUTPUT: u32 = tail::CLASS_OUTPUT_TOKENS_INDEX;
 
 #[test]
-fn far_end_pieces_are_relayed_unchanged_and_the_count_read_over_the_whole_answer() {
+fn the_count_is_read_over_the_whole_answer_across_pieces() {
     let mut reading = FarEndReading::default();
     let a = br#"{"request_id":"req_1","usage":{"un"#;
     let b = br#"its":42},"answers":{"decision":"approve"}}"#;
-    assert_eq!(reading.piece(a), &a[..]);
-    assert_eq!(reading.piece(b), &b[..]);
+    reading.piece(a);
+    reading.piece(b);
     let counts = reading.counts(Some(200)).expect("a whole count");
     assert_eq!(
         counts[0],
@@ -783,6 +781,55 @@ fn a_member_the_rewrite_omits_is_dropped() {
     assert!(!String::from_utf8_lossy(&out).contains("123-45-6789"));
 }
 
+/// A nested member name that repeats is a value the hook never saw (it read the last one): the
+/// caller's own bytes for that member never reach the far end, whether the document is unchanged
+/// or changes another member.
+#[test]
+fn a_nested_duplicate_the_hook_never_saw_is_not_relayed() {
+    let body = br#"{"model":"m","state":{"note":"SECRET-1","note":"ok"},"x":1}"#;
+    let unchanged = rewritten(body, &rewrite_of(r#"{"state":{"note":"ok"},"x":1}"#), "m")
+        .expect("the routed model")
+        .expect("applied");
+    assert!(
+        !String::from_utf8_lossy(&unchanged).contains("SECRET-1"),
+        "{}",
+        String::from_utf8_lossy(&unchanged)
+    );
+    assert_eq!(unchanged, br#"{"model":"m","state":{"note":"ok"},"x":1}"#);
+    let changed = rewritten(body, &rewrite_of(r#"{"state":{"note":"ok"},"x":2}"#), "m")
+        .expect("the routed model")
+        .expect("applied");
+    assert_eq!(changed, br#"{"model":"m","state":{"note":"ok"},"x":2}"#);
+    // An escaped spelling of the same name is the same name.
+    let escaped = br#"{"model":"m","state":[{"n\u006fte":"SECRET-2","note":"ok"}]}"#;
+    let out = rewritten(escaped, &rewrite_of(r#"{"state":[{"note":"ok"}]}"#), "m")
+        .expect("the routed model")
+        .expect("applied");
+    assert_eq!(out, br#"{"model":"m","state":[{"note":"ok"}]}"#);
+    // Without a repeat the caller's own bytes are kept as before.
+    let plain = br#"{"model":"m","state":{"note" : "ok"},"x":1}"#;
+    let kept = rewritten(plain, &rewrite_of(r#"{"state":{"note":"ok"},"x":2}"#), "m")
+        .expect("the routed model")
+        .expect("applied");
+    assert_eq!(kept, br#"{"model":"m","state":{"note" : "ok"},"x":2}"#);
+}
+
+/// A rewrite whose `model` is no string is refused without its value being named: the refusal is
+/// logged, and the value may hold decision content.
+#[test]
+fn a_rewrite_naming_a_non_string_model_does_not_state_it() {
+    let body = br#"{"model":"m","state":{}}"#;
+    let refused = rewritten(
+        body,
+        &rewrite_of(r#"{"model":{"ssn":"SECRET-3"},"state":{}}"#),
+        "m",
+    );
+    let Err(NotApplied::Model(ModelRewritten { named })) = refused else {
+        panic!("a non-string model is refused: {refused:?}");
+    };
+    assert!(!named.contains("SECRET-3"), "{named}");
+}
+
 #[test]
 fn a_rewrite_naming_another_model_is_refused() {
     let body = br#"{"model":"m","state":{}}"#;
@@ -1232,8 +1279,8 @@ fn bytes_after_the_answer_document_cannot_replace_its_usage_or_error() {
             body.extend_from_slice(suffix);
             for at in 0..=body.len() {
                 let mut reading = FarEndReading::default();
-                assert_eq!(reading.piece(&body[..at]), &body[..at]);
-                assert_eq!(reading.piece(&body[at..]), &body[at..]);
+                reading.piece(&body[..at]);
+                reading.piece(&body[at..]);
                 let counts: Vec<_> = reading
                     .counts(Some(200))
                     .expect("the first document has readable usage")
@@ -1478,4 +1525,147 @@ fn a_cut_bills_only_completed_exact_decimal_counts() {
         })
     );
     assert_eq!(reading.cut(Some(200))[2], None);
+}
+
+/// Malformed documents (bad structure, a bad literal, a bad escape, bytes that are not UTF-8) are
+/// refused by both the routing read and the whole-body check; well-formed literals pass.
+#[test]
+fn a_malformed_document_is_refused_where_it_breaks() {
+    for bad in [
+        &br#"{1:2}"#[..],
+        br#"{"a" 1}"#,
+        br#"{"a":1 "b":2}"#,
+        br#"[1 2]"#,
+        br#"[{"a" 1}]"#,
+        br#"[{"a":1 "b":2}]"#,
+        br#"[fals]"#,
+        b"\"\xff\"",
+        br#"["\ud800"]"#,
+        br#"["\x"]"#,
+    ] {
+        assert!(!valid(bad), "{}", String::from_utf8_lossy(bad));
+        assert!(readable(bad).is_err(), "{}", String::from_utf8_lossy(bad));
+    }
+    for good in [
+        &br#"[false, true, null]"#[..],
+        br#"{"model":"m","f":false}"#,
+    ] {
+        assert!(valid(good), "{}", String::from_utf8_lossy(good));
+        assert!(readable(good).is_ok(), "{}", String::from_utf8_lossy(good));
+    }
+}
+
+/// The string check reads one string only: any other value is not a string that decodes.
+#[test]
+fn only_a_string_span_decodes_as_a_string() {
+    assert!(string_decodes(br#""a\u00e9""#));
+    assert!(!string_decodes(b"1"));
+    assert!(!string_decodes(br#""\ud800""#));
+}
+
+/// A repeated member name is found at any depth and under any spelling; every other value reads.
+#[test]
+fn unique_names_reads_every_value_and_finds_a_repeat_at_any_depth() {
+    assert!(unique_names(
+        br#"{"a":[true,false,-1,1.5,1e400,null,"s",{"b":1,"c":{"b":2}}]}"#
+    ));
+    assert!(!unique_names(br#"[{"a":1,"\u0061":2}]"#));
+    assert!(!unique_names(br#"{"x":{"y":[{"z":1,"z":2}]}}"#));
+    assert!(!unique_names(b"{"));
+}
+
+/// A request that is not UTF-8 is counted as its lossy text, one replacement per bad byte.
+#[test]
+fn a_request_that_is_not_utf8_is_counted_lossily() {
+    assert_eq!(chars_of(b"\xffab"), 3);
+    assert_eq!(chars_of("é!".as_bytes()), 2);
+}
+
+/// A rewrite that names no document leaves the request as it is; the document is the last
+/// message that resolves to an object.
+#[test]
+fn a_rewrite_names_its_document_by_the_last_object_message() {
+    let body = br#"{"model":"m","state":{"a":1}}"#;
+    for none in [
+        &br#"[]"#[..],
+        br#"{"messages":{}}"#,
+        br#"{"tools":[]}"#,
+        br#"{"messages":[{"role":"user"},7,{"content":7},{"content":"not json"},{"content":"[1]"}]}"#,
+    ] {
+        assert_eq!(
+            rewritten(body, none, "m"),
+            Ok(None),
+            "{}",
+            String::from_utf8_lossy(none)
+        );
+    }
+    // A role-less message is itself the document; a later unusable one does not displace it.
+    let out = rewritten(
+        body,
+        br#"{"messages":[{"state":{"a":2}},{"role":"user"},{"content":5}]}"#,
+        "m",
+    )
+    .expect("the routed model")
+    .expect("applied");
+    assert_eq!(out, br#"{"model":"m","state":{"a":2}}"#);
+}
+
+/// A rewrite whose `model` is an array or a scalar other than the routed name is refused, the array
+/// named by its kind and the scalar as written.
+#[test]
+fn a_rewrite_naming_an_array_or_number_model_is_refused_by_kind() {
+    let body = br#"{"model":"m","state":{}}"#;
+    for (model, named) in [("[1]", "<an array>"), ("7", "7"), ("true", "true")] {
+        assert_eq!(
+            rewritten(
+                body,
+                &rewrite_of(&format!(r#"{{"model":{model},"state":{{}}}}"#)),
+                "m"
+            ),
+            Err(NotApplied::Model(ModelRewritten {
+                named: named.to_string()
+            })),
+            "{model}"
+        );
+    }
+}
+
+/// A count spelled in 32 bytes or more is unreadable, even when its value is exact.
+#[test]
+fn a_count_spelled_past_the_scalar_cap_is_unreadable() {
+    let long = format!("2.{}", "0".repeat(29));
+    assert_eq!(long.len(), 31);
+    assert_eq!(
+        billed(200, format!(r#"{{"usage":{{"units":{long}}}}}"#).as_bytes())
+            .expect("31 bytes read")[0],
+        (DECISION, 2)
+    );
+    let longer = format!("{long}0");
+    assert_eq!(
+        billed(
+            200,
+            format!(r#"{{"usage":{{"units":{longer}}}}}"#).as_bytes()
+        ),
+        Err(UnreadableUsage(crate::codec::PTR_USAGE_UNITS))
+    );
+}
+
+/// Member names are compared decoded: an escaped spelling of `usage` or `units` is the member,
+/// and names carrying other escapes (or non-ASCII ones) are not.
+#[test]
+fn escaped_member_names_are_read_decoded() {
+    let body =
+        br#"{"\b\f\n\r\t":1,"\u00e9":{"units":9},"us\u0061ge":{"\u0075nits":4,"x\nunits":5}}"#;
+    assert_eq!(billed(200, body).expect("a whole count")[0], (DECISION, 4));
+}
+
+/// A non-success bills nothing, whether read whole, after an unreadable count, or cut.
+#[test]
+fn a_non_success_bills_nothing_on_every_path() {
+    let mut reading = FarEndReading::default();
+    reading.piece(br#"{"usage":{"units":"x"}}"#);
+    assert_eq!(reading.counts(Some(500)), Ok([None; 4]));
+    assert_eq!(reading.floored(Some(500)), [None; 4]);
+    assert_eq!(reading.cut(Some(500)), [None; 4]);
+    assert_ne!(reading.floored(Some(200)), [None; 4]);
 }

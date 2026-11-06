@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# The `jev` conformance suite (busbar conformance/registry.toml `jev`): one command, four judged legs,
+# The `jev` conformance suite (busbar conformance/registry.toml `jev`): one command, five judged legs,
 # one verdict. Ported from busbar's retired Rust rig (xtask/src/conformance_record/jev.rs, deleted
 # with the gate machinery in busbar dd677873c4); its checks and bytes are that rig's, judged by
 # testing/jev-conformance/judge.py.
 #
+#   judge-regressions the judge's own regression tests (testing/jev-conformance/test_judge.py).
 #   battery           this plane's own tests (`cargo test -p busbar-plane-decisions`): the codec, the
-#                     fixtures, the PII witness and the door. A battery that
-#                     passes zero tests is red.
+#                     PII witness and the door. A battery that passes zero tests is red.
 #   control           the jev reference relay (testing/jev-conformance/reference_relay.py): every
 #                     wire check must pass against a relay that keeps the plane's rules.
 #   negative control  the reference relay with one deliberate deviation at a time: every deviation
@@ -39,7 +39,7 @@ verdict() { # <status> <reason>
 import json, sys
 path, status, reason, breaks = sys.argv[1:5]
 json.dump({"suite": "jev", "status": status, "armed": True, "standard": "jev decision plane",
-           "plan": f"plane battery + reference-relay control + {breaks} broken-relay negative controls + "
+           "plan": f"judge regressions + plane battery + reference-relay control + {breaks} broken-relay negative controls + "
                    "served POST /v1/systemone (one model; two models with upstream_model) and "
                    "POST /api/evaluate (nanojev) on booted busbars, with the ledger, audit and "
                    "Teller-step gating checks",
@@ -117,6 +117,8 @@ fi
 leg subject python3 -I "$judge" subject "$out/subject" "$bin"
 
 if [ -z "$failed" ]; then
-  verdict pass "every leg passed (battery, control, negative control, subject)"; exit 0
+  # A pass whose verdict was not written is no pass: the harness would read none, or a stale one.
+  verdict pass "every leg passed (judge regressions, battery, control, negative control, subject)" || exit 1
+  exit 0
 fi
 verdict fail "legs failed:$failed (logs in the check output)"; exit 1

@@ -1349,3 +1349,22 @@ fn exact_fractional_usage_reaches_the_live_unit_count_abi() {
         );
     }
 }
+
+/// The kernel's wait reaches the caller as `Retry-After` beside the refusal; with no wait there is
+/// no such field.
+#[test]
+fn a_refusal_with_a_wait_states_it_as_retry_after() {
+    let door = open(ONE);
+    let (outcome, body, stated) = door.refusal_waiting(0, 429, "slow down", false, 17);
+    assert_eq!(outcome, Outcome::Ready);
+    assert_eq!(
+        body,
+        br#"{"error":{"code":"unsupported_operation","message":"slow down"}}"#
+    );
+    assert!(stated.iter().any(|f| f == "retry-after: 17"), "{stated:?}");
+    let (_, _, none) = door.refusal_waiting(0, 429, "slow down", false, 0);
+    assert!(
+        !none.iter().any(|f| f.starts_with("retry-after")),
+        "{none:?}"
+    );
+}

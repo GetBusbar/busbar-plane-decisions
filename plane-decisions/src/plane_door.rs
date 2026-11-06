@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The decisions plane's door: the plane kind's memory-ABI table (`busbar_contract::abi::plane`)
+//! over this plane's routing, relay and metering ([`crate::driven`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
@@ -794,19 +795,26 @@ fn far_end(
             |o| &o.tap_fault,
             busbar_contract::abi::plane::TAP_FAULT_DECODE,
         );
+        // A present unreadable count is refused; an absent one (or a body that is no object) bills
+        // the floor. The line says which this answer got.
+        let consequence = if refused {
+            "a present unreadable count is REFUSED, never replaced by a floor; the driver receives \
+             the refusal"
+        } else {
+            "no count is present, so the success bills the plane's floor of one decision"
+        };
         if plane.first_unreadable(input.dialect(), pointer) {
             busbar_contract::diag_warn!(
                 busbar_contract::diagnostic::USAGE_TAP_DECODE_FAILED,
                 member = pointer,
-                "the far end's answer has no representable count at `{pointer}`: usage is unreadable; a present \
-                 unreadable count is REFUSED, never replaced by a floor; the driver receives the refusal"
+                "the far end's answer has no representable count at `{pointer}`: usage is unreadable; \
+                 {consequence}"
             );
         } else {
             busbar_contract::diag_debug!(
                 busbar_contract::diagnostic::USAGE_TAP_DECODE_FAILED,
                 member = pointer,
-                "the far end's answer again has no representable count at `{pointer}`; billed \
-                 as before"
+                "the far end's answer again has no representable count at `{pointer}`; {consequence}"
             );
         }
     }

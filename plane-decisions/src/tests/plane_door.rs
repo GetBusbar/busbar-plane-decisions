@@ -199,13 +199,11 @@ fn the_refusal_names_the_first_bad_model_in_name_order() {
         "b":{"provider":"typesafe","protocol":"bar"},
         "a":{"provider":"typesafe","protocol":"foo"}}}"#;
     let facts = BTreeMap::from([("typesafe".to_string(), "jev".to_string())]);
-    for _ in 0..64 {
-        let section: DecisionsSection = serde_json::from_str(json).expect("parses");
-        let err = spoken_overrides(&section).expect_err("neither protocol is spoken");
-        assert!(err.contains("decisions.models.a "), "{err}");
-        let err = routes(&section, &facts).expect_err("neither protocol is spoken");
-        assert!(err.contains("decisions.models.a "), "{err}");
-    }
+    let section: DecisionsSection = serde_json::from_str(json).expect("parses");
+    let err = spoken_overrides(&section).expect_err("neither protocol is spoken");
+    assert!(err.contains("decisions.models.a "), "{err}");
+    let err = routes(&section, &facts).expect_err("neither protocol is spoken");
+    assert!(err.contains("decisions.models.a "), "{err}");
 }
 
 /// One unit's piece never holds every other unit's: while one unit's entry is held (its piece being
