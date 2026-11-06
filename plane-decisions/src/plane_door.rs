@@ -30,7 +30,7 @@ use busbar_contract::abi::sdk::life::Refusal;
 use busbar_contract::abi::sdk::plane::{cancel_disposition, Ending, UnitCancel};
 use busbar_contract::abi::sdk::plane_life::{Opened, PlaneLife, Published};
 use busbar_contract::abi::sdk::publish::{ClaimSpec, SnapshotSpec};
-use busbar_contract::abi::sdk::{Generations, HostBuf, Instance, Keyed, Lent, Out, Safe, SafeSlot};
+use busbar_contract::abi::sdk::{Generations, Instance, Keyed, Lent, Out, Safe, SafeSlot};
 
 use crate::claims;
 use crate::codec::{CONTENT_TYPE_JSON, FIELD_CONTENT_TYPE, FIELD_RETRY_AFTER};
@@ -594,26 +594,6 @@ slot!(
     }
 );
 
-/// `(written, needed)` of every buffer an answer fills, short as a whole when one is short.
-fn settle(
-    out: &mut Out<'_, OnPieceOut>,
-    fields: &HostBuf<'_, OutField>,
-    units: &HostBuf<'_, UnitCount>,
-    arena: &HostBuf<'_, u8>,
-) -> bool {
-    let short = !(fields.fits() && units.fits() && arena.fits());
-    let (fw, fnd) = fields.settle(short);
-    let (uw, und) = units.settle(short);
-    let (aw, and) = arena.settle(short);
-    out.set(|o| &o.fields_written, fw as u32);
-    out.set(|o| &o.fields_needed, fnd as u32);
-    out.set(|o| &o.units_written, uw as u32);
-    out.set(|o| &o.units_needed, und as u32);
-    out.set(|o| &o.arena_written, aw as u64);
-    out.set(|o| &o.arena_needed, and as u64);
-    short
-}
-
 /// Write what `unit` owes into the reply buffer, as much as fits; `more = 1` while any is left,
 /// and its flags (with `EMIT_DONE` held back until the last byte) on every write.
 fn pay(unit: &mut Unit, input: Lent<'_, OnPieceIn>, out: &mut Out<'_, OnPieceOut>) -> bool {
@@ -702,7 +682,7 @@ fn attempt_piece(
             value: arena.span(value),
         });
     }
-    if settle(out, &fields, &units, &arena) {
+    if busbar_contract::abi::sdk::plane::settle_piece(out, &fields, &units, &arena, None) {
         return Outcome::Failed;
     }
     *unit = Unit {
@@ -785,7 +765,7 @@ fn far_end(
         && unit.reading.refused_count();
     let refusal_reason =
         refused.then(|| arena.span(unreadable.unwrap_or("usage count refused").as_bytes()));
-    if settle(out, &fields, &units, &arena) {
+    if busbar_contract::abi::sdk::plane::settle_piece(out, &fields, &units, &arena, None) {
         unit.recall = true;
         return (Outcome::Failed, false);
     }
