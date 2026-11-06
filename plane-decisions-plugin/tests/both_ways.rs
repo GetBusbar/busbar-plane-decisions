@@ -12,7 +12,7 @@ use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome, BLOB_OCTETS};
 use busbar_contract::abi::plane::{
     slot, ArriveIn, ArriveOut, OnPieceIn, OnPieceOut, OutField, PlaneOpenIn, PlaneOpenOut,
     ProviderFacts, UnitCount, FROM_CALLER, FROM_FAR_END, FROM_KERNEL, PIECE_HAS_STATUS, PIECE_LAST,
-    UNITS_FLOOR,
+    TAP_FAULT_DECODE, UNITS_REPORTED, VERDICT_COUNT_REFUSED,
 };
 use busbar_plugin_loader::dispatch::kinds::plane::Plane;
 use busbar_plugin_loader::dispatch::{
@@ -60,10 +60,20 @@ impl EnvelopeSink for HostLog {
 const SETTINGS: &[u8] = br#"{"models":{"jev":{"provider":"typesafe"}}}"#;
 /// The caller's request.
 const BODY: &[u8] = br#"{"state":{}}"#;
-/// A success whose decision count is not a whole count.
+/// A success whose decision count is a string rather than a numeric measurement.
 const UNREADABLE: &[u8] = br#"{"usage":{"units":"7"}}"#;
 
-/// One piece of `unit`, answered: the outcome and the units it wrote, `(class, source, amount)`.
+/// The measurement and refusal fields one piece returned through the real loader.
+#[derive(Debug)]
+struct Piece {
+    outcome: Outcome,
+    units: Vec<(u32, u32, u64)>,
+    verdict: u32,
+    tap_fault: u8,
+    fault_reason: Vec<u8>,
+}
+
+/// One piece of `unit`, answered; units are `(class, source, amount)`.
 fn piece(
     p: &Plugin<Plane>,
     unit: u64,
@@ -72,7 +82,7 @@ fn piece(
     status: u32,
     bytes: &'static [u8],
     attempt_no: u32,
-) -> (Outcome, Vec<(u32, u32, u64)>) {
+) -> Piece {
     let mut reply = vec![0_u8; 1 << 12];
     let mut units = [z::<UnitCount>(); 8];
     let mut fields = [z::<OutField>(); 8];
@@ -93,7 +103,14 @@ fn piece(
         .iter()
         .map(|u| (u.class, u.source, u.amount))
         .collect();
-    (c.outcome, written)
+    let reason = f.out.fault_reason;
+    Piece {
+        outcome: c.outcome,
+        units: written,
+        verdict: f.out.verdict,
+        tap_fault: f.out.tap_fault,
+        fault_reason: arena[reason.offset as usize..(reason.offset + reason.len) as usize].to_vec(),
+    }
 }
 
 fn plugin_cdylib() -> std::path::PathBuf {
@@ -204,7 +221,7 @@ fn an_unreadable_usage_line_reaches_the_host_log_dropped_in_as_linked() {
 
         piece(&p, 1, FROM_KERNEL, 0, 0, b"", 1);
         piece(&p, 1, FROM_CALLER, PIECE_LAST, 0, BODY, 0);
-        let (outcome, units) = piece(
+        let answer = piece(
             &p,
             1,
             FROM_FAR_END,
@@ -213,10 +230,24 @@ fn an_unreadable_usage_line_reaches_the_host_log_dropped_in_as_linked() {
             UNREADABLE,
             0,
         );
-        assert_eq!(outcome, Outcome::Ready, "dropped-in {dropped_in}");
-        assert!(
-            units.contains(&(0, UNITS_FLOOR, 1)),
-            "dropped-in {dropped_in}: the floor is billed: {units:?}"
+        assert_eq!(answer.outcome, Outcome::Ready, "dropped-in {dropped_in}");
+        assert_eq!(
+            (
+                answer.verdict,
+                answer.tap_fault,
+                answer.fault_reason.as_slice()
+            ),
+            (
+                VERDICT_COUNT_REFUSED,
+                TAP_FAULT_DECODE,
+                b"/usage/units".as_slice()
+            ),
+            "dropped-in {dropped_in}: the unreadable measurement is refused: {answer:?}"
+        );
+        assert_eq!(
+            answer.units,
+            vec![(1, UNITS_REPORTED, 1)],
+            "dropped-in {dropped_in}: only the request fee is reported, with no decision floor"
         );
         let lines = log.0.lock().unwrap_or_else(PoisonError::into_inner);
         assert_eq!(

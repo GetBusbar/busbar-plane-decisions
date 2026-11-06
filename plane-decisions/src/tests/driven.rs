@@ -11,16 +11,6 @@ fn route_model<'m, V>(
     route_named(body, models, serves).map(|(name, entry, _)| (name, entry))
 }
 
-/// [`spliceable_named`] over the `model` the body names, read here as `arrive` reads it.
-fn spliceable(body: &[u8], upstream: &str) -> bool {
-    match readable(body) {
-        Ok(Some(serde_json::Value::String(named))) => {
-            spliceable_named(body, Some(&named), upstream)
-        }
-        _ => true,
-    }
-}
-
 /// [`project_read`] over a read of the request made here.
 fn project_hook<'r, V>(
     request: &[u8],
@@ -1130,18 +1120,25 @@ fn a_rewrite_over_a_body_that_does_not_parse_is_a_fault_before_the_rewrite_is_re
     );
 }
 
-/// B3: the splice check reads the document without building it, as strictly as the DOM parse.
+/// The splice check validates the document directly, without reading its model again.
 #[test]
 fn spliceable_validates_without_a_second_head_read() {
     let bad = br#"{"model":"jev","x":"\uZZZZ"}"#;
     assert!(readable(bad).is_err());
-    assert!(!spliceable(bad, "jev-1"));
     assert!(
         spliceable_named(bad, Some("jev"), "jev"),
         "no rewrite needed"
     );
     assert!(spliceable_named(bad, None, "jev-1"), "no model named");
-    assert!(!spliceable_named(bad, Some("jev"), "jev-1"));
+    for bad in [
+        bad.as_slice(),
+        br#"{"model":"jev","x":"\ud800"}"#,
+        br#"{"model":"jev","x":01}"#,
+        br#"{"model":"jev","x":1e}"#,
+        br#"{"model":"jev"} trailing"#,
+    ] {
+        assert!(!spliceable_named(bad, Some("jev"), "jev-1"), "{bad:?}");
+    }
     assert!(spliceable_named(
         br#"{"model":"jev"}"#,
         Some("jev"),
