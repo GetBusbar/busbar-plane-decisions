@@ -7,7 +7,6 @@ First-party signed kind:plane plugin cdylib: the decisions plane, packaged as a 
 |---|---|---|---|---|
 | `plane` | `decisions` | `busbar-plane-decisions-plugin` | 1.6.0 (pinned in `.busbar-ref`) | Apache-2.0 |
 
-[![ci](https://github.com/GetBusbar/busbar-plane-decisions/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/GetBusbar/busbar-plane-decisions/actions/workflows/ci.yml)
 <!-- fleet:header:end -->
 
 ## What it is for
