@@ -1270,7 +1270,14 @@ fn an_unreadable_usage_warns_once_per_instance_not_per_answer() {
 fn project_over_an_unparseable_body_marks_its_fault_unparseable() {
     let door = open(r#"{"models":{"jev":{"provider":"typesafe"}}}"#);
     let body = br#"{"model":"jev","state":"\ud800"}"#;
-    assert_eq!(door.arrive(1, body).outcome, Outcome::Ready);
+    // Ingress rejects this malformed body before retaining a unit. A direct projection must
+    // still report the parse fault, using the current generation when no unit was retained.
+    let refused = door.arrive(1, body);
+    assert_eq!(
+        (refused.outcome, refused.status),
+        (Outcome::Refused, 400),
+        "{refused:?}"
+    );
     let got = door.project(1, "/v1/systemone", body, None);
     assert_eq!(got.outcome, Some(Outcome::Fault), "{got:?}");
     assert!(got.fault_unparseable, "{got:?}");
