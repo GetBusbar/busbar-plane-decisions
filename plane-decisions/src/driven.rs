@@ -192,11 +192,11 @@ pub fn parsed(body: &[u8]) -> Result<serde_json::Value, Unrouted> {
     if !valid(body) {
         return Err(Unrouted::Unparsable);
     }
-    let mut de = serde_json::Deserializer::from_slice(body);
-    de.disable_recursion_limit();
-    let value = serde::Deserialize::deserialize(&mut de).map_err(|_| Unrouted::Unparsable)?;
-    de.end().map_err(|_| Unrouted::Unparsable)?;
-    Ok(value)
+    // Build containers from their actual tokens. Deserializing an arbitrary object as Value
+    // would mistake a literal `$serde_json::private::Number` key for AP number transport.
+    Skip::new(body)
+        .materialized()
+        .map_err(|()| Unrouted::Unparsable)
 }
 
 /// The unknown-model refusal's words before the echoed name.
@@ -299,6 +299,62 @@ impl<'b> Skip<'b> {
     fn next_non_space(&mut self) -> Option<u8> {
         self.eat_spaces();
         self.bump()
+    }
+
+    /// Materialize a document already checked by `valid`, including its depth bound.
+    /// Only scalar tokens reach serde's Value deserializer; object keys are always literal,
+    /// including escaped spellings of serde's private markers. Duplicate keys keep the last value.
+    fn materialized(&mut self) -> Result<serde_json::Value, ()> {
+        use serde_json::{Map, Value};
+        self.eat_spaces();
+        match self.peek().ok_or(())? {
+            b'{' => {
+                self.at += 1;
+                let mut fields = Map::new();
+                match self.next_non_space() {
+                    Some(b'}') => return Ok(Value::Object(fields)),
+                    Some(b'"') => {}
+                    _ => return Err(()),
+                }
+                loop {
+                    let start = self.at - 1;
+                    self.skip_string()?;
+                    let key = serde_json::from_slice::<String>(&self.bytes[start..self.at])
+                        .map_err(|_| ())?;
+                    if self.next_non_space() != Some(b':') {
+                        return Err(());
+                    }
+                    fields.insert(key, self.materialized()?);
+                    match self.next_non_space() {
+                        Some(b'}') => return Ok(Value::Object(fields)),
+                        Some(b',') if self.next_non_space() == Some(b'"') => {}
+                        _ => return Err(()),
+                    }
+                }
+            }
+            b'[' => {
+                self.at += 1;
+                let mut values = Vec::new();
+                self.eat_spaces();
+                if self.peek() == Some(b']') {
+                    self.at += 1;
+                    return Ok(Value::Array(values));
+                }
+                loop {
+                    values.push(self.materialized()?);
+                    match self.next_non_space() {
+                        Some(b']') => return Ok(Value::Array(values)),
+                        Some(b',') => {}
+                        _ => return Err(()),
+                    }
+                }
+            }
+            _ => {
+                let start = self.at;
+                self.skip_one()?;
+                serde_json::from_slice(&self.bytes[start..self.at]).map_err(|_| ())
+            }
+        }
     }
 
     /// Validate any root value; only an object's model is interpreted for routing.
@@ -768,7 +824,7 @@ pub fn chars_of(request: &[u8]) -> usize {
 /// or a string holding one, or a message with no `role` that is itself an object.
 fn rewrite_document(rewrite: &[u8]) -> Option<serde_json::Map<String, serde_json::Value>> {
     use serde_json::Value;
-    let Value::Object(mut reply) = serde_json::from_slice(rewrite).ok()? else {
+    let Value::Object(mut reply) = parsed(rewrite).ok()? else {
         return None;
     };
     let Value::Array(messages) = reply.remove("messages")? else {
@@ -786,7 +842,10 @@ fn rewrite_document(rewrite: &[u8]) -> Option<serde_json::Map<String, serde_json
         };
         let resolved = match candidate {
             Value::Object(map) => Some(map),
-            Value::String(text) => serde_json::from_str(&text).ok(),
+            Value::String(text) => match parsed(text.as_bytes()).ok() {
+                Some(Value::Object(map)) => Some(map),
+                _ => None,
+            },
             _ => None,
         };
         if resolved.is_some() {

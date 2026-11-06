@@ -1010,6 +1010,108 @@ fn rewrites_preserve_untouched_large_numbers_exactly() {
 }
 
 #[test]
+fn marker_objects_survive_actual_parse_and_serialize() {
+    for (raw, expected) in [
+        (
+            r#"{"$serde_json::private::Number":"27"}"#,
+            r#"{"$serde_json::private::Number":"27"}"#,
+        ),
+        (
+            r#"{"\u0024serde_json::private::Number":"27"}"#,
+            r#"{"$serde_json::private::Number":"27"}"#,
+        ),
+        (
+            r#"{"$serde_json::private::Number":"not a number"}"#,
+            r#"{"$serde_json::private::Number":"not a number"}"#,
+        ),
+        (
+            r#"{"$serde_json::private::Number":null}"#,
+            r#"{"$serde_json::private::Number":null}"#,
+        ),
+        (
+            r#"{"$serde_json::private::Number":"27","keep":true}"#,
+            r#"{"$serde_json::private::Number":"27","keep":true}"#,
+        ),
+        (
+            r#"{"$serde_json::private::Number":"26","\u0024serde_json::private::Number":"27"}"#,
+            r#"{"$serde_json::private::Number":"27"}"#,
+        ),
+    ] {
+        for (prefix, suffix) in [("", ""), ("[", "]"), (r#"{"nested":["#, "]}")] {
+            let input = format!("{prefix}{raw}{suffix}");
+            let value = parsed(input.as_bytes()).expect("valid literal object");
+            assert_eq!(value.to_string(), format!("{prefix}{expected}{suffix}"));
+        }
+    }
+}
+
+#[test]
+fn marker_objects_are_preserved_in_string_and_object_hook_content() {
+    let document = r#"{"x":{"\u0024serde_json::private::Number":"27"}}"#;
+    let string_content = rewrite_of(document);
+    let object_content =
+        format!(r#"{{"messages":[{{"role":"user","content":{document}}}],"tools":[]}}"#);
+    for rewrite in [&string_content[..], object_content.as_bytes()] {
+        let out = rewritten(br#"{"model":"m","x":0}"#, rewrite, "m")
+            .expect("applied")
+            .expect("replacement");
+        assert_eq!(
+            out,
+            br#"{"model":"m","x":{"$serde_json::private::Number":"27"}}"#
+        );
+    }
+}
+
+#[test]
+fn marker_objects_never_compare_equal_to_actual_numbers() {
+    let marker = r#"{"$serde_json::private::Number":"27"}"#;
+    for (current, wanted) in [(marker, "27"), ("27", marker)] {
+        let body = format!(r#"{{"model":"m","x":{current},"keep":1.2300E+400}}"#);
+        let document = format!(r#"{{"x":{wanted},"keep":1.2300E+400}}"#);
+        let out = rewritten(body.as_bytes(), &rewrite_of(&document), "m")
+            .expect("applied")
+            .expect("replacement");
+        assert_eq!(
+            out,
+            format!(r#"{{"model":"m","x":{wanted},"keep":1.2300E+400}}"#).as_bytes()
+        );
+    }
+    let body =
+        br#"{ "model":"m", "x": {"\u0024serde_json::private::Number":"27"}, "keep": 1.2300E+400 }"#;
+    let rewrite = rewrite_of(r#"{"x":{"$serde_json::private::Number":"27"},"keep":1.2300E+400}"#);
+    assert_eq!(rewritten(body, &rewrite, "m"), Ok(Some(body.to_vec())));
+}
+
+#[test]
+fn marker_objects_and_exact_numbers_survive_changed_members() {
+    let number = format!(
+        "18446744073709551617.{}1e+99999999999999999999",
+        "0".repeat(2000)
+    );
+    let document = format!(r#"{{"x":[{{"$serde_json::private::Number":"27"}},{number}]}}"#);
+    let out = rewritten(br#"{"model":"m","x":null}"#, &rewrite_of(&document), "m")
+        .expect("applied")
+        .expect("replacement");
+    assert_eq!(
+        out,
+        format!(r#"{{"model":"m","x":[{{"$serde_json::private::Number":"27"}},{number}]}}"#)
+            .as_bytes()
+    );
+    assert_eq!(
+        parsed(number.as_bytes())
+            .expect("exact numeric token")
+            .to_string(),
+        number
+    );
+    for malformed in [
+        br#"{"x":{"$serde_json::private::Number":"27"}} trailing"#.as_slice(),
+        br#"{"x":{"$serde_json::private::Number":"\ud800"}}"#,
+    ] {
+        assert!(parsed(malformed).is_err());
+    }
+}
+
+#[test]
 fn a_rewrite_over_a_body_that_does_not_parse_is_a_fault_before_the_rewrite_is_read() {
     let echo = br#"{"messages":[{"role":"user","content":"{\"x\":\"\\ud800\"}"}],"tools":[]}"#;
     for body in [
