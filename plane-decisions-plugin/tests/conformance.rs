@@ -69,11 +69,11 @@ fn load(dispatcher: &Dispatcher, dropped: bool) -> Plugin<Plane> {
 }
 fn first(p: &Plugin<Plane>) -> u64 {
     assert_eq!(
-        p.inner.resumes.load(Ordering::SeqCst),
+        p.test_invocations().1,
         0,
         "decisions synchronous cases never resume"
     );
-    p.inner.crossings.load(Ordering::SeqCst)
+    p.test_invocations().0
 }
 fn called(c: &busbar_plugin_loader::dispatch::Called) -> String {
     format!("{:?} lease={} error={:?}", c.outcome, c.lease != 0, c.error)
@@ -252,7 +252,10 @@ fn decisions_lifecycle_requests_and_short_buffers_match_both_real_doors() {
     );
     let mut legs = Vec::new();
     for dropped in [false, true] {
-        let dispatcher = Dispatcher::new(DispatchConfig::default());
+        let dispatcher = Dispatcher::new(
+            DispatchConfig::default(),
+            busbar_contract::services::test_caller_binding(),
+        );
         let mut observed = Vec::new();
         let p = load(&dispatcher, dropped);
         assert_eq!(p.kind(), busbar_contract::abi::mechanism::KindCode::Plane);
@@ -644,7 +647,10 @@ fn incompatible_decisions_metadata_is_refused_by_both_loader_paths() {
     use busbar_contract::abi::mechanism::{rendering::RENDERING_MAGIC, KindCode};
     use busbar_plugin_loader::dispatch::load::rendering_of_raw;
     use busbar_plugin_loader::dispatch::{Kind, LoadError};
-    let dispatcher = Dispatcher::new(DispatchConfig::default());
+    let dispatcher = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let bind = || Bind {
         instance: Arc::from("decisions-negative"),
         max_inflight_cap: 64,
@@ -846,7 +852,8 @@ fn incompatible_decisions_metadata_is_refused_by_both_loader_paths() {
     );
     let row = LinkedRow::of(busbar_plane_decisions::door).unwrap();
     use busbar_plugin_loader::dispatch::kinds::{
-        auth::Auth, export::Export, hook::Hook, secret::Secret, store::Store, transport::Transport,
+        auth::Auth, export::Export, hook::Hook, secret::Secret, store_v4::StoreV4 as Store,
+        transport::Transport,
     };
     // Explicit wrong-kind tests use the real product image under each loader kind.
     let want = |kind| {

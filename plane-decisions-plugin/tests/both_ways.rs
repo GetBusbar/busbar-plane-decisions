@@ -154,7 +154,10 @@ fn load(d: &Dispatcher, dropped_in: bool, sink: Arc<HostLog>) -> Plugin<Plane> {
 /// linked and dropped in.
 #[test]
 fn an_open_the_grammar_refuses_reads_the_same_both_ways() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let words: Vec<String> = [false, true]
         .into_iter()
         .map(|dropped_in| {
@@ -194,7 +197,10 @@ fn an_open_the_grammar_refuses_reads_the_same_both_ways() {
 
 #[test]
 fn an_unreadable_usage_line_reaches_the_host_log_dropped_in_as_linked() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let providers = [ProviderFacts {
         name: text(b"typesafe"),
         protocol: text(b"jev"),

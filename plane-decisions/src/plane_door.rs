@@ -419,10 +419,11 @@ macro_rules! slot {
         #[derive(Debug)]
         pub struct $name;
         impl SafeSlot for $name {
+    type Kind = busbar_contract::plugin::markers::PlaneKind;
             type In = $in;
             type Out = $out;
             type State = DecisionsDoor;
-            fn call($inst: Instance<'_, DecisionsDoor>, $input: Lent<'_, $in>, $o: Out<'_, $out>)
+            fn call($inst: Instance<'_, DecisionsDoor, busbar_contract::plugin::markers::PlaneKind>, $input: Lent<'_, $in>, $o: Out<'_, $out>)
                 -> Outcome $body
         }
     };
@@ -451,7 +452,15 @@ impl PlaneLife for DecisionsDoor {
 
     /// `open`: the instance, and the first generation's snapshot. REFUSED in the grammar's words,
     /// as `validate` and `refresh` refuse the same settings.
-    fn open(input: &Lent<'_, PlaneOpenIn>) -> Result<Opened<Self>, Refusal> {
+    fn open(
+        input: &Lent<'_, PlaneOpenIn>,
+        _host: Option<
+            busbar_contract::abi::sdk::lent::KindHostLoan<
+                '_,
+                busbar_contract::plugin::markers::PlaneKind,
+            >,
+        >,
+    ) -> Result<Opened<Self>, Refusal> {
         let section = read_settings(input.open().settings().bytes()).map_err(Refusal::refused)?;
         let protocols: BTreeMap<String, String> = input
             .providers()
@@ -489,7 +498,7 @@ impl PlaneLife for DecisionsDoor {
     /// `cancel`: the unit the host names is dropped (`PlaneCancelIn::unit`, the key its `arrive`
     /// kept), subject to the SDK's ticket and completion checks.
     fn cancel(
-        instance: Instance<'_, Self>,
+        instance: Instance<'_, Self, busbar_contract::plugin::markers::PlaneKind>,
         input: Lent<'_, PlaneCancelIn>,
         mut out: Out<'_, PlaneCancelOut>,
     ) -> Outcome {

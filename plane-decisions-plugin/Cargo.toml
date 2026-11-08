@@ -24,6 +24,7 @@ busbar-plane-decisions = { path = "../plane-decisions" }
 busbar-contract = { workspace = true }
 
 [dev-dependencies]
+busbar-contract = { workspace = true, features = ["test-seal"] }
 # The conformance test loads the linked door and dlopens the built cdylib over busbar's REAL loader:
 # dev-only, never in the shipped artifact. Ordinary tests assert this product's behavior.
-busbar-plugin-loader = { workspace = true }
+busbar-plugin-loader = { workspace = true, features = ["test-support"] }
