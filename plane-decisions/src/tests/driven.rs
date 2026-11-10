@@ -258,6 +258,41 @@ fn a_null_usage_count_is_absent_not_unreadable() {
 }
 
 #[test]
+fn floor_and_reported_sources_are_distinguished() {
+    // An absent /usage/units is Floor, never Reported.
+    let mut reading = FarEndReading::default();
+    reading.piece(br#"{"usage":{}}"#);
+    let floor = reading.counts(Some(200)).unwrap()[0].unwrap();
+    assert_eq!(floor.source, Source::Floor, "absent units must be Floor");
+    assert_eq!(floor.amount, 1);
+
+    // A null /usage/units is also Floor (absent, not unreadable).
+    let mut reading = FarEndReading::default();
+    reading.piece(br#"{"usage":{"units":null}}"#);
+    let floor = reading.counts(Some(200)).unwrap()[0].unwrap();
+    assert_eq!(floor.source, Source::Floor, "null units must be Floor");
+    assert_eq!(floor.amount, 1);
+
+    // An explicit /usage/units of 1 is Reported, not Floor.
+    let mut reading = FarEndReading::default();
+    reading.piece(br#"{"usage":{"units":1}}"#);
+    let reported = reading.counts(Some(200)).unwrap()[0].unwrap();
+    assert_eq!(
+        reported.source,
+        Source::Reported,
+        "explicit units:1 must be Reported"
+    );
+    assert_eq!(reported.amount, 1);
+
+    // The fee unit is always Reported.
+    let mut reading = FarEndReading::default();
+    reading.piece(br#"{"usage":{"units":5}}"#);
+    let fee = reading.counts(Some(200)).unwrap()[3].unwrap();
+    assert_eq!(fee.source, Source::Reported);
+    assert_eq!(fee.amount, 1);
+}
+
+#[test]
 fn a_success_bills_the_tokens_it_reports() {
     assert_eq!(
         billed(
@@ -560,7 +595,7 @@ fn the_reading_is_the_pointers_reading_wherever_the_pieces_split() {
         br#"{"usage":{"units":[1]}}"#,
         br#"{"usage":{"units":99999999999999999999999999}}"#,
         br#"{"a\"usage":{"units":"no"},"usage":{"output_tokens":-1}}"#,
-        br#"{"usage":"n/a","x":[{"usage":{"units":1}}]}"#,
+        br#"{"usage":"n/a","x":[{"usage":{"units":7}}]}"#,
         br#"[{"usage":{"units":5}}]"#,
     ];
     for body in answers {
@@ -569,6 +604,41 @@ fn the_reading_is_the_pointers_reading_wherever_the_pieces_split() {
             for at in 0..=body.len() {
                 assert_eq!(
                     split_billed(status, body, at),
+                    want,
+                    "{status} {} split at {at}",
+                    String::from_utf8_lossy(body)
+                );
+            }
+        }
+    }
+}
+
+/// Malformed bodies give the same result at every split point: the streaming reader must not
+/// change its reading depending on where a piece boundary falls in broken JSON.
+#[test]
+fn malformed_bodies_are_split_consistent() {
+    let malformed: &[&[u8]] = &[
+        // Truncated mid-value: no closing brace.
+        br#"{"usage":{"units":7"#,
+        // Truncated inside a string.
+        br#"{"error":"trunc"#,
+        // Garbage after the opening brace.
+        br#"{"usage":{"units":3},,}"#,
+        // Array root (not an object): the reader rejects it.
+        br#"[{"usage":{"units":5}}]"#,
+    ];
+    for body in malformed {
+        for status in [200, 500] {
+            // The whole-body reading is the reference for every split.
+            let mut whole = FarEndReading::default();
+            whole.piece(body);
+            let want = whole.counts(Some(status));
+            for at in 0..=body.len() {
+                let mut reading = FarEndReading::default();
+                reading.piece(&body[..at]);
+                reading.piece(&body[at..]);
+                assert_eq!(
+                    reading.counts(Some(status)),
                     want,
                     "{status} {} split at {at}",
                     String::from_utf8_lossy(body)
@@ -653,6 +723,48 @@ fn a_nanojev_answer_bills_its_execution_states() {
             reading.counts(Some(200)).map(|c| c[0].map(|u| u.amount)),
             Ok(Some(12)),
             "split at {at}"
+        );
+    }
+}
+
+#[test]
+fn a_nanojev_200_with_error_bills_nothing() {
+    // A 200 whose body carries `/error` (not null) is not a success: bills nothing.
+    assert_eq!(
+        nanojev_billed(
+            200,
+            br#"{"error":{"code":"x","message":"y"},"execution":{"states":3}}"#
+        ),
+        Ok(vec![]),
+        "a 200 with a non-null /error must not bill"
+    );
+    assert_eq!(
+        nanojev_billed(200, br#"{"error":"down","execution":{"states":5}}"#),
+        Ok(vec![]),
+        "a string /error at 200 must not bill"
+    );
+    // A null /error is not an error: it bills normally.
+    assert_eq!(
+        nanojev_billed(200, br#"{"error":null,"execution":{"states":2}}"#),
+        Ok(vec![(DECISION, 2), (FEE, 1)]),
+        "a null /error at 200 must still bill"
+    );
+    // Non-200 non-500 statuses also bill nothing.
+    assert_eq!(
+        nanojev_billed(429, br#"{"execution":{"states":1}}"#),
+        Ok(vec![]),
+        "a 429 must not bill"
+    );
+    // Split-equivalence for nanojev error-at-200.
+    let body = br#"{"error":{"code":"x"},"execution":{"states":3}}"#;
+    for at in 0..=body.len() {
+        let mut reading = FarEndReading::for_dialect(tail::DIALECT_NANOJEV);
+        reading.piece(&body[..at]);
+        reading.piece(&body[at..]);
+        assert_eq!(
+            reading.counts(Some(200)),
+            Ok([None; 4]),
+            "nanojev error-at-200 split at {at}"
         );
     }
 }

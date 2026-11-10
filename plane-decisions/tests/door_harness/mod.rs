@@ -530,10 +530,18 @@ impl Door {
             route: o.route,
             entry: read(o.pool),
             entry_at: o.pool.ptr as usize,
-            expected: units[..(o.units_written as usize).min(units.len())]
-                .iter()
-                .map(|u| (u.class, u.source, u.amount))
-                .collect(),
+            expected: {
+                let w = o.units_written as usize;
+                assert!(
+                    w <= units.len(),
+                    "units_written ({w}) exceeds units buffer ({})",
+                    units.len()
+                );
+                units[..w]
+                    .iter()
+                    .map(|u| (u.class, u.source, u.amount))
+                    .collect()
+            },
             principal_need: o.principal_need,
             dialect: o.dialect,
         }
@@ -888,14 +896,24 @@ impl Door {
                 std::ptr::from_mut(&mut o).cast(),
             )
         };
-        let n = usize::try_from(o.reply_written).unwrap().min(reply.len());
+        let n = usize::try_from(o.reply_written).unwrap();
+        assert!(
+            n <= reply.len(),
+            "reply_written ({n}) exceeds reply buffer ({})",
+            reply.len()
+        );
         let at = |s: Span| {
             let from = s.offset as usize;
             String::from_utf8_lossy(&arena[from..from + s.len as usize]).into_owned()
         };
         let mut stated: Vec<String> = Vec::new();
         if ret.outcome() == Outcome::Ready {
-            let written = (o.fields_written as usize).min(fields.len());
+            let written = o.fields_written as usize;
+            assert!(
+                written <= fields.len(),
+                "fields_written ({written}) exceeds fields buffer ({})",
+                fields.len()
+            );
             stated.extend(
                 fields[..written]
                     .iter()
