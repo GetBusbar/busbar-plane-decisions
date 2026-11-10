@@ -56,3 +56,8 @@ pub(crate) fn secret_source_driven() -> Vec<String> {
 use super::*;
 #[cfg(linked_section_decisions)]
 pub(crate) mod serve_tests;
+
+/// The owner's minimal valid section for composition-root coverage fixtures.
+pub(crate) fn minimal_valid_config() -> (&'static str, serde_json::Value) {
+    ("decisions", serde_json::json!({"models": {}, "hooks": []}))
+}
