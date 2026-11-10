@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 use crate::root::serve::door_tests::*;
+use crate::root::serve::metrics_fixture::metrics_routes;
 
 #[cfg(feature = "plane-decisions")]
 use std::collections::BTreeMap;
