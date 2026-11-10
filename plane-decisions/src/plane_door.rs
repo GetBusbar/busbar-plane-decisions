@@ -123,7 +123,7 @@ const fn dialect_auth(i: usize) -> DialectAuth {
 
 const SCOPE_KINDS: &[AbiStr] = &[abi_str(tail::SCOPE_KINDS[0])];
 
-const OP_CLASSES: &[OpClass] = &[op_class(0), op_class(1)];
+const OP_CLASSES: &[OpClass] = &[op_class(0), op_class(1), op_class(2)];
 
 /// [`tail::OP_CLASSES`]' class `i`, on the ABI.
 const fn op_class(i: usize) -> OpClass {
@@ -338,6 +338,9 @@ pub fn generation_spec(routes: &BTreeMap<String, ModelRoute>) -> SnapshotSpec {
 /// or its cancel).
 #[derive(Debug, Default)]
 struct Unit {
+    classification: Option<crate::classification::Request>,
+    classification_response: Vec<u8>,
+    classification_overflow: bool,
     /// An ATTEMPT opened the request bound for the far end; the caller's body follows it there.
     attempt: bool,
     /// The far end's answer, read as it is relayed.
@@ -539,10 +542,21 @@ slot!(
         let body = input.body().bytes();
         let generation = plane.routes();
         let routes: &Routes = &generation;
-        let routed = driven::route_named(body, routes, |r| r.dialect == arrived.dialect);
+        let classification = if arrived.op_class == 2 {
+            match crate::classification::Request::parse(body) {
+                Ok(request) => Some(request),
+                Err(why) => {
+                    out.set(|o| &o.refusal, UNROUTED);
+                    out.set(|o| &o.refusal_status, 400);
+                    return out.fail(Refusal::refused(why));
+                }
+            }
+        } else { None };
+        let routed = driven::route_named(body, routes, |r| classification.is_some() || r.dialect == arrived.dialect);
         let (upstream, named) = match routed {
             Ok((model, routed, requested)) => {
                 out.route(ROUTE_DIRECT, model);
+                out.set(|o| &o.dialect, routed.dialect);
                 (routed.upstream.clone(), requested)
             }
             Err(unrouted) => {
@@ -570,6 +584,7 @@ slot!(
         let kept = plane
             .units
             .with_or_insert_within(input.unit(), MAX_UNITS, Unit::default, |kept| {
+                kept.classification = classification;
                 kept.caller = caller;
                 kept.upstream = upstream;
                 kept.routes = Some(std::sync::Arc::clone(&generation));
@@ -696,6 +711,7 @@ fn attempt_piece(
     }
     *unit = Unit {
         attempt: true,
+        classification: unit.classification.take(),
         caller: std::mem::take(&mut unit.caller),
         upstream: unit.upstream.take(),
         routes: unit.routes.take(),
@@ -725,6 +741,19 @@ fn far_end(
     let last = input.flags() & PIECE_LAST != 0;
     if !unit.recall {
         unit.reading.piece(bytes);
+        if unit.classification.is_some() && !unit.classification_overflow {
+            if unit
+                .classification_response
+                .len()
+                .saturating_add(bytes.len())
+                > crate::classification::MAX_BYTES
+            {
+                unit.classification_overflow = true;
+                unit.classification_response.clear();
+            } else {
+                unit.classification_response.extend_from_slice(bytes);
+            }
+        }
 
         if first || (trailers && input.flags() & PIECE_HAS_STATUS != 0) {
             unit.status = Some(input.status_code());
@@ -732,7 +761,7 @@ fn far_end(
     }
     let (mut fields, mut units, mut arena) =
         (input.fields_buf(), input.units_buf(), input.arena_buf());
-    if first {
+    if first && unit.classification.is_none() {
         for f in input.head_fields().iter() {
             let name = f.name().bytes();
             if name.eq_ignore_ascii_case(FIELD_CONTENT_TYPE.as_bytes()) {
@@ -742,6 +771,12 @@ fn far_end(
                 });
             }
         }
+    }
+    if unit.classification.is_some() && last {
+        fields.push(OutField {
+            name: arena.span(FIELD_CONTENT_TYPE.as_bytes()),
+            value: arena.span(CONTENT_TYPE_JSON),
+        });
     }
     let mut unreadable = None;
     if last {
@@ -812,6 +847,32 @@ fn far_end(
         out.set(|o| &o.verdict, VERDICT_COUNT_REFUSED);
         out.set(|o| &o.fault_reason, reason);
     }
+    if let Some(classification) = &unit.classification {
+        if !last {
+            return (Outcome::Ready, false);
+        }
+        let normalized = if !unit.classification_overflow
+            && input.flags() & PIECE_CUT == 0
+            && unit.reading.success(unit.status)
+        {
+            classification.normalize(&unit.classification_response, input.dialect())
+        } else {
+            Err("classifier unavailable")
+        };
+        let (status, response) = match normalized {
+            Ok(bytes) => (200, bytes),
+            Err(_) => (
+                502,
+                crate::codec::error_body(
+                    "classification_unavailable",
+                    "classifier result unavailable or malformed",
+                ),
+            ),
+        };
+        out.set(|o| &o.reply_status, status);
+        let done = owe(unit, &response, EMIT_DONE, input, out);
+        return (Outcome::Ready, done);
+    }
     if first {
         out.set(|o| &o.reply_status, input.status_code());
     }
@@ -849,8 +910,11 @@ slot!(
                     FROM_CALLER => match driven::caller_piece(bytes, input.flags() & PIECE_LAST != 0) {
                         CallerAnswer::Empty => (Outcome::Refused, true),
                         CallerAnswer::Keep if unit.attempt => {
-                            let spliced =
-                                unit.upstream.as_deref().and_then(|up| driven::spliced(bytes, up));
+                            let spliced = if let Some(classification) = &unit.classification {
+                                Some(classification.provider_body(input.dialect(), unit.upstream.as_deref()))
+                            } else {
+                                unit.upstream.as_deref().and_then(|up| driven::spliced(bytes, up))
+                            };
                             owe(unit, spliced.as_deref().unwrap_or(bytes), EMIT_TO_FAR_END, input, &mut out);
                             (Outcome::Ready, false)
                         }

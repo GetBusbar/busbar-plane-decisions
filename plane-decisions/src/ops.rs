@@ -39,6 +39,11 @@ pub const METHODS: &[MethodRow] = &[
         verb: "POST",
         path: PATH_EVALUATE,
     },
+    MethodRow {
+        op: OP_CLASSIFY,
+        verb: "POST",
+        path: crate::classification::PATH,
+    },
 ];
 
 /// Which row a `(verb, path)` pair names, where one does.
@@ -52,3 +57,6 @@ pub fn row_for(verb: &str, path: &str) -> Option<&'static MethodRow> {
 #[cfg(test)]
 #[path = "tests/ops.rs"]
 mod tests;
+
+/// Versioned plugin-level text classification.
+pub const OP_CLASSIFY: OpClassId = OpClassId::new("classify_v1");

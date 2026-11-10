@@ -11,6 +11,7 @@ use busbar_contract::abi::mechanism::call::Outcome;
 use busbar_contract::abi::plane::{PRINCIPAL_REQUIRED, ROUTE_DIRECT};
 use door_harness::{claims, open, open_with, Bufs, Given};
 
+const CLASSIFY: (&str, &str) = ("POST", "/busbar/decisions/v1/classify");
 const SYSTEMONE: (&str, &str) = ("POST", "/v1/systemone");
 
 const TWO: &str = r#"{"models":{"a":{"provider":"typesafe"},"b":{"provider":"typesafe"}}}"#;
@@ -18,12 +19,20 @@ const ONE: &str = r#"{"models":{"jev":{"provider":"typesafe"}}}"#;
 
 #[test]
 fn every_generation_with_a_model_claims_systemone() {
-    assert_eq!(open(TWO).claims, claims(&[SYSTEMONE]), "two models");
-    assert_eq!(open(ONE).claims, claims(&[SYSTEMONE]), "one model");
+    assert_eq!(
+        open(TWO).claims,
+        claims(&[SYSTEMONE, CLASSIFY]),
+        "two models"
+    );
+    assert_eq!(
+        open(ONE).claims,
+        claims(&[SYSTEMONE, CLASSIFY]),
+        "one model"
+    );
     let none = open(r#"{"models":{}}"#);
     assert!(none.claims.is_empty(), "no model claims nothing");
 
-    assert_eq!(none.refresh(TWO, 2), claims(&[SYSTEMONE]));
+    assert_eq!(none.refresh(TWO, 2), claims(&[SYSTEMONE, CLASSIFY]));
     assert!(none.refresh("{}", 3).is_empty());
 }
 

@@ -5,6 +5,7 @@
 #![deny(missing_docs)]
 
 mod claims;
+mod classification;
 mod codec;
 mod config;
 mod driven;

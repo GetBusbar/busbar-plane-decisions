@@ -4,6 +4,17 @@ use super::*;
 mod settings_profile;
 
 use crate::ops;
+fn classification_claim(dialect: u16) -> ClaimSpec {
+    ClaimSpec {
+        refusal_dialect: dialect,
+        ..ClaimSpec::new(
+            "POST",
+            crate::classification::PATH,
+            claims::TRANSPORT,
+            CLAIM_EXACT,
+        )
+    }
+}
 
 /// `section`'s routes, the host stating provider `typesafe`'s protocol `jev`.
 fn routed(section: &DecisionsSection) -> BTreeMap<String, ModelRoute> {
@@ -20,13 +31,16 @@ fn each_dialects_claim_is_published_with_a_model_of_it() {
     };
     assert_eq!(
         snapshot_spec(&[tail::DIALECT_NANOJEV]).claims,
-        vec![evaluate.clone()]
+        vec![evaluate.clone(), classification_claim(1)]
     );
     assert_eq!(
         snapshot_spec(&[tail::DIALECT_NANOJEV, tail::DIALECT_JEV]).claims,
-        vec![jev.clone(), evaluate]
+        vec![jev.clone(), evaluate, classification_claim(1)]
     );
-    assert_eq!(snapshot_spec(&[tail::DIALECT_JEV]).claims, vec![jev]);
+    assert_eq!(
+        snapshot_spec(&[tail::DIALECT_JEV]).claims,
+        vec![jev, classification_claim(0)]
+    );
 }
 
 #[test]
@@ -106,12 +120,10 @@ fn one_or_more_models_claim_systemone_and_none_claims_nothing() {
     let one = snapshot_spec(&[tail::DIALECT_JEV]);
     assert_eq!(
         one.claims,
-        vec![ClaimSpec::new(
-            "POST",
-            ops::PATH_SYSTEMONE,
-            claims::TRANSPORT,
-            CLAIM_EXACT
-        )]
+        vec![
+            ClaimSpec::new("POST", ops::PATH_SYSTEMONE, claims::TRANSPORT, CLAIM_EXACT),
+            classification_claim(0)
+        ]
     );
     assert!(one.admin_routes.is_empty());
 

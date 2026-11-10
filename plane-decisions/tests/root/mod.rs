@@ -61,3 +61,7 @@ pub(crate) mod serve_tests;
 pub(crate) fn minimal_valid_config() -> (&'static str, serde_json::Value) {
     ("decisions", serde_json::json!({"models": {}, "hooks": []}))
 }
+
+// Actual product composition: both plane owners and the separately built complexity cdylib.
+#[cfg(all(linked_section_decisions, feature = "plane-llm"))]
+mod confidence_routing;

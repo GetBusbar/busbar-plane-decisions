@@ -11,6 +11,7 @@ use busbar_contract::abi::mechanism::call::Outcome;
 use busbar_contract::abi::plane::{ROUTE_DIRECT, UNITS_FLOOR, UNITS_REPORTED};
 use door_harness::{claims, open, open_with, validate, Bufs, Given};
 
+const CLASSIFY: (&str, &str) = ("POST", "/busbar/decisions/v1/classify");
 const SYSTEMONE: (&str, &str) = ("POST", "/v1/systemone");
 const EVALUATE: (&str, &str) = ("POST", "/api/evaluate");
 
@@ -20,21 +21,21 @@ const BOTH: &str =
 
 #[test]
 fn evaluate_is_claimed_with_a_nanojev_model() {
-    assert_eq!(open(BOTH).claims, claims(&[SYSTEMONE, EVALUATE]));
+    assert_eq!(open(BOTH).claims, claims(&[SYSTEMONE, EVALUATE, CLASSIFY]));
     let by_provider = open_with(
         r#"{"models":{"n":{"provider":"np"}}}"#,
         &[("np", "nanojev")],
     );
-    assert_eq!(by_provider.claims, claims(&[EVALUATE]));
+    assert_eq!(by_provider.claims, claims(&[EVALUATE, CLASSIFY]));
     let jev_only = open_with(
         r#"{"models":{"j":{"provider":"typesafe"}}}"#,
         &[("typesafe", "jev")],
     );
-    assert_eq!(jev_only.claims, claims(&[SYSTEMONE]));
+    assert_eq!(jev_only.claims, claims(&[SYSTEMONE, CLASSIFY]));
 
     assert_eq!(
         by_provider.refresh(r#"{"models":{"n2":{"provider":"np"}}}"#, 2),
-        claims(&[EVALUATE])
+        claims(&[EVALUATE, CLASSIFY])
     );
 }
 

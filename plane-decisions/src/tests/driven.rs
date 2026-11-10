@@ -360,10 +360,26 @@ fn one_or_more_models_mount_the_claim() {
     let systemone = ("POST", ops::PATH_SYSTEMONE, tail::DIALECT_JEV);
     let evaluate = ("POST", ops::PATH_EVALUATE, tail::DIALECT_NANOJEV);
     assert!(served_claims(&[]).is_empty());
-    assert_eq!(served_claims(&[0]), vec![systemone]);
-    assert_eq!(served_claims(&[0, 0]), vec![systemone]);
-    assert_eq!(served_claims(&[1]), vec![evaluate]);
-    assert_eq!(served_claims(&[1, 0, 1]), vec![systemone, evaluate]);
+    assert_eq!(
+        served_claims(&[0]),
+        vec![systemone, ("POST", crate::classification::PATH, 0)]
+    );
+    assert_eq!(
+        served_claims(&[0, 0]),
+        vec![systemone, ("POST", crate::classification::PATH, 0)]
+    );
+    assert_eq!(
+        served_claims(&[1]),
+        vec![evaluate, ("POST", crate::classification::PATH, 1)]
+    );
+    assert_eq!(
+        served_claims(&[1, 0, 1]),
+        vec![
+            systemone,
+            evaluate,
+            ("POST", crate::classification::PATH, 1)
+        ]
+    );
     assert_eq!(dialect_of("nanojev"), Some(tail::DIALECT_NANOJEV));
     assert_eq!(dialect_of("anthropic"), None);
 }

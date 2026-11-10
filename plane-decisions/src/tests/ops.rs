@@ -44,7 +44,11 @@ fn row_for_matches_evaluate() {
 
 #[test]
 fn the_method_table_is_the_claim_table() {
-    let methods: Vec<_> = METHODS.iter().map(|r| (r.verb, r.path)).collect();
+    let methods: Vec<_> = METHODS
+        .iter()
+        .filter(|r| r.op != OP_CLASSIFY)
+        .map(|r| (r.verb, r.path))
+        .collect();
     let claims: Vec<_> = crate::driven::tail::CLAIMS
         .iter()
         .map(|(verb, path, _)| (*verb, *path))

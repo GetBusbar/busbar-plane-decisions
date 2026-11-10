@@ -69,3 +69,19 @@ cargo test --workspace --locked
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+## Versioned text classification
+
+`POST /busbar/decisions/v1/classify` is a decisions-plugin operation (`classify_v1`), served whenever a decision model is configured. Normal authentication, model authorization, budgets and usage metering apply. It accepts a maximum 64 KiB document:
+
+```json
+{"version":1,"model":"classifier","messages":[{"role":"user","text":"Summarize this sentence"}],"tiers":[{"label":"easy","description":"Simple requests","examples":[]},{"label":"hard","description":"Requests requiring several reasoning steps","examples":[]}]}
+```
+
+The bounded window must end in a nonempty user message, contain only user/assistant roles and at most 33 messages, and name 2–32 distinct tiers. Jev routes to its native `questions.complexity` Choice; NanoJev routes one `states` item to `/api/evaluate`. NanoJev's strict batch envelope contains only `states`; routing model selection stays in host custody. The plane buffers at most 64 KiB of provider response and returns only `version`, `label`, optional `confidence`/`probabilities`, `source` and `schema`. The result schema is `jev-choice-v1` or `nanojev-choice-v1`. Unknown labels, invalid probabilities, unsupported response shapes and overflow produce a bounded generic 502 response. Reported upstream usage still bills even if normalization fails. Ordinary `/v1/systemone` and `/api/evaluate` requests retain byte-faithful relay behavior.
+
+Jev confidence uses its documented explicit field when supplied; absent confidence stays absent. Native NanoJev has no recognized confidence field, so its normalized confidence remains absent. No formula is inferred from arbitrary scores, and NanoJev probabilities are not claimed to be calibrated. Consumers such as `busbar-hook-complexity` default to abstention on missing confidence.
+
+Provider contracts: [TypeSafe System One API](https://docs.typesafe.ai/api/system-one), [NanoJev inference input and output implementation](https://github.com/TianyuCodings/NanoJev/blob/main/scripts/predict_toy_decisions.py). Fixtures follow the Choice schemas inspected on 10 November 2026; unsupported provider variants fail normalization.
+
+The owner-supplied root cell `assembled_confidence_routing_preserves_custody_usage_and_fallback` composes the actual LLM and Decisions doors with a signed dropped complexity hook. It requires the fresh complexity cdylib in `BUSBAR_TEST_COMPLEXITY_CDYLIB`, declared by that product's wrapper metadata, plus the root's ordinary Store/transport fixture inputs. Run this named case through the consuming distribution's binary test harness. Synthetic upstream answers cover normalization, absent grants, incomplete modality projection, independent child usage and authorized provider fallback; they make no classifier-quality claim.

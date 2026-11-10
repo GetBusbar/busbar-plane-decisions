@@ -28,3 +28,6 @@ busbar-contract = { workspace = true, features = ["test-seal"] }
 # The conformance test loads the linked door and dlopens the built cdylib over busbar's REAL loader:
 # dev-only, never in the shipped artifact. Ordinary tests assert this product's behavior.
 busbar-plugin-loader = { workspace = true, features = ["test-support"] }
+
+[package.metadata.busbar.test-artifacts]
+cdylib = ["BUSBAR_TEST_DECISIONS_CDYLIB"]

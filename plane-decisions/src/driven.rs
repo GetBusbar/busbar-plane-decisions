@@ -56,7 +56,7 @@ pub mod tail {
 
     /// The op classes this plane serves, in index order: each dialect's decision call (see
     /// [`crate::ops`]).
-    pub const OP_CLASSES: &[OpClassId] = &[ops::OP_SYSTEMONE, ops::OP_EVALUATE];
+    pub const OP_CLASSES: &[OpClassId] = &[ops::OP_SYSTEMONE, ops::OP_EVALUATE, ops::OP_CLASSIFY];
 
     /// The billable classes, in index order, each with its family: the decision count, the fee
     /// unit (also a class: the tail check holds `fee_units ⊆ billable_classes`), and the far end's
@@ -115,11 +115,15 @@ pub mod tail {
 /// only the routes of a dialect some model uses.
 #[must_use]
 pub fn served_claims(dialects: &[u32]) -> Vec<(&'static str, &'static str, u32)> {
-    tail::CLAIMS
+    let mut claims: Vec<_> = tail::CLAIMS
         .iter()
         .filter(|(_, _, dialect)| dialects.contains(dialect))
         .copied()
-        .collect()
+        .collect();
+    if let Some(dialect) = dialects.first() {
+        claims.push(("POST", crate::classification::PATH, *dialect));
+    }
+    claims
 }
 
 /// A protocol's index in [`tail::DIALECTS`], where this plane speaks it.
@@ -1045,6 +1049,12 @@ pub struct Arrived {
 #[must_use]
 pub fn arrive(verb: &str, target: &str) -> Option<Arrived> {
     let target = path_of(target);
+    if target == crate::classification::PATH && verb.eq_ignore_ascii_case("POST") {
+        return Some(Arrived {
+            op_class: 2,
+            dialect: 0,
+        });
+    }
     let row = ops::row_for(verb, target)?;
     let op_class = tail::OP_CLASSES.iter().position(|op| *op == row.op)?;
     let dialect = tail::CLAIMS
