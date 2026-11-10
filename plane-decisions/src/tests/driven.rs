@@ -215,7 +215,6 @@ fn an_unrepresentable_usage_member_fails_loudly() {
         "9223372036854.775808".to_string(),
         "9223372036855".to_string(),
         "\"7\"".to_string(),
-        "null".to_string(),
         "{}".to_string(),
         (i64::MAX as u64 + 1).to_string(),
         u64::MAX.to_string(),
@@ -230,6 +229,31 @@ fn an_unrepresentable_usage_member_fails_loudly() {
     assert_eq!(
         billed(200, br#"{"usage":{"units":1,"output_tokens":-2}}"#),
         Err(UnreadableUsage(crate::codec::PTR_USAGE_OUTPUT_TOKENS))
+    );
+}
+
+#[test]
+fn a_null_usage_count_is_absent_not_unreadable() {
+    // null at a non-required count is absent: it bills the floor, not refused.
+    assert_eq!(
+        billed(200, br#"{"usage":{"units":null}}"#),
+        Ok(vec![(DECISION, 1), (FEE, 1)])
+    );
+    // null tokens with a present decision count: the decision count is reported, tokens absent.
+    assert_eq!(
+        billed(
+            200,
+            br#"{"usage":{"units":3,"input_tokens":null,"output_tokens":null}}"#
+        ),
+        Ok(vec![(DECISION, 3), (FEE, 1)])
+    );
+    // null tokens with an absent decision count: floor of one decision.
+    assert_eq!(
+        billed(
+            200,
+            br#"{"usage":{"input_tokens":null,"output_tokens":null}}"#
+        ),
+        Ok(vec![(DECISION, 1), (FEE, 1)])
     );
 }
 
@@ -284,11 +308,11 @@ fn a_refusal_carries_the_kernel_text_in_the_dialect_shape() {
     );
     assert_eq!(
         refusal_body(503, "x"),
-        br#"{"error":{"code":"unsupported_operation","message":"x"}}"#
+        br#"{"error":{"code":"internal","message":"x"}}"#
     );
     assert_eq!(
         refusal_body(429, "x"),
-        br#"{"error":{"code":"unsupported_operation","message":"x"}}"#
+        br#"{"error":{"code":"rate_limit","message":"x"}}"#
     );
     assert_eq!(
         refusal_body(422, "x"),
@@ -1464,13 +1488,7 @@ fn exact_decimal_counts_survive_every_fragment_boundary() {
 
 #[test]
 fn refused_decision_counts_never_become_a_floor() {
-    for raw in [
-        "0.0000001",
-        "9223372036854.775808",
-        "9223372036855",
-        "-1",
-        "null",
-    ] {
+    for raw in ["0.0000001", "9223372036854.775808", "9223372036855", "-1"] {
         let body =
             format!(r#"{{"usage":{{"units":{raw},"input_tokens":27.1,"output_tokens":0}}}}"#);
         let mut reading = FarEndReading::default();

@@ -1359,7 +1359,7 @@ fn a_refusal_with_a_wait_states_it_as_retry_after() {
     assert_eq!(outcome, Outcome::Ready);
     assert_eq!(
         body,
-        br#"{"error":{"code":"unsupported_operation","message":"slow down"}}"#
+        br#"{"error":{"code":"rate_limit","message":"slow down"}}"#
     );
     assert!(stated.iter().any(|f| f == "retry-after: 17"), "{stated:?}");
     let (_, _, none) = door.refusal_waiting(0, 429, "slow down", false, 0);

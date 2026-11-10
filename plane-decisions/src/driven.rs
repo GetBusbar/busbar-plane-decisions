@@ -1312,7 +1312,9 @@ impl FarEndReading {
         match slot {
             Slot::Error => self.error = Some(raw != b"null"),
             Slot::Count(i) => {
-                self.members[i] = if self.scalar_len > SCALAR_CAP - 1 {
+                self.members[i] = if raw == b"null" {
+                    Member::Absent
+                } else if self.scalar_len > SCALAR_CAP - 1 {
                     Member::Unreadable
                 } else {
                     count(raw).map_or(Member::Unreadable, Member::Exact)
@@ -1604,7 +1606,7 @@ fn reported(class: u32, count: Count) -> Units {
 
 /// THE CALLER FIELDS THE FAR END NEVER RECEIVES, besides the credential carriers: the ones the
 /// plane writes itself (the document type) and the ones naming the hop (`host`).
-pub const NOT_RELAYED: &[&str] = &[FIELD_CONTENT_TYPE, "host"];
+pub const NOT_RELAYED: &[&str] = &[FIELD_CONTENT_TYPE, "host", "accept-encoding"];
 
 /// The caller's fields the far end receives, held in one buffer per unit: each field's name
 /// (lowercased) and value, back to back, and where each ends.
@@ -1667,10 +1669,11 @@ where
 #[must_use]
 pub fn refusal_body(status: u16, text: &str) -> Vec<u8> {
     let code = match status {
-        403 | 429 => "unsupported_operation",
+        403 => "unsupported_operation",
         404 => "invalid_params",
+        429 => "rate_limit",
         400..=499 => "invalid_request",
-        500 => "internal",
+        500..=599 => "internal",
         _ => "unsupported_operation",
     };
     error_body(code, text)
