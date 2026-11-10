@@ -35,11 +35,29 @@ pub(crate) const NOT_APPLICABLE: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// THE SECRET-SOURCE SCAN'S DRIVEN DOOR (the composition root's `secret_source.rs`, which holds
-/// every linked door plane to a driver): the Statement names the cells in this file drive.
+/// Actual plane composition cases that scan source refusals at the caller boundary.
+#[cfg(linked_section_decisions)]
+mod secret_source;
+
 pub(crate) fn secret_source_driven() -> Vec<String> {
-    Vec::new()
+    #[cfg(linked_section_decisions)]
+    {
+        vec![serve_tests::decisions_name()]
+    }
+    #[cfg(not(linked_section_decisions))]
+    {
+        Vec::new()
+    }
 }
 
 // The four hook integration cases and their private fixture scaffolding moved to
 // dist/default/tests/product/decisions_hooks.rs in the actual distribution.
+
+use super::*;
+#[cfg(linked_section_decisions)]
+pub(crate) mod serve_tests;
+
+/// The owner's minimal valid section for composition-root coverage fixtures.
+pub(crate) fn minimal_valid_config() -> (&'static str, serde_json::Value) {
+    ("decisions", serde_json::json!({"models": {}, "hooks": []}))
+}
