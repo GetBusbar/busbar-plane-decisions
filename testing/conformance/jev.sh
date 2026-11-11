@@ -14,8 +14,8 @@
 #   negative control  the reference relay with one deliberate deviation at a time: every deviation
 #                     must turn the wire check it breaks red.
 #   subject           busbar at the pin ($BUSBAR_CHECKOUT, its dist/default composition) with THIS
-#                     checkout's plane patched in by a run-time cargo --config (no manifest is
-#                     written), booted on loopback three times (one model; two models with an
+#                     checkout's plane patched in the staged manifest (the original is unchanged),
+#                     booted on loopback three times (one model; two models with an
 #                     upstream_model; a jev and a nanojev model): every wire check and every busbar
 #                     check (ledger, audit, the Teller-step gating checks) must pass.
 #
@@ -80,23 +80,9 @@ if ! manifest="$(bash "$here/testing/jev-conformance/compose.sh" "$BUSBAR_CHECKO
   exit 1
 fi
 cat "$out/compose.log" >&2
-# Cargo keys a [patch] by the dependency's source URL, so the patch names the git source the staged
-# distribution pulls this plane from (its `busbar-plane-decisions = { git = ... }` row), whatever host
-# that is at the pin.
-source="$(python3 -I - "$manifest" <<'PY'
-import re, sys
-m = re.search(r'^busbar-plane-decisions\s*=\s*\{[^}\n]*\bgit\s*=\s*"([^"]+)"', open(sys.argv[1]).read(), re.M)
-print(m.group(1) if m else "")
-PY
-)"
-if [ -z "$source" ]; then
-  verdict fail "the staged distribution ($manifest) names no git source for busbar-plane-decisions to patch"
-  exit 1
-fi
-patch="patch.\"$source\".busbar-plane-decisions.path=\"$here/plane-decisions\""
+# The staged manifest carries the patch so nested locked Cargo metadata sees the same graph.
 if CARGO_PROFILE_DEV_DEBUG=0 cargo build --manifest-path "$manifest" --bin busbar \
-      --target-dir "$target" \
-      --config "$patch" >"$out/subject-build.log" 2>&1; then
+      --target-dir "$target" >"$out/subject-build.log" 2>&1; then
   bin="$target/debug/busbar"
   [ -x "$bin" ] || { say "built binary missing at $bin"; bin=""; }
 fi
@@ -108,7 +94,7 @@ fi
 # The plane busbar links must be this checkout's, not the pin's: the patch is refused silently
 # when it matches nothing, so the build log must show it compiled from here.
 if ! grep -q "busbar-plane-decisions .*($here/plane-decisions)" "$out/subject-build.log"; then
-  if ! cargo tree --manifest-path "$manifest" -i busbar-plane-decisions --config "$patch" 2>/dev/null \
+  if ! cargo tree --locked --manifest-path "$manifest" -i busbar-plane-decisions 2>/dev/null \
         | head -1 | grep -q "($here/plane-decisions)"; then
     verdict fail "the subject did not link this checkout's plane (the patch matched nothing)"
     exit 1

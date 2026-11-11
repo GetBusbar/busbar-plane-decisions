@@ -11,12 +11,14 @@
 # THIS plane keeps it, the way busbar's dist names it once it pins this plane (busbar #1912):
 #   linked-entry  plane-decisions  the module the door is exported from: the crate root when the
 #                                  plane has no `pub mod plane_door` (it re-exports `door` there)
-# Nothing else changes: busbar's code, its other rows and its lockfile are the pin's.
+# The staged manifest also patches this plane's git source to this checkout. Keeping the patch in
+# the manifest makes it visible to both the outer build and build-script Cargo metadata queries.
+# Busbar's code, its other rows and the initial lockfile are the pin's.
 set -euo pipefail
 
 rewrite() { # <manifest> <plane crate dir>
   python3 -I - "$1" "$2" >&2 <<'PY'
-import os, re, sys
+import hashlib, json, os, re, sys, tomllib
 manifest, plane = sys.argv[1:3]
 text = open(manifest).read()
 lib = open(os.path.join(plane, "src", "lib.rs")).read()
@@ -41,7 +43,17 @@ if m.group(1) != want:
     print(f'compose: [{table}] {key} = "{want}" (the pin named "{m.group(1)}")')
 else:
     print(f'compose: [{table}] {key} = "{want}" (unchanged)')
+document = tomllib.loads(text)
+source = document.get("workspace", {}).get("dependencies", {}).get("busbar-plane-decisions", {}).get("git")
+if not source:
+    sys.exit("compose: the staged distribution names no git source for busbar-plane-decisions to patch")
+if source in document.get("patch", {}):
+    sys.exit(f"compose: the staged distribution already patches {source}")
+text += (f'\n[patch.{json.dumps(source)}]\n'
+         f'busbar-plane-decisions = {{ path = {json.dumps(plane)} }}\n')
+print(f"compose: patched {source} busbar-plane-decisions to {plane}")
 open(manifest, "w").write(text)
+print(f"compose: staged manifest sha256 {hashlib.sha256(text.encode()).hexdigest()}")
 PY
 }
 

@@ -1,8 +1,11 @@
-"""Focused regressions for failure isolation and target resource ownership."""
+"""Focused regressions for subject composition, failure isolation and resource ownership."""
 import contextlib
 import importlib.util
 import io
+import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -10,6 +13,61 @@ from unittest.mock import Mock, patch
 spec = importlib.util.spec_from_file_location("judge", Path(__file__).with_name("judge.py"))
 judge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(judge)
+
+
+class ComposeTests(unittest.TestCase):
+    def test_staged_patch_is_shared_with_nested_locked_metadata(self):
+        # No compilation or network: a tiny local git dependency reproduces the subject graph.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = dict(os.environ, CARGO_HOME=str(root / "cargo-home"))
+
+            def run(*args, cwd=root):
+                return subprocess.run(args, cwd=cwd, env=env, check=True,
+                                      capture_output=True, text=True).stdout
+
+            package = '[package]\nname="busbar-plane-decisions"\nversion="1.0.0"\nedition="2021"\n'
+            for name in ("upstream", "plane"):
+                crate = root / name
+                (crate / "src").mkdir(parents=True)
+                (crate / "Cargo.toml").write_text(package)
+                (crate / "src/lib.rs").write_text('pub use plane_door::door;\n')
+            upstream = root / "upstream"
+            run("git", "init", "-q", str(upstream))
+            run("git", "-C", str(upstream), "add", ".")
+            run("git", "-C", str(upstream), "-c", "user.name=Fixture", "-c",
+                "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                "-c", "core.hooksPath=/dev/null", "commit", "-qm", "Fixture")
+            checkout = root / "checkout"
+            distribution = checkout / "dist/default"
+            (distribution / "src").mkdir(parents=True)
+            (distribution / "src/lib.rs").write_text("")
+            manifest = distribution / "Cargo.toml"
+            manifest.write_text(
+                '[package]\nname="subject"\nversion="1.0.0"\nedition="2021"\n'
+                '[package.metadata.busbar.linked-entry]\nplane-decisions="busbar_plane_decisions"\n'
+                '[workspace]\n[workspace.dependencies]\n'
+                f'busbar-plane-decisions={{git={json.dumps(upstream.as_uri())}}}\n'
+                '[dependencies]\nbusbar-plane-decisions={workspace=true}\n')
+            run("cargo", "metadata", "--format-version=1", cwd=distribution)
+            original_manifest = manifest.read_bytes()
+            original_lock = (distribution / "Cargo.lock").read_bytes()
+            staged = Path(run("bash", str(Path(__file__).with_name("compose.sh")),
+                              str(checkout), str(root / "plane"), str(root / "staged")).strip())
+            # The outer build resolves its patch, then the build script uses --locked with no
+            # command-line overrides. Both must name the candidate, and the lock must stay fixed.
+            outer = json.loads(run("cargo", "metadata", "--offline", "--format-version=1",
+                                   "--manifest-path", str(staged)))
+            lock = staged.with_name("Cargo.lock").read_bytes()
+            nested = json.loads(run("cargo", "metadata", "--offline", "--locked",
+                                    "--all-features", "--format-version=1", cwd=staged.parent))
+            for metadata in (outer, nested):
+                plane = next(p for p in metadata["packages"] if p["name"] == "busbar-plane-decisions")
+                self.assertEqual(Path(plane["manifest_path"]), root / "plane/Cargo.toml")
+                self.assertIsNone(plane["source"])
+            self.assertEqual(staged.with_name("Cargo.lock").read_bytes(), lock)
+            self.assertEqual(manifest.read_bytes(), original_manifest)
+            self.assertEqual((distribution / "Cargo.lock").read_bytes(), original_lock)
 
 
 class JudgeTests(unittest.TestCase):
