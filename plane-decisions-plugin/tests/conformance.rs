@@ -310,7 +310,10 @@ fn decisions_lifecycle_requests_and_short_buffers_match_both_real_doors() {
                 .iter()
                 .map(|c| (c.verb.as_str(), c.target.as_str()))
                 .collect::<Vec<_>>(),
-            vec![("POST", "/v1/systemone")]
+            vec![
+                ("POST", "/v1/systemone"),
+                ("POST", "/busbar/decisions/v1/classify")
+            ]
         );
         let ready_pin = u64::from(p.has_ready());
         let before = first(&p);
@@ -594,7 +597,10 @@ fn decisions_lifecycle_requests_and_short_buffers_match_both_real_doors() {
                 .iter()
                 .map(|c| (c.verb.as_str(), c.target.as_str()))
                 .collect::<Vec<_>>(),
-            vec![("POST", "/v1/systemone")]
+            vec![
+                ("POST", "/v1/systemone"),
+                ("POST", "/busbar/decisions/v1/classify")
+            ]
         );
         let mut retire = Frame::new(
             GenIn {

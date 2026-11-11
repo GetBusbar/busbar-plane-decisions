@@ -25,14 +25,19 @@ const SIGNED: &str = "plane-decisions/declares.json";
 #[test]
 fn the_release_signs_the_statements_declares_file() {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
-    // The recipe itself, when the busbar tree is at hand (`BUSBAR_PLUGINS_YAML`, or a sibling
-    // checkout): its entry for this repo names the same file.
+    // Read the explicit recipe, the admitted host checkout, or a local sibling checkout.
+    // Its entry for this repo must name the same file.
     let named_path = std::env::var("BUSBAR_PLUGINS_YAML").ok();
     let path = named_path
         .clone()
+        .or_else(|| {
+            std::env::var("BUSBAR_CHECKOUT")
+                .ok()
+                .map(|host| format!("{host}/plugins.yaml"))
+        })
         .unwrap_or_else(|| format!("{root}/../busbar/plugins.yaml"));
     let read = std::fs::read_to_string(&path);
-    // A recipe named outright, or any CI run (which checks busbar out beside the plugin), must be
+    // A recipe named outright, or any CI run (which supplies the admitted host checkout), must be
     // read: only a local run without the busbar tree may pass without judging it, and says so.
     let required = named_path.is_some() || std::env::var_os("CI").is_some();
     match &read {
