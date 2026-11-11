@@ -20,11 +20,14 @@ class ComposeTests(unittest.TestCase):
         # No compilation or network: a tiny local git dependency reproduces the subject graph.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            env = dict(os.environ, CARGO_HOME=str(root / "cargo-home"))
+            env = dict(os.environ, CARGO_HOME=str(root / "cargo-home"),
+                       CARGO_NET_OFFLINE="true", CARGO_NET_GIT_FETCH_WITH_CLI="true",
+                       GIT_ALLOW_PROTOCOL="file")
 
             def run(*args, cwd=root):
-                return subprocess.run(args, cwd=cwd, env=env, check=True,
-                                      capture_output=True, text=True).stdout
+                result = subprocess.run(args, cwd=cwd, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return result.stdout
 
             package = '[package]\nname="busbar-plane-decisions"\nversion="1.0.0"\nedition="2021"\n'
             for name in ("upstream", "plane"):
@@ -49,7 +52,10 @@ class ComposeTests(unittest.TestCase):
                 '[workspace]\n[workspace.dependencies]\n'
                 f'busbar-plane-decisions={{git={json.dumps(upstream.as_uri())}}}\n'
                 '[dependencies]\nbusbar-plane-decisions={workspace=true}\n')
-            run("cargo", "metadata", "--format-version=1", cwd=distribution)
+            # Seed only this synthetic file:// repository; Git forbids every network protocol.
+            # Cargo's offline mode also forbids uncached local Git, so override it for seeding.
+            run("cargo", "metadata", "--config", "net.offline=false",
+                "--format-version=1", cwd=distribution)
             original_manifest = manifest.read_bytes()
             original_lock = (distribution / "Cargo.lock").read_bytes()
             staged = Path(run("bash", str(Path(__file__).with_name("compose.sh")),
@@ -71,6 +77,30 @@ class ComposeTests(unittest.TestCase):
 
 
 class JudgeTests(unittest.TestCase):
+    def test_admission_quota_refusal_preserves_all_gating_checks(self):
+        for code, hops, spend, requests, passes in (
+                ("rate_limit", 0, (1, 100), 1, True),
+                ("unsupported_operation", 0, (1, 100), 1, False),
+                ("rate_limit", 1, (1, 100), 1, False),
+                ("rate_limit", 0, (2, 200), 1, False),
+                ("rate_limit", 0, (1, 100), 2, False)):
+            with self.subTest(code=code, hops=hops, spend=spend, requests=requests):
+                target = Mock()
+                target.mint.return_value = ("Bearer fixture", "key")
+                target.call.side_effect = [judge.Call(200, judge.SUCCESS, 1),
+                    judge.Call(429, json.dumps({"error": {"code": code, "message": "quota"}}).encode(), hops)]
+                usage = iter((1, requests))
+                target.admin_get.side_effect = lambda path: (
+                    json.dumps({"requests": next(usage)}).encode() if path.endswith("/usage") else b"{}")
+                with patch.object(judge, "ledger_spend", side_effect=[(0, 0), (1, 100), spend]), \
+                        patch.object(judge, "settled", side_effect=lambda read, done: read()), \
+                        patch.object(judge, "run_checks", side_effect=lambda pairs: dict(pairs)["h2-admit-refusal"]()):
+                    if passes:
+                        judge.busbar_checks(target)
+                    else:
+                        with self.assertRaises(judge.Red):
+                            judge.busbar_checks(target)
+
     def test_failed_check_does_not_skip_later_checks(self):
         later = Mock()
         failed = Mock(side_effect=ConnectionResetError("reset"))

@@ -577,7 +577,7 @@ def busbar_checks(t):
         t.far.reply((200, SUCCESS))
         second = t.call(PATH, REQUEST, bearer=bearer)
         after = settled(lambda: spend(None), lambda _: False)
-        judge_refused_before_dial(second, 429, "unsupported_operation")
+        judge_refused_before_dial(second, 429, "rate_limit")
         unchanged(before, after)
         now = requests_of(key)
         check(was == now, lambda: f"the key's usage counts {was} request(s) before the refusal and {now} after; a refused unit counts none")
